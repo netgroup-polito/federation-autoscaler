@@ -1,0 +1,9 @@
+apiVersion: broker.federation-autoscaler.io/v1alpha1
+kind: ClusterAdvertisement
+metadata:
+  labels:
+    app.kubernetes.io/name: federation-autoscaler
+    app.kubernetes.io/managed-by: kustomize
+  name: clusteradvertisement-sample
+spec:
+  # TODO(user): Add fields here

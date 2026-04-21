@@ -1,0 +1,32 @@
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: manager-role
+rules:
+- apiGroups:
+  - broker.federation-autoscaler.io
+  resources:
+  - clusteradvertisements
+  verbs:
+  - create
+  - delete
+  - get
+  - list
+  - patch
+  - update
+  - watch
+- apiGroups:
+  - broker.federation-autoscaler.io
+  resources:
+  - clusteradvertisements/finalizers
+  verbs:
+  - update
+- apiGroups:
+  - broker.federation-autoscaler.io
+  resources:
+  - clusteradvertisements/status
+  verbs:
+  - get
+  - patch
+  - update

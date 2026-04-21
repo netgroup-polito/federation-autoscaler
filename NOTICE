@@ -1,0 +1,16 @@
+federation-autoscaler
+Copyright 2026 Politecnico di Torino - NetGroup
+
+This product includes software developed at
+Politecnico di Torino (https://netgroup.polito.it/).
+
+---
+
+This project includes software originally developed at
+Politecnico di Torino - NetGroup as part of the following projects:
+
+  k8s-resource-brokering
+    https://github.com/netgroup-polito/k8s-resource-brokering
+
+  Multi-Cluster-Autoscaler
+    https://github.com/netgroup-polito/Multi-Cluster-Autoscaler
