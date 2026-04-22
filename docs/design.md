@@ -40,7 +40,7 @@ Organizations operating in the computing continuum — spanning cloud, edge, and
 - Scale down and release borrowed resources when no longer needed
 - **Operate even when consumer and provider clusters are behind NAT, firewalls, or otherwise unreachable from the internet** — only the central Broker requires a publicly reachable endpoint
 
-This proposal defines a complete architecture that achieves this by combining **Kubernetes Cluster Autoscaler** (unmodified, vanilla), a **custom gRPC Cloud Provider**, a **central Resource Broker**, per-cluster **Resource Agents**, and **Liqo** for multi-cluster networking and virtual node creation.
+This proposal defines a complete architecture that achieves this by combining **Kubernetes Cluster Autoscaler** (unmodified, vanilla), a **custom gRPC Cloud Provider**, a **central Resource Broker**, a per-cluster **Consumer Agent** or **Provider Agent** (one role per cluster), and **Liqo** for multi-cluster networking and virtual node creation.
 
 ---
 
@@ -57,7 +57,7 @@ This proposal defines a complete architecture that achieves this by combining **
 - **G7:** Handle failures gracefully with timeouts, heartbeats, and reconciliation loops
 - **G8:** Provide a secure communication channel between all components using mTLS
 - **G9:** **Agent-initiated communication only**: the Broker never opens a connection toward a consumer or provider cluster. Every byte that reaches an agent is the response body of an HTTP call the agent initiated. Consumers and providers therefore need only outbound egress to the Broker's URL.
-- **G10:** The gRPC server never talks to the Broker directly — it delegates every cross-cluster interaction to its co-located Resource Agent over an in-cluster REST API.
+- **G10:** The gRPC server never talks to the Broker directly — it delegates every cross-cluster interaction to its co-located Consumer Agent over an in-cluster REST API.
 
 ### Non-Goals
 
@@ -79,9 +79,10 @@ The system consists of three deployment domains connected by a strict asymmetric
 | Channel | Initiator | Style | Rationale |
 | --- | --- | --- | --- |
 | CA ↔ gRPC Server | CA | gRPC, in-cluster | upstream `externalgrpc.proto` contract |
-| gRPC Server ↔ Local Agent | gRPC Server | REST, in-cluster, **push-synchronous** | fast, low-latency local loop |
-| Agent ↔ Broker | **Agent only** | REST over mTLS, **polling + sync POSTs** | works from any NATed cluster with egress to the Broker |
-| Broker → Agent | **never happens** | — | enables unreachable consumer/provider clusters |
+| gRPC Server ↔ Consumer Agent | gRPC Server | REST, in-cluster, **push-synchronous** | fast, low-latency local loop |
+| Consumer Agent ↔ Broker | **Consumer Agent only** | REST over mTLS, **5 s polling + sync POSTs** (heartbeat, reservations) | works from any NATed consumer cluster with egress to the Broker |
+| Provider Agent ↔ Broker | **Provider Agent only** | REST over mTLS, **5 s polling + sync POSTs** (30 s advertisements) | works from any NATed provider cluster with egress to the Broker |
+| Broker → any Agent | **never happens** | — | enables unreachable consumer/provider clusters |
 
 ### 3.1 Central Cluster
 
@@ -91,14 +92,14 @@ Hosts the **Resource Broker** — a stateless HTTP server in front of a set of C
 
 Each consumer cluster runs:
 - **Cluster Autoscaler (CA)** — vanilla, using the `externalgrpc` cloud provider
-- **gRPC Server** — implements the CA's external cloud provider contract (15 gRPC methods); knows only the local Agent and has no Broker credentials
-- **Resource Agent** — the single point of contact with the Broker. Exposes a **local REST API** (consumed in-cluster by the gRPC server) and runs an **outbound-only mTLS client** that polls the Broker every 5 seconds and makes synchronous POST/DELETE calls. It never listens on any externally reachable port.
+- **gRPC Server** — implements the CA's external cloud provider contract (15 gRPC methods); knows only the local Consumer Agent and has no Broker credentials
+- **Consumer Agent** — the single point of contact with the Broker on this cluster. Exposes a **local REST API** (consumed in-cluster by the gRPC server) and runs an **outbound-only mTLS client** that polls the Broker every 5 seconds and makes synchronous POSTs for heartbeat, reservation create, and reservation delete. It never listens on any externally reachable port.
 - **Liqo** — installed, provides the networking and virtual node infrastructure
 
 ### 3.3 Provider Cluster(s)
 
 Each provider cluster runs:
-- **Resource Agent** — collects local resource metrics, advertises available resources (CPU/memory/GPU, Liqo cluster ID, topology labels) every 30 seconds, and polls the Broker every 5 seconds for pending instructions (`generate-kubeconfig`, `cleanup`, `reconcile`). No listener is exposed outside the cluster.
+- **Provider Agent** — the single point of contact with the Broker on this cluster. Collects local resource metrics, sends synchronous `POST /api/v1/advertisements` every 30 seconds (CPU/memory/GPU, Liqo cluster ID, topology labels — also acting as heartbeat), and polls the Broker every 5 seconds for pending instructions (`GenerateKubeconfig`, `Cleanup`, `Reconcile`). **Outbound only** — no local listener; no in-cluster client calls it (the gRPC server lives only on consumer clusters).
 - **Liqo** — installed, serves as the peering endpoint
 
 ---
@@ -136,20 +137,20 @@ Each provider cluster runs:
 
 **Deployment:** Kubernetes Deployment (single replica per consumer cluster, runs alongside CA).
 
-**Important:** The gRPC server has **no Broker client** and **no Broker credentials**. All cross-cluster interaction is the Agent's responsibility; the gRPC server calls `http://<agent-service>:<port>/local/*`.
+**Important:** The gRPC server has **no Broker client** and **no Broker credentials**. All cross-cluster interaction is the Consumer Agent's responsibility; the gRPC server calls `http://<consumer-agent-service>:<port>/local/*`.
 
 **Responsibilities:**
 
 | Responsibility | Description |
 |---|---|
 | Implement 15 gRPC methods | Fulfills the `externalgrpc.proto` contract the CA expects |
-| Query the local Agent on Refresh | On each `Refresh()` call, issues `GET /local/nodegroups`; the Agent serves from its local cache (fed by the 5 s poll + advertisement piggybacking) |
+| Query the Consumer Agent on Refresh | On each `Refresh()` call, issues `GET /local/nodegroups`; the Consumer Agent serves from its local cache (fed by the 5 s Broker poll) |
 | Present node groups to CA | Returns one node group per provider cluster / chunk type, with `min=0` and `max=N` where N = available chunks |
 | Build node templates | Constructs fake `v1.Node` objects with chunk-sized resources, Liqo labels, and Liqo taints for CA simulation |
-| Handle IncreaseSize | Issues `POST /local/reservations`; Agent returns `202 Accepted` immediately with a `reservationId`. gRPC server then polls `GET /local/reservations/{id}` every 500 ms until `Peered` or CA's deadline. Creates `VirtualNodeState` CRD entries with status `Creating`. |
-| Handle DeleteNodes | Issues `DELETE /local/reservations/{id}?chunks=M`; Agent returns `202`. Marks `VirtualNodeState` entries as `Deleting`. |
-| Report pricing | Returns Agent-provided (ultimately Broker-provided) cost values via `PricingNodePrice` to enable the `price` Expander strategy |
-| Cache Agent responses | Caches last known node-group list to serve stale data if the Agent is temporarily unreachable |
+| Handle IncreaseSize | Issues `POST /local/reservations`; Consumer Agent returns `202 Accepted` immediately with a `reservationId`. gRPC server then polls `GET /local/reservations/{id}` every 500 ms until `Peered` or CA's deadline. Creates `VirtualNodeState` CRD entries with status `Creating`. |
+| Handle DeleteNodes | Issues `DELETE /local/reservations/{id}?chunks=M`; Consumer Agent returns `202`. Marks `VirtualNodeState` entries as `Deleting`. |
+| Report pricing | Returns Consumer-Agent-provided (ultimately Broker-provided) cost values via `PricingNodePrice` to enable the `price` Expander strategy |
+| Cache responses | Caches last known node-group list to serve stale data if the Consumer Agent is temporarily unreachable |
 
 **gRPC Method Implementation Map:**
 
@@ -160,12 +161,12 @@ Each provider cluster runs:
 | `NodeGroupTargetSize` | Returns count of `VirtualNodeState` entries for this group that are not in `Deleting` state |
 | `NodeGroupIncreaseSize` | Issues `POST /local/reservations`; polls `GET /local/reservations/{id}` until activated or CA timeout; creates `VirtualNodeState` CRDs |
 | `NodeGroupDeleteNodes` | For each node: finds the corresponding `VirtualNodeState`, issues `DELETE /local/reservations/{id}?chunks=1`, marks CRD as `Deleting` |
-| `NodeGroupDecreaseTargetSize` | Cancels pending (not-yet-peered) reservations via the Agent's delete endpoint |
+| `NodeGroupDecreaseTargetSize` | Cancels pending (not-yet-peered) reservations via the Consumer Agent's delete endpoint |
 | `NodeGroupNodes` | Lists `VirtualNodeState` CRDs for this group, maps status to `InstanceState` (Creating/Running/Deleting) |
-| `NodeGroupTemplateNodeInfo` | If `currentSize >= 1`: reads the actual virtual node's spec. If `currentSize == 0`: constructs a fake node using the Agent-provided chunk size, Liqo labels, and Liqo taint |
-| `PricingNodePrice` | Returns the Agent-relayed (Broker-authoritative) cost value for this provider |
+| `NodeGroupTemplateNodeInfo` | If `currentSize >= 1`: reads the actual virtual node's spec. If `currentSize == 0`: constructs a fake node using the Consumer-Agent-provided chunk size, Liqo labels, and Liqo taint |
+| `PricingNodePrice` | Returns the Consumer-Agent-relayed (Broker-authoritative) cost value for this provider |
 | `GPULabel` | Returns `"nvidia.com/gpu"` (standard GPU label) |
-| `GetAvailableGPUTypes` | Returns GPU types from the Agent's cached node-group list |
+| `GetAvailableGPUTypes` | Returns GPU types from the Consumer Agent's cached node-group list |
 | `Refresh` | Issues `GET /local/nodegroups`; refreshes `VirtualNodeState` statuses via `GET /local/reservations/{id}` for non-terminal reservations |
 | `Cleanup` | No-op or cleanup local caches |
 | `PricingPodPrice` | Returns `Unimplemented` (code 12) |
@@ -203,66 +204,87 @@ status:
 
 ---
 
-### 4.3 Resource Agent (Consumer and Provider Clusters)
+### 4.3 Consumer Agent (Consumer Cluster)
 
-**Source:** Extended from `k8s-resource-brokering`.
+**Source:** Extended from `k8s-resource-brokering`'s agent, specialized for the consumer role.
 
 **Deployment:** Kubernetes Deployment, **`replicas: 1`, `strategy: Recreate`** (no HA, no leader election — identical to the upstream project). A crashed pod is replaced cleanly; two pods never poll concurrently.
 
-**Network exposure:** **outbound only.** The Agent opens:
-- a **cluster-local listener** on `:8080` (Service type `ClusterIP`) — consumer agents only, reachable only by the in-cluster gRPC server;
+**Network exposure:** **outbound + in-cluster only.** The Consumer Agent opens:
+- a **cluster-local listener** on `:8080` (Service type `ClusterIP`) — reachable only by the in-cluster gRPC server;
 - an **outbound mTLS HTTP client** targeting the Broker URL.
 
 No Ingress, LoadBalancer, NodePort, or public DNS is required.
 
-**Local API Surface (consumer agents only, in-cluster only):**
+**Local API Surface (in-cluster only, consumed by the gRPC server):**
 
 | Method | Endpoint | Description |
 |---|---|---|
 | GET | `/local/health` | Liveness / readiness |
-| GET | `/local/nodegroups` | Served from the Agent's in-memory cache (populated by the 5 s Broker poll + piggyback) |
+| GET | `/local/nodegroups` | Served from the Consumer Agent's in-memory cache (populated by the 5 s Broker poll) |
 | POST | `/local/reservations` | Returns `202 + reservationId` immediately; internally calls Broker's `POST /api/v1/reservations` synchronously |
-| GET | `/local/reservations/{id}` | Returns the Agent's cached view of the reservation (phase, virtualNodeNames); refreshed from Broker on cache miss |
+| GET | `/local/reservations/{id}` | Returns the cached view of the reservation (phase, virtualNodeNames); refreshed from Broker on cache miss |
 | DELETE | `/local/reservations/{id}?chunks=N` | Returns `202`; internally calls Broker's `DELETE /api/v1/reservations/{id}?chunks=N` synchronously |
 | GET | `/local/reservations` | Debug / cache warm-up listing |
 
 **Broker-Facing Client (outbound only, mTLS):**
 
-Every agent runs one outbound HTTP client. The client:
+1. Polls `GET /api/v1/instructions` every **5 seconds** (short-poll; same cadence and style as `k8s-resource-brokering`) to pick up `ReservationInstruction` records.
+2. Sends synchronous `POST /api/v1/heartbeat` every **15 s** (consumers don't advertise, so heartbeat is a dedicated call).
+3. Sends synchronous `POST /api/v1/reservations` and `DELETE /api/v1/reservations/{id}` on demand from the `/local/*` surface.
+4. Reports the outcome of each processed instruction via `POST /api/v1/instructions/{id}/result` (idempotent; retries on 5xx / network errors with exponential backoff 1 s → 16 s, max 3 attempts).
 
-1. Polls `GET /api/v1/instructions` every **5 seconds** (short-poll; same cadence and style as `k8s-resource-brokering`).
-2. Sends synchronous `POST /api/v1/advertisements` every 30 s (provider agents) with the advertisement body; the response piggybacks any `ProviderInstruction` records ready for this cluster, reducing polling latency in the common case.
-3. Sends synchronous `POST /api/v1/heartbeat` every 15 s (consumer agents only; providers use advertisements as heartbeat).
-4. Sends synchronous `POST /api/v1/reservations` and `DELETE /api/v1/reservations/{id}` on demand from the `/local/*` surface.
-5. Reports the outcome of each processed instruction via `POST /api/v1/instructions/{id}/result` (idempotent; retries on 5xx / network errors with exponential backoff 1 s → 16 s, max 3 attempts).
-
-**Provider-Agent Responsibilities:**
-
-| Responsibility | Description |
-|---|---|
-| Collect metrics | Reads local node resources (allocatable − used), GPU availability, topology labels (zone/region) |
-| Advertise capacity | Every 30 s `POST /api/v1/advertisements` — also acts as heartbeat; response carries piggybacked instructions |
-| Execute `GenerateKubeconfig` | On receipt of a `ProviderInstruction{Kind: GenerateKubeconfig}` (via poll or piggyback): runs `liqoctl generate peering-user --consumer-cluster-id <id>`; POSTs the resulting kubeconfig as payload of `POST /api/v1/instructions/{id}/result` |
-| Execute `Cleanup` | On `ProviderInstruction{Kind: Cleanup}`: tears down provider-side artefacts (peering-user kubeconfig, associated state); reports result |
-| Execute `Reconcile` | On `ProviderInstruction{Kind: Reconcile}`: gathers current live advertisement state and reservation state, returns it in `POST /instructions/{id}/result` |
-| Idempotency cache | Keyed by `reservationId + instruction kind`, TTL = `idempotency-cache-ttl` (10 min). Duplicate instructions return the cached result instead of re-executing. |
-
-**Consumer-Agent Responsibilities:**
+**Responsibilities:**
 
 | Responsibility | Description |
 |---|---|
 | Serve local API | Handle `/local/*` requests from the in-cluster gRPC server |
-| Heartbeat | Every 15 s `POST /api/v1/heartbeat` |
+| Heartbeat | Every 15 s `POST /api/v1/heartbeat` — single liveness signal to the Broker |
 | Forward reservations | Translate `/local/reservations` calls into Broker calls synchronously; maintain a local cache of results for the gRPC server |
-| Execute `Peer` | On `ReservationInstruction{Kind: Peer}` (received with kubeconfig **inlined**): store the kubeconfig as a Secret on the consumer cluster, run `liqoctl peer` if not already peered with this provider, create N `ResourceSlice` CRDs (one per chunk), create the `NamespaceOffloading` CR, wait for Liqo to materialize the virtual nodes, then POST result with `virtualNodeNames` |
+| Execute `Peer` | On `ReservationInstruction{Kind: Peer}` (kubeconfig **inlined** in the polling response): store the kubeconfig as a Secret on the consumer cluster, run `liqoctl peer` if not already peered with this provider, create N `ResourceSlice` CRDs (one per chunk), create the `NamespaceOffloading` CR, wait for Liqo to materialize the virtual nodes, then POST result with `virtualNodeNames` |
 | Execute `Unpeer` | On `ReservationInstruction{Kind: Unpeer}`: delete the specified `ResourceSlice`s; if `lastChunk == true`, run full `liqoctl unpeer`; report result |
-| Execute `Cleanup` / `Reconcile` | Symmetric to the provider variants |
-| Idempotency cache | Same contract as provider side |
-| Local cache population | Merge polling results + piggybacked instructions + synchronous responses into a single in-memory view served to the gRPC server |
+| Execute `Cleanup` | On `ReservationInstruction{Kind: Cleanup}`: tear down consumer-side artefacts (stale ResourceSlices, NamespaceOffloading entries, orphaned peerings); report result |
+| Execute `Reconcile` | On `ReservationInstruction{Kind: Reconcile}`: gather an authoritative local snapshot (active ResourceSlices, VirtualNodeStates, active Liqo peerings) and return it as the `/instructions/{id}/result` payload |
+| Idempotency cache | Keyed by `reservationId + instruction kind`, TTL = `idempotency-cache-ttl` (10 min). Duplicate instructions return the cached result instead of re-executing. |
+| Local cache population | Merge polling results + synchronous Broker responses into a single in-memory view served to the gRPC server |
 
 ---
 
-### 4.4 Cluster Autoscaler (Consumer Cluster)
+### 4.4 Provider Agent (Provider Cluster)
+
+**Source:** Extended from `k8s-resource-brokering`'s agent, specialized for the provider role.
+
+**Deployment:** Kubernetes Deployment, **`replicas: 1`, `strategy: Recreate`** (no HA, no leader election — identical to the upstream project). A crashed pod is replaced cleanly; two pods never poll concurrently.
+
+**Network exposure:** **outbound only.** The Provider Agent opens:
+- an **outbound mTLS HTTP client** targeting the Broker URL.
+
+There is **no local HTTP listener** — the gRPC server runs only on consumer clusters, and nothing inside the provider cluster calls the agent directly. No Ingress, LoadBalancer, NodePort, or public DNS is required.
+
+**Broker-Facing Client (outbound only, mTLS):**
+
+1. Sends synchronous `POST /api/v1/advertisements` every **30 seconds** with the latest capacity snapshot; the Broker's response piggybacks any `ProviderInstruction` records ready for this cluster, reducing the common-case instruction latency to the 30 s advertisement cadence.
+2. Polls `GET /api/v1/instructions` every **5 seconds** — upper-bound fallback path when piggyback is empty or a new instruction arrives between advertisement ticks.
+3. Reports the outcome of each processed instruction via `POST /api/v1/instructions/{id}/result` (idempotent; retries on 5xx / network errors with exponential backoff 1 s → 16 s, max 3 attempts).
+
+Advertisement doubles as heartbeat — providers never call `/api/v1/heartbeat`.
+
+**Responsibilities:**
+
+| Responsibility | Description |
+|---|---|
+| Collect metrics | Reads local node resources (allocatable − used), GPU availability, topology labels (zone/region) |
+| Advertise capacity | Every 30 s `POST /api/v1/advertisements` — also acts as heartbeat; response carries piggybacked `ProviderInstruction`s |
+| Execute `GenerateKubeconfig` | On receipt of a `ProviderInstruction{Kind: GenerateKubeconfig}` (via poll or piggyback): runs `liqoctl generate peering-user --consumer-cluster-id <id>`; POSTs the resulting kubeconfig as payload of `POST /api/v1/instructions/{id}/result` |
+| Execute `Cleanup` | On `ProviderInstruction{Kind: Cleanup}`: tears down provider-side artefacts (peering-user kubeconfig, associated state); reports result |
+| Execute `Reconcile` | On `ProviderInstruction{Kind: Reconcile}`: gathers current live advertisement state and active-reservation state; returns it in `POST /instructions/{id}/result` |
+| Idempotency cache | Keyed by `reservationId + instruction kind`, TTL = `idempotency-cache-ttl` (10 min). Duplicate instructions return the cached result instead of re-executing. |
+
+> **Shared code, separate binaries.** Both agents share the outbound mTLS client, the exponential-backoff retrier, the idempotency cache, and the CRD clients. Role is selected at startup by a CLI flag (`--role=consumer|provider`) that wires in the role-specific instruction executors and the role-specific polling / advertisement loop.
+
+---
+
+### 4.5 Cluster Autoscaler (Consumer Cluster)
 
 **Source:** Upstream Kubernetes Cluster Autoscaler, unmodified.
 
@@ -283,11 +305,11 @@ Every agent runs one outbound HTTP client. The client:
 address=localhost:50051
 ```
 
-**Key point:** The CA is completely unaware of Liqo, the Broker, the Agent, or multi-provider topology. It sees node groups and makes decisions using its standard algorithms. The gRPC server acts as the translation layer.
+**Key point:** The CA is completely unaware of Liqo, the Broker, the Consumer Agent, or multi-provider topology. It sees node groups and makes decisions using its standard algorithms. The gRPC server acts as the translation layer.
 
 ---
 
-### 4.5 Liqo (Consumer and Provider Clusters)
+### 4.6 Liqo (Consumer and Provider Clusters)
 
 **Source:** Upstream Liqo, unmodified.
 
@@ -508,13 +530,13 @@ data:
 
 ## 7. API Contracts
 
-This section defines **every** wire-level interface used in the system. Three surfaces exist (the former "Broker → Agent" surface has been removed — no such calls exist in this architecture):
+This section defines **every** wire-level interface used in the system. Three surfaces exist (no Broker → Agent surface — the Broker never initiates an outbound call):
 
 | # | Surface | Transport | Initiator | Auth |
 |---|---|---|---|---|
 | 7.1 | gRPC Server ↔ Cluster Autoscaler | gRPC (HTTP/2) | CA | upstream TLS (in-cluster) |
-| 7.2 | gRPC Server ↔ Local Agent | HTTP/REST (in-cluster) | gRPC Server | optional ServiceAccount token |
-| 7.3 | Agent → Broker | HTTPS/REST (cross-cluster) | **Agent only** | mTLS |
+| 7.2 | gRPC Server ↔ Consumer Agent | HTTP/REST (in-cluster) | gRPC Server | optional ServiceAccount token |
+| 7.3 | Consumer / Provider Agent → Broker | HTTPS/REST (cross-cluster) | **Agent only** | mTLS |
 
 ### 7.0 Common Conventions
 
@@ -569,9 +591,9 @@ Defined by upstream `externalgrpc.proto`. The gRPC server implements all 15 meth
 
 ---
 
-### 7.2 gRPC Server ↔ Local Agent  (REST, in-cluster)
+### 7.2 gRPC Server ↔ Consumer Agent  (REST, in-cluster)
 
-Plain HTTP over a ClusterIP Service, e.g. `http://federation-agent.federation-system.svc.cluster.local:8080`. Optional `Authorization: Bearer <ServiceAccount token>`.
+Plain HTTP over a ClusterIP Service, e.g. `http://federation-consumer-agent.federation-system.svc.cluster.local:8080`. Optional `Authorization: Bearer <ServiceAccount token>`. The provider-side cluster has no equivalent surface — this endpoint family exists only on the consumer side.
 
 #### 7.2.1 `GET /local/health`
 ```
@@ -582,7 +604,7 @@ Response 200:
 ```
 
 #### 7.2.2 `GET /local/nodegroups`
-Returns every node group (= one chunk template per provider × chunk type) the Agent has cached from its latest Broker sync.
+Returns every node group (= one chunk template per provider × chunk type) the Consumer Agent has cached from its latest Broker sync.
 ```
 GET /local/nodegroups
 
@@ -671,9 +693,9 @@ Response 200:
 
 ---
 
-### 7.3 Agent → Broker  (REST over mTLS, **agent-initiated only**)
+### 7.3 Consumer / Provider Agent → Broker  (REST over mTLS, **agent-initiated only**)
 
-Base URL: `https://broker.central.example.com:8443/api/v1`. Mutual TLS required; `clusterId` derived from certificate CN.
+Base URL: `https://broker.central.example.com:8443/api/v1`. Mutual TLS required; `clusterId` derived from certificate CN. Each endpoint below is annotated with the agent role(s) that call it — the Broker never initiates calls in the opposite direction.
 
 #### 7.3.1 `POST /api/v1/advertisements`   *(provider, every 30 s — doubles as heartbeat; response piggybacks instructions)*
 ```
@@ -883,12 +905,12 @@ Response 202:
 | Surface | Method & Path | Direction | Purpose |
 |---|---|---|---|
 | 7.1 | gRPC `externalgrpc.proto` (15 methods) | CA ↔ gRPC Server | CA cloud-provider contract |
-| 7.2.1 | `GET  /local/health` | gRPC → Agent | liveness |
-| 7.2.2 | `GET  /local/nodegroups` | gRPC → Agent | list node groups |
-| 7.2.3 | `POST /local/reservations` | gRPC → Agent | reserve chunks (202) |
-| 7.2.4 | `GET  /local/reservations/{id}` | gRPC → Agent | reservation status |
-| 7.2.5 | `DELETE /local/reservations/{id}` | gRPC → Agent | release (full / partial) |
-| 7.2.6 | `GET  /local/reservations` | gRPC → Agent | list reservations |
+| 7.2.1 | `GET  /local/health` | gRPC → Consumer Agent | liveness |
+| 7.2.2 | `GET  /local/nodegroups` | gRPC → Consumer Agent | list node groups |
+| 7.2.3 | `POST /local/reservations` | gRPC → Consumer Agent | reserve chunks (202) |
+| 7.2.4 | `GET  /local/reservations/{id}` | gRPC → Consumer Agent | reservation status |
+| 7.2.5 | `DELETE /local/reservations/{id}` | gRPC → Consumer Agent | release (full / partial) |
+| 7.2.6 | `GET  /local/reservations` | gRPC → Consumer Agent | list reservations |
 | 7.3.1 | `POST /api/v1/advertisements` | Provider Agent → Broker | advertise + heartbeat + piggyback |
 | 7.3.2 | `GET  /api/v1/advertisements/{clusterId}` | Provider Agent → Broker | preserve `Reserved` field |
 | 7.3.3 | `POST /api/v1/heartbeat` | Consumer Agent → Broker | 15 s liveness |
@@ -1160,22 +1182,23 @@ Steps:
 | Channel | Protocol | Auth |
 |---|---|---|
 | CA ↔ gRPC Server | gRPC, in-cluster | localhost / in-cluster mTLS |
-| gRPC Server ↔ Local Agent | HTTP, in-cluster | ClusterIP Service; optional ServiceAccount token |
-| Agent → Broker | HTTPS, cross-cluster, **agent-initiated only** | mTLS (agent = client) |
+| gRPC Server ↔ Consumer Agent | HTTP, in-cluster | ClusterIP Service; optional ServiceAccount token |
+| Consumer Agent → Broker | HTTPS, cross-cluster, **agent-initiated only** | mTLS (Consumer Agent = client) |
+| Provider Agent → Broker | HTTPS, cross-cluster, **agent-initiated only** | mTLS (Provider Agent = client) |
 
 No inbound port is required on any agent cluster. Consumer and provider clusters need only outbound egress to the Broker URL.
 
 ### 10.2 Certificate Management
 
 - **Broker:** server certificate for its `/api/v1/*` endpoints.
-- **Each agent:** client certificate with `CN = <Liqo cluster ID>` used when calling the Broker. No server certificate is needed (no external listener).
+- **Consumer Agent and Provider Agent:** each carries its own client certificate with `CN = <Liqo cluster ID>` used when calling the Broker. No server certificate is required (provider agents have no listener; consumer agents expose only a ClusterIP Service in-cluster).
 - Certificates are issued by a federation CA (e.g. cert-manager `ClusterIssuer`) and delivered to the agent as a Kubernetes Secret at onboarding time. Recommended rotation: 90 days.
 
 ### 10.3 Authentication & Authorisation
 
-- The Broker's mTLS middleware extracts `clusterId` from the client certificate CN. The agent cannot spoof another cluster's identity.
+- The Broker's mTLS middleware extracts `clusterId` from the client certificate CN. Neither the Consumer Agent nor the Provider Agent can spoof another cluster's identity.
 - Every endpoint verifies that `clusterId` in the payload (if present) matches the CN; mismatch → `403 Forbidden`.
-- A provider cannot reserve resources (it only publishes advertisements); a consumer cannot publish advertisements. The handler selects the allowed set of operations from the cert's role attribute or namespace convention.
+- A Provider Agent cannot reserve resources (it only publishes advertisements); a Consumer Agent cannot publish advertisements. The handler selects the allowed set of operations from the cert's role attribute (or a namespace convention that encodes the role).
 
 ### 10.4 Kubeconfig Security
 
@@ -1186,50 +1209,65 @@ No inbound port is required on any agent cluster. Consumer and provider clusters
 
 ### 10.5 Replay Protection
 
-- Every reservation-scoped call carries `X-Reservation-Id`; agents reject calls missing it.
-- Agents refuse to execute a second instruction for a reservation that is already in a terminal state.
-- Agents compare `reservationId` in the body against the header and the authenticated `clusterId`.
+- Every reservation-scoped call carries `X-Reservation-Id`; the Broker rejects calls missing it.
+- Both agents refuse to execute a second instruction for a reservation that is already in a terminal state.
+- Both agents compare `reservationId` in the body against the header and the authenticated `clusterId`.
 
 ### 10.6 Rate Limiting
 
-- Per-cluster token bucket on `GET /api/v1/instructions`: 10 rps burst, 5 rps sustained. Violations → `429 TooManyRequests`; the agent's backoff handles it.
-- Per-cluster bucket on `POST /api/v1/reservations`: 2 rps (prevents reservation-spam DoS).
+- Per-cluster token bucket on `GET /api/v1/instructions`: 10 rps burst, 5 rps sustained. Violations → `429 TooManyRequests`; the calling agent's backoff handles it.
+- Per-cluster bucket on `POST /api/v1/reservations` (Consumer Agent only): 2 rps (prevents reservation-spam DoS).
 
 ---
 
 ## 11. Integration Plan with Existing Projects
 
-### 11.1 From k8s-resource-brokering (Broker + Agent)
+### 11.1 From k8s-resource-brokering (Broker + Consumer/Provider Agents)
 
 **Reuse as-is:**
 - REST API server with mTLS (server.go + middleware)
 - Existing handlers: `PostAdvertisement`, `GetAdvertisement`, `PostReservation`, `GetInstructions`
-- Agent HTTP client: `HTTPCommunicator` with exponential backoff (`doWithRetry`)
+- Agent HTTP client: `HTTPCommunicator` with exponential backoff (`doWithRetry`) — shared by both agent roles
 - `ClusterAdvertisement`, `Reservation`, `Advertisement`, `ProviderInstruction`, `ReservationInstruction` CRDs
 - Decision engine interface and resource-locking utility
 - mTLS cert loading + `ValidateClientCertificate` middleware
 
 **Modify (additive only, `v1alpha1` stays):**
+
+*Broker:*
 - `ClusterAdvertisement` — add `liqoClusterId`, `topology`, `clusterType`, `price`, chunk status (`totalChunks`, `reservedChunks`, `availableChunks`)
 - `Reservation` — add `consumerLiqoClusterId`, `providerLiqoClusterId`, `chunkCount`, `chunkType`, `virtualNodeNames`; extend phase enum with `GeneratingKubeconfig | KubeconfigReady | Peering | Peered | Unpeering | Released`
 - `ProviderInstruction` — add `kind` (`GenerateKubeconfig | Cleanup | Reconcile`), `consumerLiqoClusterId`, `chunkCount`, `lastChunk`
 - `ReservationInstruction` — add `kind` (`Peer | Unpeer | Cleanup | Reconcile`), `providerLiqoClusterId`, `resourceSliceNames`, `chunkCount`, `lastChunk`, in-response kubeconfig field (not stored in status)
-- Broker — add chunk-calculation logic driven by the `chunk-config` ConfigMap
-- Broker — extend `PostAdvertisement` response to piggyback pending `ProviderInstruction` records
-- Broker — add `POST /api/v1/instructions/{id}/result` endpoint
-- Broker — add `POST /api/v1/heartbeat` endpoint
-- Broker — add rate limiting middleware (10/5 rps per cluster on /instructions, 2 rps on /reservations)
-- Broker — extend decision engine to consider per-consumer priority and chunk availability
-- Agent — add `/local/*` HTTP listener (consumer agents only)
-- Agent — add instruction executors: `GenerateKubeconfig`, `Peer`, `Unpeer`, `Cleanup`, `Reconcile`
-- Agent — add ResourceSlice, NamespaceOffloading, and `liqoctl` execution capability
-- Agent — add idempotency cache keyed by `reservationId + instruction kind`
-- Agent — differentiate behavior by role (consumer vs provider) from a CLI flag
+- Add chunk-calculation logic driven by the `chunk-config` ConfigMap
+- Extend `PostAdvertisement` response to piggyback pending `ProviderInstruction` records
+- Add `POST /api/v1/instructions/{id}/result` endpoint
+- Add `POST /api/v1/heartbeat` endpoint (Consumer Agent only)
+- Add rate-limiting middleware (10/5 rps per cluster on `/instructions`, 2 rps on `/reservations`)
+- Extend decision engine to consider per-consumer priority and chunk availability
+
+*Consumer Agent (new binary, shared-code base):*
+- Add `/local/*` HTTP listener (ClusterIP) consumed by the gRPC server
+- Add instruction executors: `Peer`, `Unpeer`, `Cleanup`, `Reconcile`
+- Add `ResourceSlice` / `NamespaceOffloading` management and `liqoctl peer` / `liqoctl unpeer` execution capability
+- Add a 15 s heartbeat loop and a synchronous reservation-forwarder (`POST` / `DELETE /api/v1/reservations`)
+- Add local in-memory cache merging Broker polls + synchronous responses
+
+*Provider Agent (new binary, shared-code base):*
+- Add instruction executors: `GenerateKubeconfig`, `Cleanup`, `Reconcile`
+- Add `liqoctl generate peering-user` execution capability
+- Add a 30 s advertisement loop (`POST /api/v1/advertisements`) that also carries piggybacked instructions on the response
+- No local HTTP listener
+
+*Both agents (shared code):*
+- Add idempotency cache keyed by `reservationId + instruction kind`
+- Add 5 s `GET /api/v1/instructions` polling loop with exponential-backoff retrier
+- Role selected at startup via CLI flag (`--role=consumer|provider`) — one binary, two Deployments
 
 **Remove:**
 - Any Broker-initiated outbound client (if present) — not used
 - Any polling-result cleanup path that used 202-followed-by-callback — replaced by in-line `GET /instructions` + `POST /result`
-- Cost optimisation placeholder (replaced by chunk-based cost/priority scoring)
+- Cost-optimisation placeholder (replaced by chunk-based cost/priority scoring)
 
 ### 11.2 From Multi-Cluster-Autoscaler (gRPC Server)
 
@@ -1240,20 +1278,20 @@ No inbound port is required on any agent cluster. Consumer and provider clusters
 
 **Modify:**
 - Replace all in-memory state with `VirtualNodeState` CRD
-- Replace Discovery Server with agent-mediated node-group discovery (`GET /local/nodegroups`)
-- Replace Node Manager's direct Liqo calls with agent-mediated flow (`POST/DELETE /local/reservations`)
-- Add local HTTP client to the Agent (no Broker client, no Broker credentials)
-- Add local caching of Agent responses (serve stale data when Agent is temporarily unreachable)
+- Replace Discovery Server with Consumer-Agent-mediated node-group discovery (`GET /local/nodegroups`)
+- Replace Node Manager's direct Liqo calls with Consumer-Agent-mediated flow (`POST/DELETE /local/reservations`)
+- Add a local HTTP client that talks only to the Consumer Agent (no Broker client, no Broker credentials)
+- Add local caching of Consumer Agent responses (serve stale data when the Consumer Agent is temporarily unreachable)
 - Add reconciliation loop (VirtualNodeState ↔ actual Liqo virtual nodes)
 - Add 500 ms polling of `GET /local/reservations/{id}` bounded by CA's `MaxNodeProvisionDuration`
 - Add proper error handling (no `log.Fatalf`)
 
 **Remove:**
-- Discovery Server (replaced by Broker's provider knowledge, relayed via Agent)
-- Node Manager (responsibilities split: gRPC server manages state, Agent executes Liqo)
+- Discovery Server (replaced by the Broker's provider knowledge, relayed via the Consumer Agent)
+- Node Manager (responsibilities split: gRPC server manages state, Consumer Agent executes `liqoctl peer` / `liqoctl unpeer`; Provider Agent executes `liqoctl generate peering-user`)
 - In-memory node/group maps (replaced by CRDs)
-- Direct `liqoctl` subprocess calls (moved to Agent)
-- Hardcoded values (replaced by ConfigMap on Broker, relayed via Agent)
+- Direct `liqoctl` subprocess calls from the gRPC server (moved to the two agents per role)
+- Hardcoded values (replaced by the `chunk-config` ConfigMap on the Broker, relayed via the Consumer Agent)
 - Any direct Broker client code
 
 ---
@@ -1262,7 +1300,7 @@ No inbound port is required on any agent cluster. Consumer and provider clusters
 
 This architecture achieves multi-provider cluster autoscaling on top of an **unmodified** Kubernetes Cluster Autoscaler, organised around two principles:
 
-1. **Agent-only outbound communication with the Broker.** Every cross-cluster byte is the response body of a request an agent initiated. Consumer and provider clusters can therefore sit behind NAT or firewalls and still participate, as long as they can reach the Broker's URL.
-2. **Agent-centric design on the consumer side.** The gRPC server talks only to its co-located Agent over an in-cluster REST API. The Agent is the single point of contact with the Broker and the single executor of `liqoctl` commands.
+1. **Agent-only outbound communication with the Broker.** Every cross-cluster byte is the response body of a request that a **Consumer Agent** or a **Provider Agent** initiated. Consumer and provider clusters can therefore sit behind NAT or firewalls and still participate, as long as they can reach the Broker's URL.
+2. **Agent-centric design with two specialized roles.** On the consumer cluster the gRPC server talks only to its co-located **Consumer Agent** over an in-cluster REST API; the Consumer Agent is the consumer's single point of contact with the Broker and the sole executor of `liqoctl peer` / `liqoctl unpeer`. On the provider cluster the **Provider Agent** is the only component talking to the Broker and the sole executor of `liqoctl generate peering-user`. The two agents share a common codebase — outbound mTLS client, retrier, idempotency cache — but run as two distinct binaries / Deployments, selected at startup via `--role=consumer|provider`.
 
-The Broker runs a `k8s-resource-brokering`-aligned REST API: providers `POST /advertisements` every 30 s (response piggybacks pending instructions), consumers `POST /reservations` synchronously (decision is returned inline) and `POST /heartbeat` every 15 s, and both agents `GET /instructions` every 5 s to pick up any pending work. Results (including the peering kubeconfig, which is inlined in `/instructions` responses but never stored in CRD status) flow back through `POST /instructions/{id}/result`. Chunking divides each provider's capacity into fixed units that become Liqo `ResourceSlice`s and ultimately virtual nodes that CA sees as ordinary pool members. The price Expander lets CA respect Broker-assigned priorities. All cross-cluster traffic is mTLS, and every reservation-scoped call carries an idempotency key so that retries never cause double-execution.
+The Broker runs a `k8s-resource-brokering`-aligned REST API: Provider Agents `POST /advertisements` every 30 s (response piggybacks pending instructions), Consumer Agents `POST /reservations` synchronously (decision is returned inline) and `POST /heartbeat` every 15 s, and both agents `GET /instructions` every 5 s to pick up any pending work. Results (including the peering kubeconfig, which is inlined in `/instructions` responses but never stored in CRD status) flow back through `POST /instructions/{id}/result`. Chunking divides each provider's capacity into fixed units that become Liqo `ResourceSlice`s and ultimately virtual nodes that CA sees as ordinary pool members. The price Expander lets CA respect Broker-assigned priorities. All cross-cluster traffic is mTLS, and every reservation-scoped call carries an idempotency key so that retries never cause double-execution.

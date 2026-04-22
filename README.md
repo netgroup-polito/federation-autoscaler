@@ -12,8 +12,8 @@
 ## What it does
 
 - Runs vanilla **Kubernetes Cluster Autoscaler** on the consumer cluster — no CA source-code changes.
-- A small **gRPC Server** implements CA's `externalgrpc` contract and asks a local **Resource Agent** for node groups and reservations.
-- The agent talks — **agent-initiated only, over mTLS** — to a central **Resource Broker** that decides which provider cluster should donate capacity.
+- A small **gRPC Server** implements CA's `externalgrpc` contract and asks a local **Consumer Agent** for node groups and reservations.
+- The **Consumer Agent** (on consumer clusters) and the **Provider Agent** (on provider clusters) talk — **agent-initiated only, over mTLS** — to a central **Resource Broker** that decides which provider cluster should donate capacity.
 - **Liqo** then peers the two clusters and exposes the remote capacity as virtual nodes that CA (and the scheduler) treat like any other Node.
 
 Works from NATed / firewalled clusters: only the Broker needs a public endpoint; consumers and providers need outbound egress only.
@@ -27,9 +27,10 @@ Works from NATed / firewalled clusters: only the Broker needs a public endpoint;
 | Channel | Initiator | Transport |
 | --- | --- | --- |
 | CA ↔ gRPC Server | CA | gRPC, in-cluster |
-| gRPC Server ↔ Local Agent | gRPC Server | HTTP, in-cluster |
-| Agent ↔ Broker | **Agent only** | HTTPS + mTLS — polling + synchronous POSTs |
-| Broker → Agent | *never happens* | — |
+| gRPC Server ↔ Consumer Agent | gRPC Server | HTTP, in-cluster |
+| Consumer Agent ↔ Broker | **Consumer Agent only** | HTTPS + mTLS — 5 s polling + synchronous POSTs (heartbeat, reservations) |
+| Provider Agent ↔ Broker | **Provider Agent only** | HTTPS + mTLS — 5 s polling + synchronous POSTs (advertisements every 30 s) |
+| Broker → any Agent | *never happens* | — |
 
 Full design, CRDs, API contracts, and execution flows: **[docs/design.md](docs/design.md)**.
 
