@@ -1,0 +1,180 @@
+---
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  annotations:
+    controller-gen.kubebuilder.io/version: v0.19.0
+  name: providerinstructions.autoscaling.federation-autoscaler.io
+spec:
+  group: autoscaling.federation-autoscaler.io
+  names:
+    kind: ProviderInstruction
+    listKind: ProviderInstructionList
+    plural: providerinstructions
+    shortNames:
+    - provinst
+    singular: providerinstruction
+  scope: Namespaced
+  versions:
+  - additionalPrinterColumns:
+    - jsonPath: .spec.kind
+      name: Kind
+      type: string
+    - jsonPath: .spec.targetClusterId
+      name: Provider
+      type: string
+    - jsonPath: .spec.reservationId
+      name: Reservation
+      type: string
+    - jsonPath: .status.enforced
+      name: Enforced
+      type: boolean
+    - jsonPath: .spec.expiresAt
+      name: Expires
+      type: date
+    - jsonPath: .metadata.creationTimestamp
+      name: Age
+      type: date
+    name: v1alpha1
+    schema:
+      openAPIV3Schema:
+        description: |-
+          ProviderInstruction is a Broker-owned work item targeted at a specific
+          Provider Agent. See docs/design.md §5.4.
+        properties:
+          apiVersion:
+            description: |-
+              APIVersion defines the versioned schema of this representation of an object.
+              Servers should convert recognized schemas to the latest internal value, and
+              may reject unrecognized values.
+              More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#resources
+            type: string
+          kind:
+            description: |-
+              Kind is a string value representing the REST resource this object represents.
+              Servers may infer this from the endpoint the client submits requests to.
+              Cannot be updated.
+              In CamelCase.
+              More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#types-kinds
+            type: string
+          metadata:
+            type: object
+          spec:
+            description: spec is the work item description.
+            properties:
+              chunkCount:
+                description: |-
+                  ChunkCount is the number of chunks this instruction applies to. Used
+                  by the Broker for bookkeeping; the Provider Agent does not act on it
+                  directly.
+                format: int32
+                minimum: 0
+                type: integer
+              consumerClusterId:
+                description: |-
+                  ConsumerClusterID is the Broker-facing identifier of the consumer that
+                  will peer against this provider. Required for GenerateKubeconfig; may
+                  be empty for Reconcile.
+                type: string
+              consumerLiqoClusterId:
+                description: |-
+                  ConsumerLiqoClusterID is the Liqo cluster identifier of the consumer.
+                  Passed verbatim to `liqoctl generate peering-user --consumer-cluster-id`.
+                type: string
+              expiresAt:
+                description: |-
+                  ExpiresAt is the deadline after which the Broker considers the
+                  instruction unactionable. Matches the owning Reservation's ExpiresAt
+                  unless the instruction was generated after Peered.
+                format: date-time
+                type: string
+              kind:
+                description: |-
+                  Kind is the operation the Provider Agent must perform. See
+                  ProviderInstructionKind in common_types.go for the full list.
+                enum:
+                - GenerateKubeconfig
+                - Cleanup
+                - Reconcile
+                type: string
+              lastChunk:
+                description: |-
+                  LastChunk is true when executing this instruction releases the last
+                  remaining chunk of the reservation, allowing the Provider Agent to
+                  tear down the peering-user kubeconfig.
+                type: boolean
+              reservationId:
+                description: |-
+                  ReservationID is the Broker-side Reservation this instruction belongs
+                  to. The Provider Agent uses it as the idempotency key together with
+                  Kind (see docs/design.md §7.0).
+                minLength: 1
+                type: string
+              targetClusterId:
+                description: |-
+                  TargetClusterID is the Broker-facing identifier of the Provider cluster
+                  that must execute this instruction. Used by the Broker's instruction
+                  handler to filter the per-cluster response to GET /api/v1/instructions.
+                minLength: 1
+                type: string
+            required:
+            - kind
+            - reservationId
+            - targetClusterId
+            type: object
+          status:
+            description: status is the Broker's observed state for this instruction.
+            properties:
+              attempts:
+                description: |-
+                  Attempts counts how many times the Provider Agent has reported a
+                  terminal result for this instruction (successful or failed).
+                format: int32
+                minimum: 0
+                type: integer
+              enforced:
+                description: |-
+                  Enforced is true once the Provider Agent has successfully reported the
+                  outcome via POST /api/v1/instructions/{id}/result. Once Enforced is
+                  true the instruction is no longer returned by GET /api/v1/instructions.
+                type: boolean
+              issuedAt:
+                description: |-
+                  IssuedAt is the timestamp at which the Broker first queued the
+                  instruction for delivery.
+                format: date-time
+                type: string
+              lastDeliveredAt:
+                description: |-
+                  LastDeliveredAt is the timestamp of the most recent poll response in
+                  which this instruction was included.
+                format: date-time
+                type: string
+              lastUpdateTime:
+                description: |-
+                  LastUpdateTime is the timestamp of the most recent status write
+                  (typically the moment the Provider Agent's result was accepted).
+                format: date-time
+                type: string
+              message:
+                description: |-
+                  Message is a short, human-readable description of the current state.
+                  Payload data (kubeconfig bytes, reconcile snapshots) are not stored
+                  here; they flow only through the Broker's instruction-result handler.
+                type: string
+              observedGeneration:
+                description: |-
+                  ObservedGeneration is the metadata.generation the Broker most recently
+                  reconciled.
+                format: int64
+                type: integer
+            required:
+            - enforced
+            type: object
+        required:
+        - spec
+        type: object
+    served: true
+    storage: true
+    subresources:
+      status: {}

@@ -1,0 +1,9 @@
+apiVersion: autoscaling.federation-autoscaler.io/v1alpha1
+kind: VirtualNodeState
+metadata:
+  labels:
+    app.kubernetes.io/name: federation-autoscaler
+    app.kubernetes.io/managed-by: kustomize
+  name: virtualnodestate-sample
+spec:
+  # TODO(user): Add fields here

@@ -1,5 +1,5 @@
 /*
-Copyright 2026.
+Copyright 2026 Politecnico di Torino - NetGroup.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -14,25 +14,23 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 
-package broker
+package autoscaling
 
 import (
 	"context"
 
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
-	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/errors"
-	"k8s.io/apimachinery/pkg/api/resource"
 	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
-	brokerv1alpha1 "github.com/netgroup-polito/federation-autoscaler/api/broker/v1alpha1"
+	autoscalingv1alpha1 "github.com/netgroup-polito/federation-autoscaler/api/autoscaling/v1alpha1"
 )
 
-var _ = Describe("ClusterAdvertisement Controller", func() {
+var _ = Describe("ProviderInstruction Controller", func() {
 	Context("When reconciling a resource", func() {
 		const resourceName = "test-resource"
 
@@ -42,27 +40,21 @@ var _ = Describe("ClusterAdvertisement Controller", func() {
 			Name:      resourceName,
 			Namespace: "default", // TODO(user):Modify as needed
 		}
-		clusteradvertisement := &brokerv1alpha1.ClusterAdvertisement{}
+		providerinstruction := &autoscalingv1alpha1.ProviderInstruction{}
 
 		BeforeEach(func() {
-			By("creating the custom resource for the Kind ClusterAdvertisement")
-			err := k8sClient.Get(ctx, typeNamespacedName, clusteradvertisement)
+			By("creating the custom resource for the Kind ProviderInstruction")
+			err := k8sClient.Get(ctx, typeNamespacedName, providerinstruction)
 			if err != nil && errors.IsNotFound(err) {
-				res := &brokerv1alpha1.ClusterAdvertisement{
+				res := &autoscalingv1alpha1.ProviderInstruction{
 					ObjectMeta: metav1.ObjectMeta{
 						Name:      resourceName,
 						Namespace: "default",
 					},
-					Spec: brokerv1alpha1.ClusterAdvertisementSpec{
-						ClusterID:     "provider-test",
-						LiqoClusterID: "liqo-provider-test",
-						ClusterType:   brokerv1alpha1.ChunkTypeStandard,
-						Resources: brokerv1alpha1.AdvertisedResources{
-							Allocatable: corev1.ResourceList{
-								corev1.ResourceCPU:    resource.MustParse("8"),
-								corev1.ResourceMemory: resource.MustParse("16Gi"),
-							},
-						},
+					Spec: autoscalingv1alpha1.ProviderInstructionSpec{
+						ReservationID:   "resv-test",
+						Kind:            autoscalingv1alpha1.ProviderInstructionGenerateKubeconfig,
+						TargetClusterID: "provider-test",
 					},
 				}
 				Expect(k8sClient.Create(ctx, res)).To(Succeed())
@@ -71,16 +63,16 @@ var _ = Describe("ClusterAdvertisement Controller", func() {
 
 		AfterEach(func() {
 			// TODO(user): Cleanup logic after each test, like removing the resource instance.
-			resource := &brokerv1alpha1.ClusterAdvertisement{}
+			resource := &autoscalingv1alpha1.ProviderInstruction{}
 			err := k8sClient.Get(ctx, typeNamespacedName, resource)
 			Expect(err).NotTo(HaveOccurred())
 
-			By("Cleanup the specific resource instance ClusterAdvertisement")
+			By("Cleanup the specific resource instance ProviderInstruction")
 			Expect(k8sClient.Delete(ctx, resource)).To(Succeed())
 		})
 		It("should successfully reconcile the resource", func() {
 			By("Reconciling the created resource")
-			controllerReconciler := &ClusterAdvertisementReconciler{
+			controllerReconciler := &ProviderInstructionReconciler{
 				Client: k8sClient,
 				Scheme: k8sClient.Scheme(),
 			}

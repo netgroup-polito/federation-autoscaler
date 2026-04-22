@@ -1,4 +1,8 @@
 ## Append samples of your project ##
 resources:
 - broker_v1alpha1_clusteradvertisement.yaml
+- broker_v1alpha1_reservation.yaml
+- autoscaling_v1alpha1_virtualnodestate.yaml
+- autoscaling_v1alpha1_providerinstruction.yaml
+- autoscaling_v1alpha1_reservationinstruction.yaml
 # +kubebuilder:scaffold:manifestskustomizesamples

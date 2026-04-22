@@ -22,6 +22,18 @@ resources:
 # default, aiding admins in cluster management. Those roles are
 # not used by the federation-autoscaler itself. You can comment the following lines
 # if you do not want those helpers be installed with your Project.
+- autoscaling_reservationinstruction_admin_role.yaml
+- autoscaling_reservationinstruction_editor_role.yaml
+- autoscaling_reservationinstruction_viewer_role.yaml
+- autoscaling_providerinstruction_admin_role.yaml
+- autoscaling_providerinstruction_editor_role.yaml
+- autoscaling_providerinstruction_viewer_role.yaml
+- autoscaling_virtualnodestate_admin_role.yaml
+- autoscaling_virtualnodestate_editor_role.yaml
+- autoscaling_virtualnodestate_viewer_role.yaml
+- broker_reservation_admin_role.yaml
+- broker_reservation_editor_role.yaml
+- broker_reservation_viewer_role.yaml
 - broker_clusteradvertisement_admin_role.yaml
 - broker_clusteradvertisement_editor_role.yaml
 - broker_clusteradvertisement_viewer_role.yaml

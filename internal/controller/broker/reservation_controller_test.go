@@ -1,5 +1,5 @@
 /*
-Copyright 2026.
+Copyright 2026 Politecnico di Torino - NetGroup.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -32,7 +32,7 @@ import (
 	brokerv1alpha1 "github.com/netgroup-polito/federation-autoscaler/api/broker/v1alpha1"
 )
 
-var _ = Describe("ClusterAdvertisement Controller", func() {
+var _ = Describe("Reservation Controller", func() {
 	Context("When reconciling a resource", func() {
 		const resourceName = "test-resource"
 
@@ -42,26 +42,27 @@ var _ = Describe("ClusterAdvertisement Controller", func() {
 			Name:      resourceName,
 			Namespace: "default", // TODO(user):Modify as needed
 		}
-		clusteradvertisement := &brokerv1alpha1.ClusterAdvertisement{}
+		reservation := &brokerv1alpha1.Reservation{}
 
 		BeforeEach(func() {
-			By("creating the custom resource for the Kind ClusterAdvertisement")
-			err := k8sClient.Get(ctx, typeNamespacedName, clusteradvertisement)
+			By("creating the custom resource for the Kind Reservation")
+			err := k8sClient.Get(ctx, typeNamespacedName, reservation)
 			if err != nil && errors.IsNotFound(err) {
-				res := &brokerv1alpha1.ClusterAdvertisement{
+				res := &brokerv1alpha1.Reservation{
 					ObjectMeta: metav1.ObjectMeta{
 						Name:      resourceName,
 						Namespace: "default",
 					},
-					Spec: brokerv1alpha1.ClusterAdvertisementSpec{
-						ClusterID:     "provider-test",
-						LiqoClusterID: "liqo-provider-test",
-						ClusterType:   brokerv1alpha1.ChunkTypeStandard,
-						Resources: brokerv1alpha1.AdvertisedResources{
-							Allocatable: corev1.ResourceList{
-								corev1.ResourceCPU:    resource.MustParse("8"),
-								corev1.ResourceMemory: resource.MustParse("16Gi"),
-							},
+					Spec: brokerv1alpha1.ReservationSpec{
+						ConsumerClusterID:     "consumer-test",
+						ConsumerLiqoClusterID: "liqo-consumer-test",
+						ProviderClusterID:     "provider-test",
+						ProviderLiqoClusterID: "liqo-provider-test",
+						ChunkCount:            1,
+						ChunkType:             brokerv1alpha1.ChunkTypeStandard,
+						Resources: corev1.ResourceList{
+							corev1.ResourceCPU:    resource.MustParse("2"),
+							corev1.ResourceMemory: resource.MustParse("4Gi"),
 						},
 					},
 				}
@@ -71,16 +72,16 @@ var _ = Describe("ClusterAdvertisement Controller", func() {
 
 		AfterEach(func() {
 			// TODO(user): Cleanup logic after each test, like removing the resource instance.
-			resource := &brokerv1alpha1.ClusterAdvertisement{}
+			resource := &brokerv1alpha1.Reservation{}
 			err := k8sClient.Get(ctx, typeNamespacedName, resource)
 			Expect(err).NotTo(HaveOccurred())
 
-			By("Cleanup the specific resource instance ClusterAdvertisement")
+			By("Cleanup the specific resource instance Reservation")
 			Expect(k8sClient.Delete(ctx, resource)).To(Succeed())
 		})
 		It("should successfully reconcile the resource", func() {
 			By("Reconciling the created resource")
-			controllerReconciler := &ClusterAdvertisementReconciler{
+			controllerReconciler := &ReservationReconciler{
 				Client: k8sClient,
 				Scheme: k8sClient.Scheme(),
 			}

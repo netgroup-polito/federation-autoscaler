@@ -19,4 +19,40 @@ resources:
   kind: ClusterAdvertisement
   path: github.com/netgroup-polito/federation-autoscaler/api/broker/v1alpha1
   version: v1alpha1
+- api:
+    crdVersion: v1
+    namespaced: true
+  controller: true
+  domain: federation-autoscaler.io
+  group: broker
+  kind: Reservation
+  path: github.com/netgroup-polito/federation-autoscaler/api/broker/v1alpha1
+  version: v1alpha1
+- api:
+    crdVersion: v1
+    namespaced: true
+  controller: true
+  domain: federation-autoscaler.io
+  group: autoscaling
+  kind: VirtualNodeState
+  path: github.com/netgroup-polito/federation-autoscaler/api/autoscaling/v1alpha1
+  version: v1alpha1
+- api:
+    crdVersion: v1
+    namespaced: true
+  controller: true
+  domain: federation-autoscaler.io
+  group: autoscaling
+  kind: ProviderInstruction
+  path: github.com/netgroup-polito/federation-autoscaler/api/autoscaling/v1alpha1
+  version: v1alpha1
+- api:
+    crdVersion: v1
+    namespaced: true
+  controller: true
+  domain: federation-autoscaler.io
+  group: autoscaling
+  kind: ReservationInstruction
+  path: github.com/netgroup-polito/federation-autoscaler/api/autoscaling/v1alpha1
+  version: v1alpha1
 version: "3"

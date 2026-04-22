@@ -5,9 +5,42 @@ metadata:
   name: manager-role
 rules:
 - apiGroups:
+  - autoscaling.federation-autoscaler.io
+  resources:
+  - providerinstructions
+  - reservationinstructions
+  - virtualnodestates
+  verbs:
+  - create
+  - delete
+  - get
+  - list
+  - patch
+  - update
+  - watch
+- apiGroups:
+  - autoscaling.federation-autoscaler.io
+  resources:
+  - providerinstructions/finalizers
+  - reservationinstructions/finalizers
+  - virtualnodestates/finalizers
+  verbs:
+  - update
+- apiGroups:
+  - autoscaling.federation-autoscaler.io
+  resources:
+  - providerinstructions/status
+  - reservationinstructions/status
+  - virtualnodestates/status
+  verbs:
+  - get
+  - patch
+  - update
+- apiGroups:
   - broker.federation-autoscaler.io
   resources:
   - clusteradvertisements
+  - reservations
   verbs:
   - create
   - delete
@@ -20,12 +53,14 @@ rules:
   - broker.federation-autoscaler.io
   resources:
   - clusteradvertisements/finalizers
+  - reservations/finalizers
   verbs:
   - update
 - apiGroups:
   - broker.federation-autoscaler.io
   resources:
   - clusteradvertisements/status
+  - reservations/status
   verbs:
   - get
   - patch

@@ -1,0 +1,9 @@
+apiVersion: autoscaling.federation-autoscaler.io/v1alpha1
+kind: ReservationInstruction
+metadata:
+  labels:
+    app.kubernetes.io/name: federation-autoscaler
+    app.kubernetes.io/managed-by: kustomize
+  name: reservationinstruction-sample
+spec:
+  # TODO(user): Add fields here
