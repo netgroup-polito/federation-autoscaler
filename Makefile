@@ -1,4 +1,24 @@
-# Image URL to use all building/pushing image targets
+# -----------------------------------------------------------------------------
+# Component model
+# -----------------------------------------------------------------------------
+# federation-autoscaler ships as THREE independent binaries / container images:
+# broker, agent, and grpc-server. The build/run/docker-* targets are driven by
+# the COMPONENT variable:
+#
+#   make build                              # builds all three into bin/
+#   make build COMPONENT=broker             # builds only bin/broker
+#   make docker-build COMPONENT=agent       # builds the agent image
+#   make run COMPONENT=grpc-server          # go run ./cmd/grpc-server
+#
+# Container images follow the pattern $(IMG_PREFIX)/$(COMPONENT):$(TAG); set
+# IMG_PREFIX to your registry path and TAG to the desired version.
+COMPONENTS ?= broker agent grpc-server
+IMG_PREFIX ?= federation-autoscaler
+TAG        ?= latest
+
+# IMG is retained only for the legacy install/deploy/build-installer targets
+# scaffolded by kubebuilder; those will be rewritten per-component in a later
+# step when we add kustomize overlays for each binary.
 IMG ?= controller:latest
 
 # Get the currently used golang install path (in GOPATH/bin, unless GOBIN is set)
@@ -104,40 +124,74 @@ lint-config: golangci-lint ## Verify golangci-lint linter configuration
 
 ##@ Build
 
+# Helper: fail fast if COMPONENT is set to something outside $(COMPONENTS).
+define assert-known-component
+$(if $(filter $(COMPONENT),$(COMPONENTS)),,$(error unknown COMPONENT=$(COMPONENT); must be one of: $(COMPONENTS)))
+endef
+
+# build: builds every component unless COMPONENT is set to restrict to one.
 .PHONY: build
-build: manifests generate fmt vet ## Build manager binary.
-	go build -o bin/manager cmd/main.go
+build: manifests generate fmt vet ## Build binaries into bin/. Set COMPONENT=<broker|agent|grpc-server> to build one.
+	$(if $(COMPONENT),$(call assert-known-component),)
+	@targets="$(if $(COMPONENT),$(COMPONENT),$(COMPONENTS))"; \
+	for c in $$targets; do \
+		echo ">>> building $$c"; \
+		go build -o bin/$$c ./cmd/$$c || exit 1; \
+	done
 
 .PHONY: run
-run: manifests generate fmt vet ## Run a controller from your host.
-	go run ./cmd/main.go
+run: manifests generate fmt vet ## Run one component from host. Requires COMPONENT=<broker|agent|grpc-server>.
+	$(if $(COMPONENT),$(call assert-known-component),$(error COMPONENT must be set to one of: $(COMPONENTS)))
+	go run ./cmd/$(COMPONENT)
 
-# If you wish to build the manager image targeting other platforms you can use the --platform flag.
-# (i.e. docker build --platform linux/arm64). However, you must enable docker buildKit for it.
-# More info: https://docs.docker.com/develop/develop-images/build_enhancements/
+# docker-build: builds every component's image unless COMPONENT is set.
+# Image name is always $(IMG_PREFIX)/<component>:$(TAG).
 .PHONY: docker-build
-docker-build: ## Build docker image with the manager.
-	$(CONTAINER_TOOL) build -t ${IMG} .
+docker-build: ## Build container image(s). Set COMPONENT=<one> to build a single image.
+	$(if $(COMPONENT),$(call assert-known-component),)
+	@targets="$(if $(COMPONENT),$(COMPONENT),$(COMPONENTS))"; \
+	for c in $$targets; do \
+		img="$(IMG_PREFIX)/$$c:$(TAG)"; \
+		echo ">>> building image $$img"; \
+		$(CONTAINER_TOOL) build --build-arg COMPONENT=$$c -t $$img . || exit 1; \
+	done
 
 .PHONY: docker-push
-docker-push: ## Push docker image with the manager.
-	$(CONTAINER_TOOL) push ${IMG}
+docker-push: ## Push container image(s). Set COMPONENT=<one> to push a single image.
+	$(if $(COMPONENT),$(call assert-known-component),)
+	@targets="$(if $(COMPONENT),$(COMPONENT),$(COMPONENTS))"; \
+	for c in $$targets; do \
+		img="$(IMG_PREFIX)/$$c:$(TAG)"; \
+		echo ">>> pushing image $$img"; \
+		$(CONTAINER_TOOL) push $$img || exit 1; \
+	done
 
-# PLATFORMS defines the target platforms for the manager image be built to provide support to multiple
-# architectures. (i.e. make docker-buildx IMG=myregistry/mypoperator:0.0.1). To use this option you need to:
-# - be able to use docker buildx. More info: https://docs.docker.com/build/buildx/
-# - have enabled BuildKit. More info: https://docs.docker.com/develop/develop-images/build_enhancements/
-# - be able to push the image to your registry (i.e. if you do not set a valid value via IMG=<myregistry/image:<tag>> then the export will fail)
-# To adequately provide solutions that are compatible with multiple platforms, you should consider using this option.
+# Multi-arch cross-build (push). Uses a transient buildx builder and writes a
+# temporary Dockerfile.cross that pins --platform=${BUILDPLATFORM} on the
+# builder stage.
 PLATFORMS ?= linux/arm64,linux/amd64,linux/s390x,linux/ppc64le
 .PHONY: docker-buildx
-docker-buildx: ## Build and push docker image for the manager for cross-platform support
-	# copy existing Dockerfile and insert --platform=${BUILDPLATFORM} into Dockerfile.cross, and preserve the original Dockerfile
-	sed -e '1 s/\(^FROM\)/FROM --platform=\$$\{BUILDPLATFORM\}/; t' -e ' 1,// s//FROM --platform=\$$\{BUILDPLATFORM\}/' Dockerfile > Dockerfile.cross
-	- $(CONTAINER_TOOL) buildx create --name federation-autoscaler-builder
-	$(CONTAINER_TOOL) buildx use federation-autoscaler-builder
-	- $(CONTAINER_TOOL) buildx build --push --platform=$(PLATFORMS) --tag ${IMG} -f Dockerfile.cross .
-	- $(CONTAINER_TOOL) buildx rm federation-autoscaler-builder
+docker-buildx: ## Cross-platform build+push. Set COMPONENT=<one> to build a single image.
+	$(if $(COMPONENT),$(call assert-known-component),)
+	@targets="$(if $(COMPONENT),$(COMPONENT),$(COMPONENTS))"; \
+	sed -e '1 s/\(^FROM\)/FROM --platform=\$$\{BUILDPLATFORM\}/; t' \
+	    -e ' 1,// s//FROM --platform=\$$\{BUILDPLATFORM\}/' Dockerfile > Dockerfile.cross; \
+	$(CONTAINER_TOOL) buildx create --name federation-autoscaler-builder >/dev/null 2>&1 || true; \
+	$(CONTAINER_TOOL) buildx use federation-autoscaler-builder; \
+	for c in $$targets; do \
+		img="$(IMG_PREFIX)/$$c:$(TAG)"; \
+		echo ">>> buildx+push $$img ($(PLATFORMS))"; \
+		$(CONTAINER_TOOL) buildx build --push \
+			--platform=$(PLATFORMS) \
+			--build-arg COMPONENT=$$c \
+			--tag $$img \
+			-f Dockerfile.cross . || { \
+			$(CONTAINER_TOOL) buildx rm federation-autoscaler-builder >/dev/null 2>&1 || true; \
+			rm Dockerfile.cross; \
+			exit 1; \
+		}; \
+	done; \
+	$(CONTAINER_TOOL) buildx rm federation-autoscaler-builder >/dev/null 2>&1 || true; \
 	rm Dockerfile.cross
 
 .PHONY: build-installer
