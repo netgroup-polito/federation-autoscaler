@@ -29,6 +29,7 @@ package main
 import (
 	"flag"
 	"os"
+	"time"
 
 	_ "k8s.io/client-go/plugin/pkg/client/auth"
 
@@ -40,6 +41,7 @@ import (
 
 	autoscalingv1alpha1 "github.com/netgroup-polito/federation-autoscaler/api/autoscaling/v1alpha1"
 	brokerv1alpha1 "github.com/netgroup-polito/federation-autoscaler/api/broker/v1alpha1"
+	brokerapi "github.com/netgroup-polito/federation-autoscaler/internal/broker/api"
 	autoscalingcontroller "github.com/netgroup-polito/federation-autoscaler/internal/controller/autoscaling"
 	brokercontroller "github.com/netgroup-polito/federation-autoscaler/internal/controller/broker"
 	fedmanager "github.com/netgroup-polito/federation-autoscaler/internal/manager"
@@ -60,6 +62,29 @@ func main() {
 	cfg := fedmanager.BindFlags(flag.CommandLine)
 	zapOpts := zap.Options{Development: true}
 	zapOpts.BindFlags(flag.CommandLine)
+
+	// Broker REST API flags (docs/design.md §7.3, §10.1).
+	var (
+		apiBindAddress     string
+		apiTLSCertFile     string
+		apiTLSKeyFile      string
+		apiTLSClientCAFile string
+		apiShutdownTimeout time.Duration
+		apiNamespace       string
+	)
+	flag.StringVar(&apiBindAddress, "api-bind-address", ":8443",
+		"host:port for the Broker REST API HTTPS listener.")
+	flag.StringVar(&apiTLSCertFile, "api-tls-cert-file", "",
+		"PEM-encoded server certificate served on TLS handshake (mandatory).")
+	flag.StringVar(&apiTLSKeyFile, "api-tls-key-file", "",
+		"PEM-encoded private key matching --api-tls-cert-file (mandatory).")
+	flag.StringVar(&apiTLSClientCAFile, "api-client-ca-file", "",
+		"PEM-encoded CA bundle used to verify agent client certificates (mandatory; mTLS).")
+	flag.DurationVar(&apiShutdownTimeout, "api-shutdown-timeout", 15*time.Second,
+		"Max time to wait for in-flight HTTP requests to drain on shutdown.")
+	flag.StringVar(&apiNamespace, "namespace", "federation-autoscaler-system",
+		"Namespace where Broker-owned CRs (ClusterAdvertisement, Reservation, *Instruction) are stored.")
+
 	flag.Parse()
 
 	ctrl.SetLogger(zap.New(zap.UseFlagOptions(&zapOpts)))
@@ -99,6 +124,26 @@ func main() {
 		Scheme: mgr.GetScheme(),
 	}).SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "unable to create controller", "controller", "ReservationInstruction")
+		os.Exit(1)
+	}
+
+	apiRunnable, err := brokerapi.NewRunnable(brokerapi.RunnableOptions{
+		BindAddress: apiBindAddress,
+		TLS: brokerapi.TLSConfig{
+			CertFile:     apiTLSCertFile,
+			KeyFile:      apiTLSKeyFile,
+			ClientCAFile: apiTLSClientCAFile,
+		},
+		ShutdownTimeout: apiShutdownTimeout,
+		Client:          mgr.GetClient(),
+		Namespace:       apiNamespace,
+	})
+	if err != nil {
+		setupLog.Error(err, "unable to build broker api server")
+		os.Exit(1)
+	}
+	if err := mgr.Add(apiRunnable); err != nil {
+		setupLog.Error(err, "unable to register broker api server with manager")
 		os.Exit(1)
 	}
 
