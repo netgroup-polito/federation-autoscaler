@@ -26,12 +26,14 @@ import (
 	"encoding/json"
 	"io"
 	"net/http"
+	"sort"
 
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 
 	brokerv1alpha1 "github.com/netgroup-polito/federation-autoscaler/api/broker/v1alpha1"
@@ -169,6 +171,45 @@ var _ = Describe("Broker REST API", func() {
 		})
 	})
 
+	Describe("GET /api/v1/nodegroups", func() {
+		It("returns one entry per available provider, drops unavailable ones, and sorts stably", func() {
+			// provider-a was created by an earlier spec via the advertisement
+			// endpoint; status.available is already true.
+
+			// Inject a second provider directly in etcd. Two scenarios:
+			//   - provider-c is available    → must appear in the response.
+			//   - provider-z is unavailable  → must be filtered out.
+			ensureAdvertisement(suiteCtx, "provider-c", true)
+			ensureAdvertisement(suiteCtx, "provider-z", false)
+
+			authClusterID = consumerCluster
+			resp := doJSON(http.MethodGet, "/api/v1/nodegroups", nil)
+			Expect(resp.Status).To(Equal(http.StatusOK), resp.Describe())
+
+			var body NodeGroupListResponse
+			Expect(resp.DecodeInto(&body)).To(Succeed())
+
+			// Filter: provider-z must be absent.
+			ids := make([]string, 0, len(body.NodeGroups))
+			for _, ng := range body.NodeGroups {
+				ids = append(ids, ng.ProviderClusterID)
+			}
+			Expect(ids).To(ContainElement(providerCluster))
+			Expect(ids).To(ContainElement("provider-c"))
+			Expect(ids).NotTo(ContainElement("provider-z"))
+
+			// Stable sort: ProviderClusterID ASC.
+			Expect(sort.StringsAreSorted(ids)).To(BeTrue(), "ids=%v not sorted", ids)
+
+			// Each entry has the right shape.
+			for _, ng := range body.NodeGroups {
+				Expect(ng.ID).NotTo(BeEmpty())
+				Expect(ng.MinSize).To(Equal(int32(0)))
+				Expect(ng.Type).To(Equal(brokerv1alpha1.ChunkTypeStandard))
+			}
+		})
+	})
+
 	Describe("/healthz", func() {
 		It("returns 200 OK without authentication", func() {
 			resp := doJSON(http.MethodGet, "/healthz", nil)
@@ -220,4 +261,35 @@ func doJSON(method, path string, body any) recordedResponse {
 	raw, err := io.ReadAll(resp.Body)
 	Expect(err).NotTo(HaveOccurred())
 	return recordedResponse{Status: resp.StatusCode, Body: raw}
+}
+
+// ensureAdvertisement creates a minimally valid ClusterAdvertisement CR for
+// providerID and stamps status.available accordingly. Used by the
+// /nodegroups spec to seed both an available extra provider and an
+// unavailable one without going through the advertisement endpoint
+// (status.available cannot be made false through the public API).
+func ensureAdvertisement(ctx context.Context, providerID string, available bool) {
+	cadv := &brokerv1alpha1.ClusterAdvertisement{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      providerID,
+			Namespace: testNamespace,
+		},
+		Spec: brokerv1alpha1.ClusterAdvertisementSpec{
+			ClusterID:     providerID,
+			LiqoClusterID: "liqo-" + providerID,
+			ClusterType:   brokerv1alpha1.ChunkTypeStandard,
+			Resources: brokerv1alpha1.AdvertisedResources{
+				Allocatable: corev1.ResourceList{
+					corev1.ResourceCPU:    resource.MustParse("4"),
+					corev1.ResourceMemory: resource.MustParse("8Gi"),
+				},
+			},
+		},
+	}
+	Expect(k8sClient.Create(ctx, cadv)).To(Succeed())
+
+	cadv.Status.Available = available
+	cadv.Status.TotalChunks = 2
+	cadv.Status.AvailableChunks = 2
+	Expect(k8sClient.Status().Update(ctx, cadv)).To(Succeed())
 }

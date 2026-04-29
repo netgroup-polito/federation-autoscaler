@@ -18,7 +18,9 @@ package autoscaling
 
 import (
 	"context"
+	"time"
 
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -27,31 +29,103 @@ import (
 	autoscalingv1alpha1 "github.com/netgroup-polito/federation-autoscaler/api/autoscaling/v1alpha1"
 )
 
-// ProviderInstructionReconciler reconciles a ProviderInstruction object
+// ProviderInstructionReconciler keeps ProviderInstruction CRs tidy:
+//   - stamps Status.IssuedAt the first time it sees a brand new instruction;
+//   - garbage-collects Enforced instructions after EnforcedTTL has elapsed;
+//   - fails the parent Reservation and deletes the instruction when
+//     Spec.ExpiresAt is reached before enforcement.
+//
+// The reconciler never speaks to a provider agent directly — agents pull
+// instructions through the Broker REST API. This is purely housekeeping.
 type ProviderInstructionReconciler struct {
 	client.Client
 	Scheme *runtime.Scheme
+
+	// EnforcedTTL is how long an Enforced instruction survives before
+	// being deleted. Zero means use DefaultEnforcedTTL.
+	EnforcedTTL time.Duration
+
+	// Now is injectable for tests; defaults to time.Now.
+	Now func() time.Time
 }
 
 // +kubebuilder:rbac:groups=autoscaling.federation-autoscaler.io,resources=providerinstructions,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=autoscaling.federation-autoscaler.io,resources=providerinstructions/status,verbs=get;update;patch
 // +kubebuilder:rbac:groups=autoscaling.federation-autoscaler.io,resources=providerinstructions/finalizers,verbs=update
+// +kubebuilder:rbac:groups=broker.federation-autoscaler.io,resources=reservations,verbs=get;list;watch
+// +kubebuilder:rbac:groups=broker.federation-autoscaler.io,resources=reservations/status,verbs=get;update;patch
 
-// Reconcile is part of the main kubernetes reconciliation loop which aims to
-// move the current state of the cluster closer to the desired state.
-// TODO(user): Modify the Reconcile function to compare the state specified by
-// the ProviderInstruction object against the actual cluster state, and then
-// perform operations to make the cluster state reflect the state specified by
-// the user.
-//
-// For more details, check Reconcile and its Result here:
-// - https://pkg.go.dev/sigs.k8s.io/controller-runtime@v0.22.1/pkg/reconcile
+// Reconcile drives the housekeeping state machine documented on the type.
 func (r *ProviderInstructionReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
-	_ = logf.FromContext(ctx)
+	log := logf.FromContext(ctx).WithValues("providerInstruction", req.String())
 
-	// TODO(user): your logic here
+	var pi autoscalingv1alpha1.ProviderInstruction
+	if err := r.Get(ctx, req.NamespacedName, &pi); err != nil {
+		return ctrl.Result{}, client.IgnoreNotFound(err)
+	}
 
-	return ctrl.Result{}, nil
+	// 1. Stamp IssuedAt on first observation. Re-queue immediately so the
+	//    next pass sees the freshly-stamped status.
+	if pi.Status.IssuedAt == nil {
+		now := metav1.NewTime(r.now())
+		patched := pi.DeepCopy()
+		patched.Status.IssuedAt = &now
+		patched.Status.ObservedGeneration = pi.Generation
+		if err := r.Status().Update(ctx, patched); err != nil {
+			return ctrl.Result{}, err
+		}
+		return ctrl.Result{Requeue: true}, nil
+	}
+
+	// 2. Enforced TTL: delete after grace period.
+	if pi.Status.Enforced {
+		if r.enforcedExpired(&pi) {
+			log.Info("garbage-collecting enforced ProviderInstruction")
+			return ctrl.Result{}, client.IgnoreNotFound(r.Delete(ctx, &pi))
+		}
+	} else if pi.Spec.ExpiresAt != nil && !pi.Spec.ExpiresAt.After(r.now()) {
+		// 3. Expiry: instruction was never enforced before its deadline.
+		log.Info("ProviderInstruction expired without enforcement; failing parent Reservation",
+			"reservationId", pi.Spec.ReservationID)
+		if err := failParentReservationOnExpiry(ctx, r.Client, pi.Namespace,
+			pi.Spec.ReservationID, pi.Name); err != nil {
+			return ctrl.Result{}, err
+		}
+		return ctrl.Result{}, client.IgnoreNotFound(r.Delete(ctx, &pi))
+	}
+
+	// 4. Schedule the next wake-up at whichever deadline (ExpiresAt or
+	//    LastUpdateTime+TTL) is closer.
+	wake := instructionWakeup(r.now(), pi.Spec.ExpiresAt, instructionStatus{
+		Enforced:       pi.Status.Enforced,
+		IssuedAt:       pi.Status.IssuedAt,
+		LastUpdateTime: pi.Status.LastUpdateTime,
+	}, r.ttl())
+	if wake == 0 {
+		return ctrl.Result{}, nil
+	}
+	return ctrl.Result{RequeueAfter: wake}, nil
+}
+
+func (r *ProviderInstructionReconciler) enforcedExpired(pi *autoscalingv1alpha1.ProviderInstruction) bool {
+	if pi.Status.LastUpdateTime == nil {
+		return false
+	}
+	return r.now().Sub(pi.Status.LastUpdateTime.Time) >= r.ttl()
+}
+
+func (r *ProviderInstructionReconciler) ttl() time.Duration {
+	if r.EnforcedTTL > 0 {
+		return r.EnforcedTTL
+	}
+	return DefaultEnforcedTTL
+}
+
+func (r *ProviderInstructionReconciler) now() time.Time {
+	if r.Now != nil {
+		return r.Now()
+	}
+	return time.Now()
 }
 
 // SetupWithManager sets up the controller with the Manager.

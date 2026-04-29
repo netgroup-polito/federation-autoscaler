@@ -147,33 +147,13 @@ func (s *Server) handleHealthz(w http.ResponseWriter, _ *http.Request) {
 // Real handlers:
 //   - handleAdvertisementUpsert / handleAdvertisementGet — advertisement.go
 //   - handleHeartbeat                                    — heartbeat.go
+//   - handleNodeGroupsList                               — nodegroups.go
 //   - handleReservationCreate / Get / Release            — reservation.go
 //   - handleInstructionsList / handleInstructionResult   — instructions.go
-//
-// Last remaining stub (GET /api/v1/nodegroups) is left for a later step;
-// the consumer flow does not block on it as long as the gRPC server can
-// derive node groups from the advertisement-side caches.
-
-func (s *Server) handleNodeGroupsList(w http.ResponseWriter, r *http.Request) {
-	s.notImplemented(w, r, "GET /api/v1/nodegroups")
-}
 
 // -----------------------------------------------------------------------------
 // Response helpers
 // -----------------------------------------------------------------------------
-
-// notImplemented returns the standard 501 ErrorResponse and echoes the
-// X-Request-Id header in both the response and the structured log line.
-func (s *Server) notImplemented(w http.ResponseWriter, r *http.Request, route string) {
-	requestID := r.Header.Get(HeaderRequestID)
-	s.log.V(1).Info("stub handler hit", "route", route, "requestId", requestID)
-	writeError(w, http.StatusNotImplemented, ErrorResponse{
-		Code:      ErrCodeInternalError,
-		Message:   "endpoint not implemented yet",
-		Details:   map[string]any{"route": route},
-		RequestID: requestID,
-	})
-}
 
 // writeJSON writes a 2xx JSON response with the canonical content type. It
 // hides marshal failures behind a generic 500 to avoid leaking internal

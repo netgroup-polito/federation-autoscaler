@@ -1,5 +1,5 @@
 /*
-Copyright 2026.
+Copyright 2026 Politecnico di Torino - NetGroup.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -18,6 +18,7 @@ package broker
 
 import (
 	"context"
+	"time"
 
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
@@ -35,19 +36,17 @@ import (
 var _ = Describe("ClusterAdvertisement Controller", func() {
 	Context("When reconciling a resource", func() {
 		const resourceName = "test-resource"
-
 		ctx := context.Background()
 
 		typeNamespacedName := types.NamespacedName{
 			Name:      resourceName,
-			Namespace: "default", // TODO(user):Modify as needed
+			Namespace: "default",
 		}
-		clusteradvertisement := &brokerv1alpha1.ClusterAdvertisement{}
 
 		BeforeEach(func() {
 			By("creating the custom resource for the Kind ClusterAdvertisement")
-			err := k8sClient.Get(ctx, typeNamespacedName, clusteradvertisement)
-			if err != nil && errors.IsNotFound(err) {
+			existing := &brokerv1alpha1.ClusterAdvertisement{}
+			if err := k8sClient.Get(ctx, typeNamespacedName, existing); err != nil && errors.IsNotFound(err) {
 				res := &brokerv1alpha1.ClusterAdvertisement{
 					ObjectMeta: metav1.ObjectMeta{
 						Name:      resourceName,
@@ -70,27 +69,68 @@ var _ = Describe("ClusterAdvertisement Controller", func() {
 		})
 
 		AfterEach(func() {
-			// TODO(user): Cleanup logic after each test, like removing the resource instance.
-			resource := &brokerv1alpha1.ClusterAdvertisement{}
-			err := k8sClient.Get(ctx, typeNamespacedName, resource)
-			Expect(err).NotTo(HaveOccurred())
-
+			res := &brokerv1alpha1.ClusterAdvertisement{}
+			Expect(k8sClient.Get(ctx, typeNamespacedName, res)).To(Succeed())
 			By("Cleanup the specific resource instance ClusterAdvertisement")
-			Expect(k8sClient.Delete(ctx, resource)).To(Succeed())
+			Expect(k8sClient.Delete(ctx, res)).To(Succeed())
 		})
-		It("should successfully reconcile the resource", func() {
-			By("Reconciling the created resource")
-			controllerReconciler := &ClusterAdvertisementReconciler{
-				Client: k8sClient,
-				Scheme: k8sClient.Scheme(),
-			}
 
-			_, err := controllerReconciler.Reconcile(ctx, reconcile.Request{
-				NamespacedName: typeNamespacedName,
-			})
+		// reconcileOnce constructs the reconciler with a 1-second freshness
+		// window and runs a single Reconcile pass against the fixture.
+		reconcileOnce := func() reconcile.Result {
+			r := &ClusterAdvertisementReconciler{
+				Client:     k8sClient,
+				Scheme:     k8sClient.Scheme(),
+				StaleAfter: time.Second,
+			}
+			res, err := r.Reconcile(ctx, reconcile.Request{NamespacedName: typeNamespacedName})
 			Expect(err).NotTo(HaveOccurred())
-			// TODO(user): Add more specific assertions depending on your controller's reconciliation logic.
-			// Example: If you expect a certain status condition after reconciliation, verify it here.
+			return res
+		}
+
+		It("flips Available=false when LastSeen is missing", func() {
+			reconcileOnce()
+
+			updated := &brokerv1alpha1.ClusterAdvertisement{}
+			Expect(k8sClient.Get(ctx, typeNamespacedName, updated)).To(Succeed())
+			Expect(updated.Status.Available).To(BeFalse())
+		})
+
+		It("keeps Available=true when LastSeen is fresh", func() {
+			res := &brokerv1alpha1.ClusterAdvertisement{}
+			Expect(k8sClient.Get(ctx, typeNamespacedName, res)).To(Succeed())
+			now := metav1.Now()
+			res.Status.LastSeen = &now
+			res.Status.Available = true
+			res.Status.TotalChunks = 4
+			res.Status.AvailableChunks = 4
+			Expect(k8sClient.Status().Update(ctx, res)).To(Succeed())
+
+			reconcileOnce()
+
+			updated := &brokerv1alpha1.ClusterAdvertisement{}
+			Expect(k8sClient.Get(ctx, typeNamespacedName, updated)).To(Succeed())
+			Expect(updated.Status.Available).To(BeTrue())
+			Expect(updated.Status.AvailableChunks).To(Equal(int32(4)))
+		})
+
+		It("flips Available=false when LastSeen is older than StaleAfter and zeroes AvailableChunks", func() {
+			res := &brokerv1alpha1.ClusterAdvertisement{}
+			Expect(k8sClient.Get(ctx, typeNamespacedName, res)).To(Succeed())
+			old := metav1.NewTime(time.Now().Add(-30 * time.Second))
+			res.Status.LastSeen = &old
+			res.Status.Available = true
+			res.Status.TotalChunks = 4
+			res.Status.AvailableChunks = 4
+			Expect(k8sClient.Status().Update(ctx, res)).To(Succeed())
+
+			result := reconcileOnce()
+			Expect(result.RequeueAfter).To(BeNumerically(">", time.Duration(0)))
+
+			updated := &brokerv1alpha1.ClusterAdvertisement{}
+			Expect(k8sClient.Get(ctx, typeNamespacedName, updated)).To(Succeed())
+			Expect(updated.Status.Available).To(BeFalse())
+			Expect(updated.Status.AvailableChunks).To(Equal(int32(0)))
 		})
 	})
 })
