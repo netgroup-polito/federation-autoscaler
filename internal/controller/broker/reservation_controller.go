@@ -25,10 +25,13 @@ import (
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/types"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
+	"sigs.k8s.io/controller-runtime/pkg/handler"
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
+	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
 	autoscalingv1alpha1 "github.com/netgroup-polito/federation-autoscaler/api/autoscaling/v1alpha1"
 	brokerv1alpha1 "github.com/netgroup-polito/federation-autoscaler/api/broker/v1alpha1"
@@ -79,6 +82,14 @@ func (r *ReservationReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 	// ExpiresAt, take it straight to Expired. No instruction emission.
 	if expired, requeue := r.checkExpired(ctx, &resv); expired {
 		return ctrl.Result{RequeueAfter: requeue}, nil
+	}
+
+	// Provider-availability guard: if the provider's ClusterAdvertisement
+	// went missing or unavailable while a non-terminal Reservation still
+	// depends on it, fail the reservation (and queue a Cleanup for the
+	// consumer when peering had already started).
+	if abandoned, err := r.checkProviderAvailable(ctx, log, &resv); abandoned || err != nil {
+		return ctrl.Result{}, err
 	}
 
 	switch resv.Status.Phase {
@@ -185,7 +196,10 @@ func (r *ReservationReconciler) handleUnpeering(
 			ProviderClusterID:     resv.Spec.ProviderClusterID,
 			ProviderLiqoClusterID: resv.Spec.ProviderLiqoClusterID,
 			ChunkCount:            resv.Spec.ChunkCount,
-			LastChunk:             true, // step 5c only supports full release
+			// v1 limitation: a Reservation always releases every chunk at
+			// once. Per-chunk decrement is a v2 feature; the field stays in
+			// the spec to keep the wire / CRD shape forward-compatible.
+			LastChunk: true,
 		},
 	}
 
@@ -234,6 +248,101 @@ func (r *ReservationReconciler) advancePhase(
 	patched.Status.Message = message
 	patched.Status.ObservedGeneration = resv.Generation
 	return r.Status().Update(ctx, patched)
+}
+
+// checkProviderAvailable fails a Reservation whose provider's
+// ClusterAdvertisement is missing or has flipped Available=false. The
+// guard is what closes the gap between the API handler — which validates
+// availability *at create time* — and a long-running reservation whose
+// provider may go away mid-flight.
+//
+// Phase Unpeering is excluded: it is already winding down via the Unpeer
+// instruction emitted by handleUnpeering, and we let the
+// instruction-result handler advance it to Released or Failed naturally.
+//
+// When the consumer had already begun peering (Peering / Peered), a
+// ReservationInstruction{Cleanup} is queued so the consumer agent can
+// drop the local Liqo state (ResourceSlice, NamespaceOffloading, virtual
+// node). Provider-side cleanup is intentionally skipped: the provider is
+// unreachable by definition, and a returning provider replays its own
+// state via ProviderInstructionReconcile.
+func (r *ReservationReconciler) checkProviderAvailable(
+	ctx context.Context, log logr.Logger, resv *brokerv1alpha1.Reservation,
+) (bool, error) {
+	if isReservationTerminal(resv.Status.Phase) {
+		return false, nil
+	}
+	if resv.Status.Phase == brokerv1alpha1.ReservationPhaseUnpeering {
+		return false, nil
+	}
+
+	var cadv brokerv1alpha1.ClusterAdvertisement
+	err := r.Get(ctx, types.NamespacedName{
+		Name: resv.Spec.ProviderClusterID, Namespace: resv.Namespace,
+	}, &cadv)
+	switch {
+	case err == nil && cadv.Status.Available:
+		return false, nil
+	case err != nil && !apierrors.IsNotFound(err):
+		return false, fmt.Errorf("get ClusterAdvertisement %q: %w", resv.Spec.ProviderClusterID, err)
+	}
+
+	msg := fmt.Sprintf("provider %q advertisement no longer available", resv.Spec.ProviderClusterID)
+	if apierrors.IsNotFound(err) {
+		msg = fmt.Sprintf("provider %q advertisement no longer exists", resv.Spec.ProviderClusterID)
+	}
+
+	if needsConsumerCleanup(resv.Status.Phase) {
+		if cerr := r.ensureCleanupInstruction(ctx, resv); cerr != nil {
+			return false, fmt.Errorf("ensure Cleanup instruction: %w", cerr)
+		}
+		log.Info("queued Cleanup after provider went unavailable",
+			"consumer", resv.Spec.ConsumerClusterID, "provider", resv.Spec.ProviderClusterID)
+	}
+
+	if err := r.advancePhase(ctx, resv, brokerv1alpha1.ReservationPhaseFailed, msg); err != nil {
+		return false, err
+	}
+	log.Info("reservation failed: provider unavailable",
+		"provider", resv.Spec.ProviderClusterID, "phase", resv.Status.Phase)
+	return true, nil
+}
+
+// needsConsumerCleanup returns true for phases where the consumer has
+// applied (or is in the process of applying) Liqo state that would leak
+// without an explicit teardown.
+func needsConsumerCleanup(p brokerv1alpha1.ReservationPhase) bool {
+	switch p {
+	case brokerv1alpha1.ReservationPhasePeering,
+		brokerv1alpha1.ReservationPhasePeered:
+		return true
+	}
+	return false
+}
+
+// ensureCleanupInstruction emits a ReservationInstruction{Cleanup}
+// targeted at the consumer. Same idempotency guarantees as
+// ensureInstruction: re-running this on a Reservation that already has a
+// cleanup instruction is a no-op.
+func (r *ReservationReconciler) ensureCleanupInstruction(
+	ctx context.Context, resv *brokerv1alpha1.Reservation,
+) error {
+	ri := &autoscalingv1alpha1.ReservationInstruction{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      reservationInstructionCleanupName(resv.Name),
+			Namespace: resv.Namespace,
+		},
+		Spec: autoscalingv1alpha1.ReservationInstructionSpec{
+			ReservationID:         resv.Name,
+			Kind:                  autoscalingv1alpha1.ReservationInstructionCleanup,
+			TargetClusterID:       resv.Spec.ConsumerClusterID,
+			ProviderClusterID:     resv.Spec.ProviderClusterID,
+			ProviderLiqoClusterID: resv.Spec.ProviderLiqoClusterID,
+			ChunkCount:            resv.Spec.ChunkCount,
+			LastChunk:             true,
+		},
+	}
+	return r.ensureInstruction(ctx, resv, ri)
 }
 
 // checkExpired flips a non-terminal Reservation to Expired when its
@@ -291,6 +400,10 @@ func reservationInstructionUnpeerName(reservationName string) string {
 	return "unpeer-" + reservationName
 }
 
+func reservationInstructionCleanupName(reservationName string) string {
+	return "cleanup-" + reservationName
+}
+
 // kubeconfigSecretName must match the value the API instruction handler
 // (internal/broker/api/instructions.go) uses when persisting the
 // peering-user kubeconfig — both have to agree on the Secret name to
@@ -302,11 +415,52 @@ func kubeconfigSecretName(reservationName string) string {
 }
 
 // SetupWithManager sets up the controller with the Manager.
+//
+// The Watches on ClusterAdvertisement is what wakes Reservations up when
+// their provider's freshness flips — without it, a stale provider would
+// leave dependent Reservations dangling until their ExpiresAt fires.
 func (r *ReservationReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	return ctrl.NewControllerManagedBy(mgr).
 		For(&brokerv1alpha1.Reservation{}).
 		Owns(&autoscalingv1alpha1.ProviderInstruction{}).
 		Owns(&autoscalingv1alpha1.ReservationInstruction{}).
+		Watches(
+			&brokerv1alpha1.ClusterAdvertisement{},
+			handler.EnqueueRequestsFromMapFunc(r.requestsForAdvertisement),
+		).
 		Named("broker-reservation").
 		Complete(r)
+}
+
+// requestsForAdvertisement enqueues every non-terminal Reservation in the
+// advertisement's namespace whose Spec.ProviderClusterID matches the CA
+// name. Terminal-phase Reservations are skipped — they are already done
+// and re-reconciling them would only generate etcd churn.
+func (r *ReservationReconciler) requestsForAdvertisement(
+	ctx context.Context, obj client.Object,
+) []reconcile.Request {
+	cadv, ok := obj.(*brokerv1alpha1.ClusterAdvertisement)
+	if !ok {
+		return nil
+	}
+	var resvs brokerv1alpha1.ReservationList
+	if err := r.List(ctx, &resvs, client.InNamespace(cadv.Namespace)); err != nil {
+		logf.FromContext(ctx).Error(err, "list Reservations for advertisement watch",
+			"advertisement", cadv.Name)
+		return nil
+	}
+	out := make([]reconcile.Request, 0, len(resvs.Items))
+	for i := range resvs.Items {
+		resv := &resvs.Items[i]
+		if resv.Spec.ProviderClusterID != cadv.Name {
+			continue
+		}
+		if isReservationTerminal(resv.Status.Phase) {
+			continue
+		}
+		out = append(out, reconcile.Request{
+			NamespacedName: types.NamespacedName{Name: resv.Name, Namespace: resv.Namespace},
+		})
+	}
+	return out
 }

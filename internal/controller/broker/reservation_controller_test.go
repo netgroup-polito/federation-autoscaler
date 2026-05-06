@@ -35,11 +35,39 @@ import (
 )
 
 var _ = Describe("Reservation Controller", func() {
-	const resName = "test-resource"
+	const (
+		resName      = "test-resource"
+		providerName = "provider-test"
+	)
 	ctx := context.Background()
 	key := types.NamespacedName{Name: resName, Namespace: "default"}
+	cadvKey := types.NamespacedName{Name: providerName, Namespace: "default"}
 
 	BeforeEach(func() {
+		By("creating a matching available ClusterAdvertisement so the provider-availability guard passes")
+		existingCA := &brokerv1alpha1.ClusterAdvertisement{}
+		if err := k8sClient.Get(ctx, cadvKey, existingCA); err != nil && apierrors.IsNotFound(err) {
+			cadv := &brokerv1alpha1.ClusterAdvertisement{
+				ObjectMeta: metav1.ObjectMeta{Name: providerName, Namespace: "default"},
+				Spec: brokerv1alpha1.ClusterAdvertisementSpec{
+					ClusterID:     providerName,
+					LiqoClusterID: "liqo-provider-test",
+					ClusterType:   brokerv1alpha1.ChunkTypeStandard,
+					Resources: brokerv1alpha1.AdvertisedResources{
+						Allocatable: corev1.ResourceList{
+							corev1.ResourceCPU:    resource.MustParse("8"),
+							corev1.ResourceMemory: resource.MustParse("16Gi"),
+						},
+					},
+				},
+			}
+			Expect(k8sClient.Create(ctx, cadv)).To(Succeed())
+			now := metav1.Now()
+			cadv.Status.Available = true
+			cadv.Status.LastSeen = &now
+			Expect(k8sClient.Status().Update(ctx, cadv)).To(Succeed())
+		}
+
 		By("creating a Reservation in Pending phase")
 		existing := &brokerv1alpha1.Reservation{}
 		if err := k8sClient.Get(ctx, key, existing); err != nil && apierrors.IsNotFound(err) {
@@ -48,7 +76,7 @@ var _ = Describe("Reservation Controller", func() {
 				Spec: brokerv1alpha1.ReservationSpec{
 					ConsumerClusterID:     "consumer-test",
 					ConsumerLiqoClusterID: "liqo-consumer-test",
-					ProviderClusterID:     "provider-test",
+					ProviderClusterID:     providerName,
 					ProviderLiqoClusterID: "liqo-provider-test",
 					ChunkCount:            2,
 					ChunkType:             brokerv1alpha1.ChunkTypeStandard,
@@ -66,7 +94,7 @@ var _ = Describe("Reservation Controller", func() {
 	})
 
 	AfterEach(func() {
-		By("cleaning up Reservation + emitted instructions")
+		By("cleaning up Reservation + emitted instructions + ClusterAdvertisement")
 		// Delete the parent first; OwnerReferences should garbage-collect
 		// children, but envtest does not run the garbage collector, so we
 		// remove them explicitly to keep specs isolated.
@@ -78,6 +106,10 @@ var _ = Describe("Reservation Controller", func() {
 		res := &brokerv1alpha1.Reservation{}
 		if err := k8sClient.Get(ctx, key, res); err == nil {
 			Expect(k8sClient.Delete(ctx, res)).To(Succeed())
+		}
+		cadv := &brokerv1alpha1.ClusterAdvertisement{}
+		if err := k8sClient.Get(ctx, cadvKey, cadv); err == nil {
+			Expect(k8sClient.Delete(ctx, cadv)).To(Succeed())
 		}
 	})
 
@@ -134,6 +166,82 @@ var _ = Describe("Reservation Controller", func() {
 		updated := &brokerv1alpha1.Reservation{}
 		Expect(k8sClient.Get(ctx, key, updated)).To(Succeed())
 		Expect(updated.Status.Phase).To(Equal(brokerv1alpha1.ReservationPhaseUnpeering))
+	})
+
+	It("fails a Pending Reservation when its ClusterAdvertisement is missing (no Cleanup needed)", func() {
+		By("removing the advertisement before reconcile")
+		cadv := &brokerv1alpha1.ClusterAdvertisement{}
+		Expect(k8sClient.Get(ctx, cadvKey, cadv)).To(Succeed())
+		Expect(k8sClient.Delete(ctx, cadv)).To(Succeed())
+
+		reconcileOnce()
+
+		updated := &brokerv1alpha1.Reservation{}
+		Expect(k8sClient.Get(ctx, key, updated)).To(Succeed())
+		Expect(updated.Status.Phase).To(Equal(brokerv1alpha1.ReservationPhaseFailed))
+		Expect(updated.Status.Message).To(ContainSubstring("no longer exists"))
+
+		// No instructions of any kind: Pending hasn't peered, no Cleanup needed.
+		piList := &autoscalingv1alpha1.ProviderInstructionList{}
+		Expect(k8sClient.List(ctx, piList, client.InNamespace("default"))).To(Succeed())
+		Expect(piList.Items).To(BeEmpty())
+		riList := &autoscalingv1alpha1.ReservationInstructionList{}
+		Expect(k8sClient.List(ctx, riList, client.InNamespace("default"))).To(Succeed())
+		Expect(riList.Items).To(BeEmpty())
+	})
+
+	It("fails a Peered Reservation and queues a Cleanup instruction when its provider goes unavailable", func() {
+		By("flipping the advertisement to Available=false")
+		cadv := &brokerv1alpha1.ClusterAdvertisement{}
+		Expect(k8sClient.Get(ctx, cadvKey, cadv)).To(Succeed())
+		cadv.Status.Available = false
+		Expect(k8sClient.Status().Update(ctx, cadv)).To(Succeed())
+
+		setPhase(ctx, key, brokerv1alpha1.ReservationPhasePeered)
+		reconcileOnce()
+
+		updated := &brokerv1alpha1.Reservation{}
+		Expect(k8sClient.Get(ctx, key, updated)).To(Succeed())
+		Expect(updated.Status.Phase).To(Equal(brokerv1alpha1.ReservationPhaseFailed))
+		Expect(updated.Status.Message).To(ContainSubstring("no longer available"))
+
+		got := &autoscalingv1alpha1.ReservationInstruction{}
+		Expect(k8sClient.Get(ctx, types.NamespacedName{
+			Name: "cleanup-" + resName, Namespace: "default",
+		}, got)).To(Succeed())
+		Expect(got.Spec.Kind).To(Equal(autoscalingv1alpha1.ReservationInstructionCleanup))
+		Expect(got.Spec.TargetClusterID).To(Equal("consumer-test"))
+		Expect(got.Spec.LastChunk).To(BeTrue())
+	})
+
+	It("does not interfere with a reservation already in Unpeering when the provider becomes unavailable", func() {
+		By("flipping the advertisement to Available=false")
+		cadv := &brokerv1alpha1.ClusterAdvertisement{}
+		Expect(k8sClient.Get(ctx, cadvKey, cadv)).To(Succeed())
+		cadv.Status.Available = false
+		Expect(k8sClient.Status().Update(ctx, cadv)).To(Succeed())
+
+		setPhase(ctx, key, brokerv1alpha1.ReservationPhaseUnpeering)
+		reconcileOnce()
+
+		updated := &brokerv1alpha1.Reservation{}
+		Expect(k8sClient.Get(ctx, key, updated)).To(Succeed())
+		// Phase MUST stay Unpeering — the existing Unpeer instruction is in
+		// flight and the instruction-result handler will move it to Released
+		// or Failed once the consumer reports back.
+		Expect(updated.Status.Phase).To(Equal(brokerv1alpha1.ReservationPhaseUnpeering))
+
+		got := &autoscalingv1alpha1.ReservationInstruction{}
+		Expect(k8sClient.Get(ctx, types.NamespacedName{
+			Name: "unpeer-" + resName, Namespace: "default",
+		}, got)).To(Succeed())
+		Expect(got.Spec.Kind).To(Equal(autoscalingv1alpha1.ReservationInstructionUnpeer))
+
+		// And no Cleanup instruction should have been emitted alongside it.
+		cleanupKey := types.NamespacedName{Name: "cleanup-" + resName, Namespace: "default"}
+		Expect(apierrors.IsNotFound(
+			k8sClient.Get(ctx, cleanupKey, &autoscalingv1alpha1.ReservationInstruction{}),
+		)).To(BeTrue())
 	})
 
 	It("flips a non-terminal Reservation past ExpiresAt to Expired without emitting any instruction", func() {

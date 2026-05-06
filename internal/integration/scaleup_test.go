@@ -38,12 +38,14 @@ const (
 
 var _ = Describe("Scale-up happy path: Pending → Peered", func() {
 	const (
-		ns      = "default"
-		resName = "scaleup-resv"
+		ns           = "default"
+		resName      = "scaleup-resv"
+		providerName = "provider-int"
 	)
 	resvKey := types.NamespacedName{Name: resName, Namespace: ns}
 	gkKey := types.NamespacedName{Name: "gk-" + resName, Namespace: ns}
 	peerKey := types.NamespacedName{Name: "peer-" + resName, Namespace: ns}
+	cadvKey := types.NamespacedName{Name: providerName, Namespace: ns}
 
 	AfterEach(func() {
 		// Best-effort cleanup. envtest does not run the garbage collector,
@@ -57,9 +59,43 @@ var _ = Describe("Scale-up happy path: Pending → Peered", func() {
 		_ = k8sClient.Delete(ctx, &brokerv1alpha1.Reservation{
 			ObjectMeta: metav1.ObjectMeta{Name: resName, Namespace: ns},
 		})
+		_ = k8sClient.Delete(ctx, &brokerv1alpha1.ClusterAdvertisement{
+			ObjectMeta: metav1.ObjectMeta{Name: providerName, Namespace: ns},
+		})
 	})
 
 	It("walks the Reservation through every phase as the agents report results", func() {
+		By("creating an available ClusterAdvertisement for the provider")
+		cadv := &brokerv1alpha1.ClusterAdvertisement{
+			ObjectMeta: metav1.ObjectMeta{Name: providerName, Namespace: ns},
+			Spec: brokerv1alpha1.ClusterAdvertisementSpec{
+				ClusterID:     providerName,
+				LiqoClusterID: "liqo-provider-int",
+				ClusterType:   brokerv1alpha1.ChunkTypeStandard,
+				Resources: brokerv1alpha1.AdvertisedResources{
+					Allocatable: corev1.ResourceList{
+						corev1.ResourceCPU:    resource.MustParse("8"),
+						corev1.ResourceMemory: resource.MustParse("16Gi"),
+					},
+				},
+			},
+		}
+		Expect(k8sClient.Create(ctx, cadv)).To(Succeed())
+		// Mark Available=true; otherwise the ClusterAdvertisement reconciler
+		// (which is wired into the integration manager) will leave Available
+		// as the default false until an HTTP advertisement lands, and the
+		// Reservation provider-availability guard would fail the reservation.
+		Eventually(func() error {
+			c := &brokerv1alpha1.ClusterAdvertisement{}
+			if err := k8sClient.Get(ctx, cadvKey, c); err != nil {
+				return err
+			}
+			now := metav1.Now()
+			c.Status.Available = true
+			c.Status.LastSeen = &now
+			return k8sClient.Status().Update(ctx, c)
+		}, timeout, interval).Should(Succeed())
+
 		By("creating the Reservation in Pending")
 		resv := &brokerv1alpha1.Reservation{
 			ObjectMeta: metav1.ObjectMeta{Name: resName, Namespace: ns},
