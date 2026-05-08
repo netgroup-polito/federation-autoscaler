@@ -25,10 +25,8 @@ limitations under the License.
 package main
 
 import (
-	"context"
 	"flag"
 	"fmt"
-	"net/http"
 	"os"
 	"time"
 
@@ -40,6 +38,10 @@ import (
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/log/zap"
+
+	agentclient "github.com/netgroup-polito/federation-autoscaler/internal/agent/client"
+	"github.com/netgroup-polito/federation-autoscaler/internal/agent/health"
+	"github.com/netgroup-polito/federation-autoscaler/internal/agent/poller"
 )
 
 const (
@@ -115,30 +117,75 @@ func main() {
 	// interact with the Kubernetes API of this cluster (create ResourceSlices
 	// / NamespaceOffloading on consumers, run liqoctl / read node info on
 	// providers). It is deliberately NOT a controller-runtime Manager: the
-	// agent reconciles no CRDs locally.
+	// agent reconciles no CRDs locally. Steps 8 and 9 wire role-specific
+	// usage on top.
 	cfg := ctrl.GetConfigOrDie()
 	localClient, err := client.New(cfg, client.Options{Scheme: scheme})
 	if err != nil {
 		setupLog.Error(err, "unable to build local-cluster client")
 		os.Exit(1)
 	}
-	_ = localClient // wired up in a later step (polling + local API).
+	_ = localClient
+
+	// Broker HTTP client (mTLS).
+	brokerClient, err := agentclient.New(agentclient.Options{
+		BrokerURL: brokerURL,
+		TLS: agentclient.TLSConfig{
+			CertFile:     clientCertPath,
+			KeyFile:      clientKeyPath,
+			BrokerCAFile: brokerCAPath,
+		},
+		Logger: ctrl.Log.WithName("broker-client"),
+	})
+	if err != nil {
+		setupLog.Error(err, "unable to build broker client")
+		os.Exit(1)
+	}
+
+	// Liveness/readiness probe. The poller's OnPollResult callback flips
+	// /readyz green on the first successful tick and red after staleness.
+	probe := health.New(health.Options{})
+
+	// Handler registry. Step 8 (provider role) and step 9 (consumer role)
+	// populate it with the role-specific ProviderInstruction /
+	// ReservationInstruction handlers respectively. For now the registry
+	// is empty: the agent runs the full poll loop end-to-end (so the
+	// broker sees a live caller and /readyz flips green), and any
+	// instruction the broker queues is reported back as Failed with
+	// "no handler for kind X" — operators see the misconfiguration
+	// immediately.
+	registry := poller.NewRegistry()
+
+	pollerInstance, err := poller.New(poller.Options{
+		Client:       brokerClient,
+		Registry:     registry,
+		Interval:     pollInterval,
+		Logger:       ctrl.Log.WithName("poller"),
+		OnPollResult: probe.RecordPoll,
+	})
+	if err != nil {
+		setupLog.Error(err, "unable to build poller")
+		os.Exit(1)
+	}
 
 	ctx := ctrl.SetupSignalHandler()
 
-	go startHealthProbe(ctx, healthProbeAddr)
+	go func() {
+		if err := probe.Serve(ctx, healthProbeAddr, ctrl.Log.WithName("health")); err != nil {
+			setupLog.Error(err, "health probe server failed")
+		}
+	}()
 
 	switch role {
 	case roleConsumer:
-		setupLog.Info("consumer role selected",
-			"localAPIAddr", localAPIAddr,
-			"TODO", "start local REST API + poll loop for ReservationInstructions")
+		setupLog.Info("consumer role selected", "localAPIAddr", localAPIAddr,
+			"note", "loopback REST API + Peer/Unpeer handlers land in step 9")
 	case roleProvider:
 		setupLog.Info("provider role selected",
-			"TODO", "start advertisement publisher + poll loop for ProviderInstructions")
+			"note", "advertisement publisher + GenerateKubeconfig handler land in step 8")
 	}
 
-	<-ctx.Done()
+	pollerInstance.Run(ctx)
 	setupLog.Info("shutdown signal received, exiting")
 }
 
@@ -163,28 +210,4 @@ func validateFlags(role, clusterID, liqoClusterID, brokerURL,
 		return fmt.Errorf("--client-cert, --client-key and --broker-ca are all required (mTLS is mandatory)")
 	}
 	return nil
-}
-
-// startHealthProbe serves /healthz and /readyz on probeAddr. Both endpoints
-// return 200 as long as the process is alive; readyz will grow real checks
-// (broker reachability, local-API readiness) once polling is wired in.
-func startHealthProbe(ctx context.Context, probeAddr string) {
-	mux := http.NewServeMux()
-	ok := func(w http.ResponseWriter, _ *http.Request) { _, _ = w.Write([]byte("ok")) }
-	mux.HandleFunc("/healthz", ok)
-	mux.HandleFunc("/readyz", ok)
-
-	srv := &http.Server{
-		Addr:              probeAddr,
-		Handler:           mux,
-		ReadHeaderTimeout: 5 * time.Second,
-	}
-	go func() {
-		<-ctx.Done()
-		_ = srv.Shutdown(context.Background())
-	}()
-	setupLog.Info("health probe listening", "address", probeAddr)
-	if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
-		setupLog.Error(err, "health probe server failed")
-	}
 }
