@@ -42,6 +42,7 @@ import (
 	agentclient "github.com/netgroup-polito/federation-autoscaler/internal/agent/client"
 	"github.com/netgroup-polito/federation-autoscaler/internal/agent/health"
 	"github.com/netgroup-polito/federation-autoscaler/internal/agent/poller"
+	"github.com/netgroup-polito/federation-autoscaler/internal/agent/provider"
 )
 
 const (
@@ -125,7 +126,6 @@ func main() {
 		setupLog.Error(err, "unable to build local-cluster client")
 		os.Exit(1)
 	}
-	_ = localClient
 
 	// Broker HTTP client (mTLS).
 	brokerClient, err := agentclient.New(agentclient.Options{
@@ -180,9 +180,20 @@ func main() {
 	case roleConsumer:
 		setupLog.Info("consumer role selected", "localAPIAddr", localAPIAddr,
 			"note", "loopback REST API + Peer/Unpeer handlers land in step 9")
+		_ = localClient // step 9 will plumb localClient + localAPIAddr.
 	case roleProvider:
-		setupLog.Info("provider role selected",
-			"note", "advertisement publisher + GenerateKubeconfig handler land in step 8")
+		if err := provider.Run(ctx, provider.Options{
+			Client:        brokerClient,
+			Registry:      registry,
+			LocalClient:   localClient,
+			ClusterID:     clusterID,
+			LiqoClusterID: liqoClusterID,
+			Logger:        ctrl.Log.WithName("provider"),
+			Probe:         probe,
+		}); err != nil {
+			setupLog.Error(err, "failed to bootstrap provider role")
+			os.Exit(1)
+		}
 	}
 
 	pollerInstance.Run(ctx)
