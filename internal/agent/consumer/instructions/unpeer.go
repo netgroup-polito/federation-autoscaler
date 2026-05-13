@@ -114,7 +114,16 @@ func NewUnpeerHandler(cfg UnpeerConfig) poller.HandlerFunc {
 			return nil, err
 		}
 
-		// 2. Delete ResourceSlice (idempotent on missing).
+		// 2. Delete the VirtualNodeState CR (idempotent on missing).
+		// The order matters: tearing the VNS first removes the chunk
+		// from the gRPC server's view of the cluster before Liqo
+		// drops the underlying virtual node, so CA sees the deletion
+		// rather than a Ready→NotReady flap.
+		if err := deleteVirtualNodeState(ctx, cfg.LocalClient, cfg.Namespace, in.ReservationID); err != nil {
+			return nil, err
+		}
+
+		// 3. Delete ResourceSlice (idempotent on missing).
 		if err := deleteResourceSlice(ctx, cfg.LocalClient, cfg.Namespace, in.ReservationID); err != nil {
 			return nil, err
 		}

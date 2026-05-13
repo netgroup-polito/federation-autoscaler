@@ -21,6 +21,22 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
+// Standard Kubernetes node condition types used inside
+// VirtualNodeStateStatus.Conditions. We re-declare the names here as
+// constants so callers (the reconciler and the gRPC server) don't
+// have to keep raw string literals in sync.
+const (
+	// VirtualNodeStateConditionReady is set to True once the underlying
+	// Liqo VirtualNode reports NodeReady=True. The localapi exposes
+	// the chunk in /local/virtual-nodes once this condition is True.
+	VirtualNodeStateConditionReady = "Ready"
+
+	// VirtualNodeStateConditionFailed marks a terminal failure of
+	// peering, ResourceSlice creation, or VirtualNode materialisation.
+	// Message carries the human-readable explanation.
+	VirtualNodeStateConditionFailed = "Failed"
+)
+
 // VirtualNodeStateSpec describes a single virtual-node chunk on the consumer
 // cluster.
 //
@@ -88,6 +104,16 @@ type VirtualNodeStateStatus struct {
 	// Agent created for this chunk. Empty until the Peer instruction succeeds.
 	// +optional
 	ResourceSliceName string `json:"resourceSliceName,omitempty"`
+
+	// Allocatable mirrors the Liqo VirtualNode's `.status.allocatable`
+	// once the node has been materialised. Surfaced by
+	// VirtualNodeStateReconciler so the gRPC server's NodeGroupNodes /
+	// PricingNodePrice replies can describe the chunk to Cluster
+	// Autoscaler using the resource shape Liqo actually advertised. Empty
+	// while Phase is Creating or whenever the upstream VirtualNode has
+	// not yet published its status.
+	// +optional
+	Allocatable corev1.ResourceList `json:"allocatable,omitempty"`
 
 	// LastTransitionTime is the timestamp of the most recent phase change.
 	// +optional

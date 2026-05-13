@@ -25,6 +25,9 @@ import (
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 
+	apiextensionsv1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/kubernetes/scheme"
 	"k8s.io/client-go/rest"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -86,7 +89,51 @@ var _ = BeforeSuite(func() {
 	k8sClient, err = client.New(cfg, client.Options{Scheme: scheme.Scheme})
 	Expect(err).NotTo(HaveOccurred())
 	Expect(k8sClient).NotTo(BeNil())
+
+	By("installing the Liqo VirtualNode stub CRD")
+	Expect(installLiqoVirtualNodeStubCRD(ctx, k8sClient)).To(Succeed())
 })
+
+// installLiqoVirtualNodeStubCRD registers a permissive
+// offloading.liqo.io/v1beta1/VirtualNode CRD inside the test apiserver
+// so the VirtualNodeStateReconciler's list/get calls succeed. The
+// schema preserves unknown fields — enough for the reconciler's
+// Status-only projection without us having to mirror Liqo's full
+// validation rules.
+func installLiqoVirtualNodeStubCRD(ctx context.Context, c client.Client) error {
+	preserve := true
+	crd := &apiextensionsv1.CustomResourceDefinition{
+		ObjectMeta: metav1.ObjectMeta{Name: "virtualnodes.offloading.liqo.io"},
+		Spec: apiextensionsv1.CustomResourceDefinitionSpec{
+			Group: "offloading.liqo.io",
+			Names: apiextensionsv1.CustomResourceDefinitionNames{
+				Kind:     "VirtualNode",
+				ListKind: "VirtualNodeList",
+				Plural:   "virtualnodes",
+				Singular: "virtualnode",
+			},
+			Scope: apiextensionsv1.NamespaceScoped,
+			Versions: []apiextensionsv1.CustomResourceDefinitionVersion{{
+				Name:    "v1beta1",
+				Served:  true,
+				Storage: true,
+				Subresources: &apiextensionsv1.CustomResourceSubresources{
+					Status: &apiextensionsv1.CustomResourceSubresourceStatus{},
+				},
+				Schema: &apiextensionsv1.CustomResourceValidation{
+					OpenAPIV3Schema: &apiextensionsv1.JSONSchemaProps{
+						Type:                   "object",
+						XPreserveUnknownFields: &preserve,
+					},
+				},
+			}},
+		},
+	}
+	if err := c.Create(ctx, crd); err != nil && !apierrors.IsAlreadyExists(err) {
+		return err
+	}
+	return nil
+}
 
 var _ = AfterSuite(func() {
 	By("tearing down the test environment")

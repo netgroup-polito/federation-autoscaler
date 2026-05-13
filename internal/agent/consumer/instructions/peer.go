@@ -77,8 +77,8 @@ type PeerConfig struct {
 //
 // On success the handler returns a Succeeded result with payload
 // {Kind: PeerPayload, ResourceSliceNames: […]}. VirtualNodeNames is
-// left empty in v1; step 11's VirtualNodeStateReconciler is what
-// surfaces those names once Liqo finishes setting up the virtual node.
+// left empty in v1; the VirtualNodeStateReconciler surfaces those
+// names once Liqo finishes setting up the virtual node.
 func NewPeerHandler(cfg PeerConfig) poller.HandlerFunc {
 	if cfg.LiqoctlPath == "" {
 		cfg.LiqoctlPath = DefaultPeerLiqoctlPath
@@ -157,14 +157,22 @@ func NewPeerHandler(cfg PeerConfig) poller.HandlerFunc {
 			return nil, err
 		}
 
+		// 5. Materialise the VirtualNodeState CR. This is what the
+		// gRPC server consumes via /local/virtual-nodes; the
+		// VirtualNodeStateReconciler then projects the Liqo
+		// VirtualNode's status onto it as Liqo materialises the node.
+		if err := ensureVirtualNodeState(ctx, cfg.LocalClient, cfg.Namespace, in); err != nil {
+			return nil, err
+		}
+
 		logger.V(1).Info("peer complete", "resourceSlice", sliceName)
 		return &brokerapi.InstructionResultRequest{
 			Status: brokerapi.ResultStatusSucceeded,
 			Payload: &brokerapi.ResultPayload{
 				Kind:               brokerapi.PayloadKindPeer,
 				ResourceSliceNames: []string{sliceName},
-				// VirtualNodeNames stays empty: Liqo materialises the
-				// VirtualNode asynchronously, and step 11's
+				// VirtualNodeNames stays empty here: Liqo materialises
+				// the VirtualNode asynchronously, and the
 				// VirtualNodeStateReconciler is the canonical place
 				// where those names show up.
 			},

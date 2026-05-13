@@ -138,6 +138,14 @@ var _ = BeforeSuite(func() {
 	Expect((&autoscalingcontroller.ReservationInstructionReconciler{
 		Client: mgr.GetClient(), Scheme: mgr.GetScheme(),
 	}).SetupWithManager(mgr)).To(Succeed())
+	Expect((&autoscalingcontroller.VirtualNodeStateReconciler{
+		Client: mgr.GetClient(), Scheme: mgr.GetScheme(),
+		// Faster requeue cadence so the suite can observe transitions
+		// well within suiteTimeout (the watch fires immediately on
+		// VirtualNode events, but the timer is a safety net we want
+		// short for tests).
+		RequeueAfter: 500 * time.Millisecond,
+	}).SetupWithManager(mgr)).To(Succeed())
 
 	runnable, err := brokerapi.NewRunnable(brokerapi.RunnableOptions{
 		BindAddress: brokerListen,

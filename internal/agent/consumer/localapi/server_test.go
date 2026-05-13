@@ -36,6 +36,10 @@ import (
 	ctrlclient "sigs.k8s.io/controller-runtime/pkg/client"
 	clientfake "sigs.k8s.io/controller-runtime/pkg/client/fake"
 
+	corev1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/api/resource"
+
+	autoscalingv1alpha1 "github.com/netgroup-polito/federation-autoscaler/api/autoscaling/v1alpha1"
 	brokerv1alpha1 "github.com/netgroup-polito/federation-autoscaler/api/broker/v1alpha1"
 	agentclient "github.com/netgroup-polito/federation-autoscaler/internal/agent/client"
 	brokerapi "github.com/netgroup-polito/federation-autoscaler/internal/broker/api"
@@ -121,10 +125,14 @@ func (fb *fakeBroker) buildClient(t *testing.T) *agentclient.Client {
 	return c
 }
 
-func newFakeKubeClient() ctrlclient.Client {
+func newFakeKubeClient(objs ...ctrlclient.Object) ctrlclient.Client {
 	scheme := runtime.NewScheme()
 	_ = clientgoscheme.AddToScheme(scheme)
-	return clientfake.NewClientBuilder().WithScheme(scheme).Build()
+	_ = autoscalingv1alpha1.AddToScheme(scheme)
+	return clientfake.NewClientBuilder().
+		WithScheme(scheme).
+		WithObjects(objs...).
+		Build()
 }
 
 // localTestServer builds a localapi.Server mounted on an
@@ -352,7 +360,7 @@ func TestReservationDelete_ProxiesToBroker(t *testing.T) {
 // GET /local/virtual-nodes
 // -----------------------------------------------------------------------------
 
-func TestVirtualNodes_EmptyListUntilStep11(t *testing.T) {
+func TestVirtualNodes_EmptyList(t *testing.T) {
 	fb := newFakeBroker(t)
 	ts := localTestServer(t, fb)
 
@@ -377,6 +385,140 @@ func TestVirtualNodes_EmptyListUntilStep11(t *testing.T) {
 	// And the localapi did NOT call the broker for this route.
 	if got := fb.postCnt.Load(); got != 0 {
 		t.Errorf("virtual-nodes should not hit the broker; saw %d calls", got)
+	}
+}
+
+func TestVirtualNodes_ProjectsCRsToViews(t *testing.T) {
+	running := &autoscalingv1alpha1.VirtualNodeState{
+		ObjectMeta: metav1.ObjectMeta{Name: "vns-res-running", Namespace: "liqo"},
+		Spec: autoscalingv1alpha1.VirtualNodeStateSpec{
+			ProviderClusterID:     "provider-1",
+			ProviderLiqoClusterID: "liqo-provider-1",
+			NodeGroupID:           "ng-provider-1-standard",
+			ReservationID:         "res-running",
+			Resources: corev1.ResourceList{
+				corev1.ResourceCPU:    resource.MustParse("4"),
+				corev1.ResourceMemory: resource.MustParse("8Gi"),
+			},
+		},
+		Status: autoscalingv1alpha1.VirtualNodeStateStatus{
+			Phase:           autoscalingv1alpha1.VirtualNodeStatePhaseRunning,
+			VirtualNodeName: "rs-res-running",
+			Allocatable: corev1.ResourceList{
+				corev1.ResourceCPU:    resource.MustParse("4"),
+				corev1.ResourceMemory: resource.MustParse("7800Mi"),
+			},
+		},
+	}
+	creating := &autoscalingv1alpha1.VirtualNodeState{
+		ObjectMeta: metav1.ObjectMeta{Name: "vns-res-creating", Namespace: "liqo"},
+		Spec: autoscalingv1alpha1.VirtualNodeStateSpec{
+			ProviderClusterID:     "provider-2",
+			ProviderLiqoClusterID: "liqo-provider-2",
+			NodeGroupID:           "ng-provider-2-standard",
+			ReservationID:         "res-creating",
+		},
+		Status: autoscalingv1alpha1.VirtualNodeStateStatus{
+			Phase: autoscalingv1alpha1.VirtualNodeStatePhaseCreating,
+			// VirtualNodeName intentionally empty — CR name should
+			// surface as the placeholder.
+		},
+	}
+
+	fb := newFakeBroker(t)
+	s, err := New(Options{
+		BindAddress: "127.0.0.1:0",
+		Client:      fb.buildClient(t),
+		LocalClient: newFakeKubeClient(running, creating),
+		Namespace:   "liqo",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ts := httptest.NewServer(s.Handler())
+	t.Cleanup(ts.Close)
+
+	resp, err := ts.Client().Get(ts.URL + "/local/virtual-nodes")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(resp.Body)
+		t.Fatalf("status %d, body %s", resp.StatusCode, body)
+	}
+	var out VirtualNodeListResponse
+	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
+		t.Fatal(err)
+	}
+	if len(out.VirtualNodes) != 2 {
+		t.Fatalf("want 2 views, got %d: %+v", len(out.VirtualNodes), out.VirtualNodes)
+	}
+	byID := map[string]VirtualNodeView{}
+	for _, v := range out.VirtualNodes {
+		byID[v.ReservationID] = v
+	}
+
+	r := byID["res-running"]
+	if r.Name != "rs-res-running" {
+		t.Errorf("running.Name: want rs-res-running, got %q", r.Name)
+	}
+	if r.NodeGroupID != "ng-provider-1-standard" {
+		t.Errorf("running.NodeGroupID: want ng-provider-1-standard, got %q", r.NodeGroupID)
+	}
+	if r.Phase != autoscalingv1alpha1.VirtualNodeStatePhaseRunning {
+		t.Errorf("running.Phase: want Running, got %s", r.Phase)
+	}
+	if got := r.Allocatable[corev1.ResourceCPU]; got.Cmp(resource.MustParse("4")) != 0 {
+		t.Errorf("running.Allocatable[cpu]: want 4, got %s", got.String())
+	}
+
+	c := byID["res-creating"]
+	// Status.VirtualNodeName is empty so the CR name is the placeholder.
+	if c.Name != "vns-res-creating" {
+		t.Errorf("creating.Name: want vns-res-creating placeholder, got %q", c.Name)
+	}
+	if c.Phase != autoscalingv1alpha1.VirtualNodeStatePhaseCreating {
+		t.Errorf("creating.Phase: want Creating, got %s", c.Phase)
+	}
+	if len(c.Allocatable) != 0 {
+		t.Errorf("creating.Allocatable: want empty, got %+v", c.Allocatable)
+	}
+
+	if got := fb.postCnt.Load(); got != 0 {
+		t.Errorf("virtual-nodes must not hit the broker; saw %d calls", got)
+	}
+}
+
+func TestVirtualNodes_ScopedToConfiguredNamespace(t *testing.T) {
+	inScope := &autoscalingv1alpha1.VirtualNodeState{
+		ObjectMeta: metav1.ObjectMeta{Name: "vns-1", Namespace: "liqo"},
+		Spec:       autoscalingv1alpha1.VirtualNodeStateSpec{ReservationID: "res-1"},
+	}
+	outOfScope := &autoscalingv1alpha1.VirtualNodeState{
+		ObjectMeta: metav1.ObjectMeta{Name: "vns-2", Namespace: "other"},
+		Spec:       autoscalingv1alpha1.VirtualNodeStateSpec{ReservationID: "res-2"},
+	}
+
+	fb := newFakeBroker(t)
+	s, err := New(Options{
+		BindAddress: "127.0.0.1:0",
+		Client:      fb.buildClient(t),
+		LocalClient: newFakeKubeClient(inScope, outOfScope),
+		Namespace:   "liqo",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ts := httptest.NewServer(s.Handler())
+	t.Cleanup(ts.Close)
+
+	resp, _ := ts.Client().Get(ts.URL + "/local/virtual-nodes")
+	defer func() { _ = resp.Body.Close() }()
+	var out VirtualNodeListResponse
+	_ = json.NewDecoder(resp.Body).Decode(&out)
+	if len(out.VirtualNodes) != 1 || out.VirtualNodes[0].ReservationID != "res-1" {
+		t.Fatalf("want only res-1 in liqo namespace; got %+v", out.VirtualNodes)
 	}
 }
 

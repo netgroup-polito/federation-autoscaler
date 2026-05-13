@@ -79,6 +79,9 @@ func NewCleanupHandler(cfg CleanupConfig) poller.HandlerFunc {
 		if err := deleteNamespaceOffloading(ctx, cfg.LocalClient, cfg.Namespace, in.ReservationID); err != nil {
 			return nil, err
 		}
+		if err := deleteVirtualNodeState(ctx, cfg.LocalClient, cfg.Namespace, in.ReservationID); err != nil {
+			return nil, err
+		}
 		if err := deleteResourceSlice(ctx, cfg.LocalClient, cfg.Namespace, in.ReservationID); err != nil {
 			return nil, err
 		}

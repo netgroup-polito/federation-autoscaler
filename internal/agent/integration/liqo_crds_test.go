@@ -44,6 +44,7 @@ func installLiqoStubCRDs(ctx context.Context, c ctrlclient.Client) error {
 	crds := []*apiextensionsv1.CustomResourceDefinition{
 		permissiveCRD("resourceslices.authentication.liqo.io", "authentication.liqo.io", "ResourceSlice", "resourceslices", "resourceslice", "v1beta1", apiextensionsv1.NamespaceScoped),
 		permissiveCRD("namespaceoffloadings.offloading.liqo.io", "offloading.liqo.io", "NamespaceOffloading", "namespaceoffloadings", "namespaceoffloading", "v1beta1", apiextensionsv1.NamespaceScoped),
+		permissiveCRDWithStatus("virtualnodes.offloading.liqo.io", "offloading.liqo.io", "VirtualNode", "virtualnodes", "virtualnode", "v1beta1", apiextensionsv1.NamespaceScoped),
 	}
 	for _, crd := range crds {
 		if err := c.Create(ctx, crd); err != nil && !apierrors.IsAlreadyExists(err) {
@@ -84,4 +85,16 @@ func permissiveCRD(name, group, kind, plural, singular, version string, scope ap
 			}},
 		},
 	}
+}
+
+// permissiveCRDWithStatus is permissiveCRD plus a /status subresource
+// — required by the VirtualNodeStateReconciler's test fixtures, which
+// patch the Liqo VirtualNode's status separately to simulate Liqo
+// materialising the node.
+func permissiveCRDWithStatus(name, group, kind, plural, singular, version string, scope apiextensionsv1.ResourceScope) *apiextensionsv1.CustomResourceDefinition {
+	crd := permissiveCRD(name, group, kind, plural, singular, version, scope)
+	crd.Spec.Versions[0].Subresources = &apiextensionsv1.CustomResourceSubresources{
+		Status: &apiextensionsv1.CustomResourceSubresourceStatus{},
+	}
+	return crd
 }

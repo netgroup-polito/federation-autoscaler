@@ -44,6 +44,7 @@ const (
 func newFakeKubeClient() ctrlclient.Client {
 	scheme := runtime.NewScheme()
 	_ = clientgoscheme.AddToScheme(scheme)
+	_ = autoscalingv1alpha1.AddToScheme(scheme)
 	return clientfake.NewClientBuilder().WithScheme(scheme).Build()
 }
 
@@ -129,6 +130,23 @@ func TestPeer_HappyPath_PersistsSecretRunsLiqoctlAndCreatesCRs(t *testing.T) {
 	// NamespaceOffloading created.
 	if exists, _ := objectExists(context.Background(), c, namespaceOffloadingGVK, testNamespace, "no-"+testResID); !exists {
 		t.Error("NamespaceOffloading was not created")
+	}
+	// VirtualNodeState CR created with the right spec.
+	vns, err := getVirtualNodeState(context.Background(), c, testNamespace, testResID)
+	if err != nil {
+		t.Fatalf("VirtualNodeState not created: %v", err)
+	}
+	if vns.Spec.ProviderClusterID != "provider-1" {
+		t.Errorf("ProviderClusterID: want provider-1, got %q", vns.Spec.ProviderClusterID)
+	}
+	if vns.Spec.ReservationID != testResID {
+		t.Errorf("ReservationID: want %q, got %q", testResID, vns.Spec.ReservationID)
+	}
+	if vns.Spec.NodeGroupID != "ng-provider-1-standard" {
+		t.Errorf("NodeGroupID: want ng-provider-1-standard, got %q", vns.Spec.NodeGroupID)
+	}
+	if vns.Labels[VirtualNodeStateReservationLabel] != testResID {
+		t.Errorf("reservation label: want %q, got %q", testResID, vns.Labels[VirtualNodeStateReservationLabel])
 	}
 }
 

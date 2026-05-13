@@ -174,6 +174,7 @@ func Run(ctx context.Context, opts Options) error {
 		BindAddress: opts.LocalAPIAddr,
 		Client:      opts.Client,
 		LocalClient: opts.LocalClient,
+		Namespace:   namespace,
 		Logger:      logger.WithName("localapi"),
 	})
 	if err != nil {

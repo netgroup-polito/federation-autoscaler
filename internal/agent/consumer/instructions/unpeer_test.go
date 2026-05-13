@@ -94,6 +94,10 @@ func TestUnpeer_HappyPath_DeletesEverythingOnLastChunk(t *testing.T) {
 	if exists, _ := objectExists(ctx, c, namespaceOffloadingGVK, testNamespace, "no-"+testResID); exists {
 		t.Error("NamespaceOffloading still present after Unpeer")
 	}
+	// VirtualNodeState CR gone.
+	if _, err := getVirtualNodeState(ctx, c, testNamespace, testResID); err == nil {
+		t.Error("VirtualNodeState still present after Unpeer")
+	}
 	// Kubeconfig Secret deleted (LastChunk=true).
 	if err := c.Get(ctx, types.NamespacedName{
 		Name: "kubeconfig-" + testResID, Namespace: testNamespace,

@@ -71,6 +71,9 @@ func TestCleanup_HappyPath_DeletesAllLocalState(t *testing.T) {
 	if exists, _ := objectExists(ctx, c, namespaceOffloadingGVK, testNamespace, "no-"+testResID); exists {
 		t.Error("NamespaceOffloading still present after Cleanup")
 	}
+	if _, err := getVirtualNodeState(ctx, c, testNamespace, testResID); err == nil {
+		t.Error("VirtualNodeState still present after Cleanup")
+	}
 	if err := c.Get(ctx, types.NamespacedName{
 		Name: "kubeconfig-" + testResID, Namespace: testNamespace,
 	}, &corev1.Secret{}); err == nil {

@@ -47,6 +47,7 @@ import (
 	ctrlclient "sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
+	autoscalingv1alpha1 "github.com/netgroup-polito/federation-autoscaler/api/autoscaling/v1alpha1"
 	agentclient "github.com/netgroup-polito/federation-autoscaler/internal/agent/client"
 	brokerapi "github.com/netgroup-polito/federation-autoscaler/internal/broker/api"
 )
@@ -64,14 +65,13 @@ type Options struct {
 	Client *agentclient.Client
 
 	// LocalClient reads the consumer-cluster's VirtualNodeState CRs for
-	// /local/virtual-nodes. Required (even when the endpoint returns an
-	// empty list, the server's startup contract is symmetric with the
-	// other consumer subsystems).
+	// /local/virtual-nodes. Required.
 	LocalClient ctrlclient.Client
 
-	// Namespace is the namespace under which VirtualNodeState CRs are
-	// expected to live. Empty means "all namespaces"; the reconciler in
-	// step 11 will pick one canonical namespace.
+	// Namespace scopes the VirtualNodeState list served by
+	// /local/virtual-nodes. Empty means "all namespaces"; production
+	// wires the same namespace the Peer / Unpeer handlers write CRs into
+	// so the loopback view stays consistent with the agent's own writes.
 	Namespace string
 
 	// Logger is the structured logger every handler logs through.
@@ -222,13 +222,57 @@ func (s *Server) handleReservationDelete(w http.ResponseWriter, r *http.Request)
 	s.writeJSON(w, http.StatusOK, resp)
 }
 
-func (s *Server) handleVirtualNodes(w http.ResponseWriter, _ *http.Request) {
-	// Step 11 will populate this list from VirtualNodeState CRs. For
-	// 9c the consumer has no reconciler producing those, so we return
-	// an empty slice — the gRPC server's NodeGroupTargetSize will just
-	// report 0 for every node group, which is correct in the pre-step-11
-	// state where no peering has materialised yet.
-	s.writeJSON(w, http.StatusOK, VirtualNodeListResponse{VirtualNodes: []VirtualNodeView{}})
+// handleVirtualNodes lists VirtualNodeState CRs on the consumer cluster
+// and projects them into the local-API VirtualNodeView shape. The
+// VirtualNodeStateReconciler is what keeps these CRs in sync with the
+// underlying Liqo VirtualNode; this endpoint is the read-only surface
+// the gRPC server consumes when answering Cluster Autoscaler's
+// NodeGroupTargetSize / NodeGroupNodes / NodeGroupForNode RPCs.
+//
+// Entries are emitted for *every* VirtualNodeState regardless of phase
+// so CA can observe in-flight scale-ups via NodeGroupTargetSize before
+// Liqo finishes materialising the underlying node. The Name field
+// prefers Status.VirtualNodeName (== the eventual v1.Node name) so
+// NodeGroupForNode matches once the node is real; while the chunk is
+// still Creating the CR name is surfaced as a stable placeholder.
+func (s *Server) handleVirtualNodes(w http.ResponseWriter, r *http.Request) {
+	listOpts := []ctrlclient.ListOption{}
+	if s.ns != "" {
+		listOpts = append(listOpts, ctrlclient.InNamespace(s.ns))
+	}
+	var list autoscalingv1alpha1.VirtualNodeStateList
+	if err := s.local.List(r.Context(), &list, listOpts...); err != nil {
+		s.log.Error(err, "list VirtualNodeState failed")
+		s.writeRawError(w, http.StatusInternalServerError,
+			brokerapi.ErrCodeInternalError, "list VirtualNodeState: "+err.Error())
+		return
+	}
+	views := make([]VirtualNodeView, 0, len(list.Items))
+	for i := range list.Items {
+		views = append(views, virtualNodeStateToView(&list.Items[i]))
+	}
+	s.writeJSON(w, http.StatusOK, VirtualNodeListResponse{VirtualNodes: views})
+}
+
+// virtualNodeStateToView translates a CR into its wire representation.
+// Name falls back to the CR's own name when Status.VirtualNodeName is
+// empty (chunk still in Creating); see handleVirtualNodes for why this
+// placeholder is intentional rather than an omitted entry.
+func virtualNodeStateToView(vns *autoscalingv1alpha1.VirtualNodeState) VirtualNodeView {
+	name := vns.Status.VirtualNodeName
+	if name == "" {
+		name = vns.Name
+	}
+	return VirtualNodeView{
+		Name:                  name,
+		ReservationID:         vns.Spec.ReservationID,
+		NodeGroupID:           vns.Spec.NodeGroupID,
+		ProviderClusterID:     vns.Spec.ProviderClusterID,
+		ProviderLiqoClusterID: vns.Spec.ProviderLiqoClusterID,
+		Phase:                 vns.Status.Phase,
+		Allocatable:           vns.Status.Allocatable,
+		LastTransitionTime:    vns.Status.LastTransitionTime,
+	}
 }
 
 // -----------------------------------------------------------------------------
