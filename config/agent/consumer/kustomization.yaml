@@ -1,0 +1,17 @@
+# Consumer-role agent overlay.
+#
+# Layers --role=consumer onto the role-agnostic base. Deploy this on every
+# consumer cluster (one that borrows capacity); deploy ../provider/ on every
+# provider cluster (one that donates capacity).
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+resources:
+- ../base
+- service.yaml
+
+patches:
+- path: role_patch.yaml
+  target:
+    kind: Deployment
+    name: agent

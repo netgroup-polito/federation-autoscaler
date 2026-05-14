@@ -5,4 +5,5 @@ resources:
 - autoscaling_v1alpha1_virtualnodestate.yaml
 - autoscaling_v1alpha1_providerinstruction.yaml
 - autoscaling_v1alpha1_reservationinstruction.yaml
+- chunk-config.yaml
 # +kubebuilder:scaffold:manifestskustomizesamples

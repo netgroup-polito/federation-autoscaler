@@ -1,0 +1,63 @@
+# gRPC server ClusterRole.
+#
+# Strictly narrower than the broker / agent roles — the gRPC server reconciles
+# exactly ONE CRD (VirtualNodeState on the consumer cluster) and otherwise only
+# READS Liqo / core resources. Every grant below matches a //+kubebuilder:rbac
+# directive in internal/controller/autoscaling/virtualnodestate_controller.go.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: grpc-server
+  labels:
+    app.kubernetes.io/name: federation-autoscaler
+    app.kubernetes.io/component: grpc-server
+rules:
+- apiGroups:
+  - autoscaling.federation-autoscaler.io
+  resources:
+  - virtualnodestates
+  verbs:
+  - get
+  - list
+  - watch
+  - create
+  - update
+  - patch
+  - delete
+- apiGroups:
+  - autoscaling.federation-autoscaler.io
+  resources:
+  - virtualnodestates/status
+  verbs:
+  - get
+  - update
+  - patch
+- apiGroups:
+  - autoscaling.federation-autoscaler.io
+  resources:
+  - virtualnodestates/finalizers
+  verbs:
+  - update
+- apiGroups:
+  - offloading.liqo.io
+  resources:
+  - virtualnodes
+  verbs:
+  - get
+  - list
+  - watch
+- apiGroups:
+  - ""
+  resources:
+  - nodes
+  verbs:
+  - get
+  - list
+  - watch
+- apiGroups:
+  - ""
+  resources:
+  - events
+  verbs:
+  - create
+  - patch

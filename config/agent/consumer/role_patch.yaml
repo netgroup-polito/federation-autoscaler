@@ -1,0 +1,18 @@
+# Consumer-role patches:
+#  - append --role=consumer
+#  - append --local-api-bind-address=0.0.0.0:9090 so the co-located gRPC
+#    server can reach the loopback REST API via the agent Service (the
+#    binary's default is 127.0.0.1, loopback-only, which the gRPC server
+#    pod cannot dial).
+- op: add
+  path: /spec/template/spec/containers/0/args/-
+  value: --role=consumer
+- op: add
+  path: /spec/template/spec/containers/0/args/-
+  value: --local-api-bind-address=0.0.0.0:9090
+- op: add
+  path: /spec/template/spec/containers/0/ports/-
+  value:
+    name: localapi
+    containerPort: 9090
+    protocol: TCP

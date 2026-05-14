@@ -1,0 +1,33 @@
+# gRPC server overlay — see docs/design.md §4.2.
+#
+# Deploys the externalgrpc CloudProvider implementation Cluster Autoscaler
+# dials via --cloud-provider=externalgrpc + --cloud-config. Talks ONLY to:
+#   1. the co-located consumer agent's loopback REST (Service-level, port
+#      9090) for nodegroups / reservations / virtual-nodes
+#   2. the consumer cluster's apiserver (via the manager) for the
+#      VirtualNodeState reconciler watching Liqo VirtualNodes.
+#
+# No broker credentials. No cross-cluster connectivity. See CLAUDE.md
+# ("asymmetric communication model") for the constraint.
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+resources:
+- serviceaccount.yaml
+- clusterrole.yaml
+- clusterrolebinding.yaml
+- leader_election_role.yaml
+- certificate.yaml
+- service.yaml
+- deployment.yaml
+
+labels:
+- pairs:
+    app.kubernetes.io/name: federation-autoscaler
+    app.kubernetes.io/component: grpc-server
+  includeSelectors: false
+
+# Namespace is intentionally NOT created here: the gRPC server lives in
+# federation-autoscaler-system alongside the broker (single-cluster dev) or
+# alongside the consumer agent (multi-cluster). The broker overlay creates
+# the namespace; if you deploy this overlay alone, layer a Namespace on top.

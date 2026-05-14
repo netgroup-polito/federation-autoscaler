@@ -1,0 +1,20 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: grpc-server
+  namespace: federation-autoscaler-system
+  labels:
+    app.kubernetes.io/name: federation-autoscaler
+    app.kubernetes.io/component: grpc-server
+spec:
+  # ClusterIP — Cluster Autoscaler dials this Service from the same cluster
+  # via its --cloud-config URL; no public exposure needed.
+  type: ClusterIP
+  selector:
+    app.kubernetes.io/name: federation-autoscaler
+    app.kubernetes.io/component: grpc-server
+  ports:
+  - name: grpc
+    port: 9443
+    targetPort: grpc
+    protocol: TCP

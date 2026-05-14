@@ -1,0 +1,47 @@
+# Broker chunk-config — see docs/design.md §6.
+#
+# Lives in the broker's namespace on the central cluster. Agents do NOT
+# read this ConfigMap — the broker translates the chunk parameters into
+# per-Reservation Spec.Resources before the consumer agent ever sees them.
+#
+# A provider is classified GPU if it advertises `nvidia.com/gpu > 0` and
+# standard otherwise. Each provider's allocatable is divided into
+# equal-sized chunks of the matching type; the leftover (less than one
+# chunk) is unreservable.
+#
+# Apply this sample as-is for a default chunking policy, or copy and tune
+# the values per your cluster pool.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: chunk-config
+  namespace: federation-autoscaler-system
+  labels:
+    app.kubernetes.io/name: federation-autoscaler
+    app.kubernetes.io/component: broker
+data:
+  # ---- Chunk sizes ----------------------------------------------------
+  # Standard (non-GPU) chunk size.
+  standard-cpu: "2"
+  standard-memory: "4Gi"
+
+  # GPU chunk size.
+  gpu-cpu: "4"
+  gpu-memory: "8Gi"
+  gpu-count: "1"
+
+  # ---- Timeouts -------------------------------------------------------
+  reservation-timeout: "5m"
+  agent-heartbeat-timeout: "30s"
+
+  # ---- Polling + rate limiting ---------------------------------------
+  agent-poll-interval: "5s"
+  agent-heartbeat-interval: "15s"
+  provider-advertisement-interval: "30s"
+  instructions-rate-limit-burst: "10"
+  instructions-rate-limit-sustained: "5"
+
+  # ---- Idempotency / retry -------------------------------------------
+  idempotency-cache-ttl: "10m"
+  agent-request-timeout: "30s"
+  agent-request-retries: "3"

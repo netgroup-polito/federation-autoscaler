@@ -1,0 +1,21 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: broker
+  namespace: federation-autoscaler-system
+  labels:
+    app.kubernetes.io/name: federation-autoscaler
+    app.kubernetes.io/component: broker
+spec:
+  # ClusterIP is the in-cluster default; production deploys layer a
+  # LoadBalancer or Ingress on top to expose the API publicly — agents on
+  # other clusters need a routable address.
+  type: ClusterIP
+  selector:
+    app.kubernetes.io/name: federation-autoscaler
+    app.kubernetes.io/component: broker
+  ports:
+  - name: api
+    port: 9443
+    targetPort: api
+    protocol: TCP

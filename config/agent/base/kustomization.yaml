@@ -1,0 +1,31 @@
+# Role-agnostic agent base. The `consumer/` and `provider/` overlays layer a
+# JSON-patch on top to set --role=<role>; apply one of those, not this base.
+#
+# All resources land in federation-autoscaler-system (created by ../broker/
+# in single-cluster dev installs; multi-cluster deploys must pre-create it
+# on each agent cluster).
+#
+# Per-cluster identity:
+#
+# The base ships the same REPLACE_ME_CLUSTER_ID placeholder in BOTH the
+# agent-config ConfigMap and the agent-client Certificate's commonName.
+# Operators MUST patch both to the same value in their per-cluster overlay —
+# the broker derives the caller's identity from the cert's CN (docs/design.md
+# §7.2) and the binary reads the same value from the ConfigMap to pass on
+# --cluster-id, so the two MUST agree.
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+resources:
+- configmap.yaml
+- serviceaccount.yaml
+- clusterrole.yaml
+- clusterrolebinding.yaml
+- certificate.yaml
+- deployment.yaml
+
+labels:
+- pairs:
+    app.kubernetes.io/name: federation-autoscaler
+    app.kubernetes.io/component: agent
+  includeSelectors: false

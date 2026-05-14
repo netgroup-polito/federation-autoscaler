@@ -1,0 +1,37 @@
+# Agent client certificate.
+#
+# The CN must match the agent's clusterId (see docs/design.md §7.2,
+# "Cluster identity") — the broker derives the caller's identity from the
+# certificate's CN. The kustomization replacement injects the clusterId from
+# agent-config.data.clusterId.
+#
+# issuerRef points at federation-autoscaler-ca-issuer from config/broker/. In
+# single-cluster dev installs that issuer is reachable; multi-cluster deploys
+# must patch this to point at a local Issuer chained to the same root CA the
+# broker trusts (e.g. via trust-manager or an external Vault-backed Issuer).
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: agent-client
+  namespace: federation-autoscaler-system
+  labels:
+    app.kubernetes.io/name: federation-autoscaler
+    app.kubernetes.io/component: agent
+spec:
+  # commonName is replaced from agent-config.clusterId by kustomize at build
+  # time; the placeholder here only exists so cert-manager's schema validates
+  # this manifest before the replacement fires.
+  commonName: REPLACE_ME_CLUSTER_ID
+  duration: 8760h     # 1 year
+  renewBefore: 720h   # 30 d
+  secretName: agent-client-cert
+  privateKey:
+    algorithm: ECDSA
+    size: 256
+    rotationPolicy: Always
+  usages:
+  - client auth
+  issuerRef:
+    name: federation-autoscaler-ca-issuer
+    kind: Issuer
+    group: cert-manager.io

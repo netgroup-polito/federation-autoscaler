@@ -1,0 +1,38 @@
+# Server certificate the gRPC server terminates externalgrpc mTLS with.
+#
+# CA dials this Service via its --cloud-config URL; CA's client certificate
+# MUST be signed by the same root CA the gRPC server's ca.crt bundle
+# references (operators must issue CA's client cert from a CA chained to
+# federation-autoscaler-ca, e.g. by using the same cert-manager Issuer).
+#
+# In single-cluster dev installs the Issuer is reachable from this namespace;
+# multi-cluster deploys would never colocate CA + the gRPC server with the
+# broker so this manifest is mostly used in the single-cluster overlay.
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: grpc-server
+  namespace: federation-autoscaler-system
+  labels:
+    app.kubernetes.io/name: federation-autoscaler
+    app.kubernetes.io/component: grpc-server
+spec:
+  commonName: grpc-server.federation-autoscaler-system.svc
+  dnsNames:
+  - grpc-server
+  - grpc-server.federation-autoscaler-system
+  - grpc-server.federation-autoscaler-system.svc
+  - grpc-server.federation-autoscaler-system.svc.cluster.local
+  duration: 8760h     # 1 year
+  renewBefore: 720h   # 30 d
+  secretName: grpc-server-cert
+  privateKey:
+    algorithm: ECDSA
+    size: 256
+    rotationPolicy: Always
+  usages:
+  - server auth
+  issuerRef:
+    name: federation-autoscaler-ca-issuer
+    kind: Issuer
+    group: cert-manager.io

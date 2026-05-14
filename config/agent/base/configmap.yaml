@@ -1,0 +1,17 @@
+# Per-cluster identity for the agent.
+#
+# Operators MUST override these values before applying — the placeholders are
+# placeholders. Use a kustomize overlay with `configMapGenerator` or a strategic
+# patch.  The `clusterId` value is reflected onto the cert-manager Certificate's
+# commonName via a kustomize replacement (see kustomization.yaml), so the agent
+# cert's CN matches the broker's identity expectation (see docs/design.md §7.2,
+# "Cluster identity").
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: agent-config
+  namespace: federation-autoscaler-system
+data:
+  clusterId: "REPLACE_ME_CLUSTER_ID"
+  liqoClusterId: "REPLACE_ME_LIQO_CLUSTER_ID"
+  brokerUrl: "https://REPLACE_ME_BROKER_HOST:9443"

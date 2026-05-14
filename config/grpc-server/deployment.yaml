@@ -1,0 +1,97 @@
+# gRPC server Deployment.
+#
+# Leader-elected (LeaderElectionID = grpc-server.federation-autoscaler.io)
+# even though replicas: 1 — the lease handover keeps things tidy if the user
+# bumps replicas later.
+#
+# --agent-local-api-url targets the consumer agent's ClusterIP Service (port
+# 9090). The consumer overlay (config/agent/consumer/) binds the localapi to
+# 0.0.0.0:9090 and ships the matching Service so this URL resolves.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: grpc-server
+  namespace: federation-autoscaler-system
+  labels:
+    app.kubernetes.io/name: federation-autoscaler
+    app.kubernetes.io/component: grpc-server
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: federation-autoscaler
+      app.kubernetes.io/component: grpc-server
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: federation-autoscaler
+        app.kubernetes.io/component: grpc-server
+      annotations:
+        kubectl.kubernetes.io/default-container: grpc-server
+    spec:
+      serviceAccountName: grpc-server
+      terminationGracePeriodSeconds: 30
+      securityContext:
+        runAsNonRoot: true
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+      - name: grpc-server
+        image: federation-autoscaler/grpc-server:latest
+        imagePullPolicy: IfNotPresent
+        args:
+        - --leader-elect
+        - --health-probe-bind-address=:8081
+        - --metrics-bind-address=:8443
+        - --grpc-bind-address=:9443
+        - --grpc-cert-path=/etc/federation-autoscaler/tls
+        - --grpc-cert-name=tls.crt
+        - --grpc-key-name=tls.key
+        - --grpc-ca-name=ca.crt
+        - --agent-local-api-url=http://agent.federation-autoscaler-system.svc.cluster.local:9090
+        ports:
+        - name: grpc
+          containerPort: 9443
+          protocol: TCP
+        - name: health
+          containerPort: 8081
+          protocol: TCP
+        - name: metrics
+          containerPort: 8443
+          protocol: TCP
+        livenessProbe:
+          httpGet:
+            path: /healthz
+            port: health
+          initialDelaySeconds: 15
+          periodSeconds: 20
+        readinessProbe:
+          httpGet:
+            path: /readyz
+            port: health
+          initialDelaySeconds: 5
+          periodSeconds: 10
+        resources:
+          limits:
+            cpu: 500m
+            memory: 256Mi
+          requests:
+            cpu: 50m
+            memory: 128Mi
+        securityContext:
+          readOnlyRootFilesystem: true
+          allowPrivilegeEscalation: false
+          capabilities:
+            drop:
+            - ALL
+        volumeMounts:
+        - name: tls
+          mountPath: /etc/federation-autoscaler/tls
+          readOnly: true
+      volumes:
+      - name: tls
+        secret:
+          secretName: grpc-server-cert
+          # tls.crt / tls.key are the gRPC server's keypair; ca.crt is the
+          # CA bundle CA's client cert must chain to for mTLS.
+          defaultMode: 0400

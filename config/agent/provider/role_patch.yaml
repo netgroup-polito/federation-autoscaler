@@ -1,0 +1,4 @@
+# Append --role=provider to the agent container's args list.
+- op: add
+  path: /spec/template/spec/containers/0/args/-
+  value: --role=provider

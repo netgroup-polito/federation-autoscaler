@@ -1,0 +1,33 @@
+# Broker overlay — see docs/design.md §10.1.
+#
+# Layered on top of ../crd/ for full installation. Single-cluster dev installs
+# can compose this with the agent and grpc-server overlays via ../default/
+# (step 12e).
+#
+# Resources:
+#   - Namespace federation-autoscaler-system (every broker artefact lives here)
+#   - ServiceAccount + leader-election Role/Binding + scoped ClusterRole/Binding
+#   - cert-manager PKI (root Issuer + CA Certificate + CA Issuer + broker server cert)
+#   - Deployment (leader-elected, replicas=2) + ClusterIP Service on :8443
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+resources:
+- namespace.yaml
+- serviceaccount.yaml
+- clusterrole.yaml
+- clusterrolebinding.yaml
+- leader_election_role.yaml
+- certmanager.yaml
+- service.yaml
+- deployment.yaml
+
+labels:
+- pairs:
+    app.kubernetes.io/name: federation-autoscaler
+    app.kubernetes.io/component: broker
+  includeSelectors: false
+
+# CRDs are intentionally not included here — they are cluster-scoped and
+# shared across all three overlays. Consumers compose ../crd/ at the meta
+# level (config/default/) so an apply --prune doesn't churn them.

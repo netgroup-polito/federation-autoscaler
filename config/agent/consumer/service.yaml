@@ -1,0 +1,26 @@
+# ClusterIP Service exposing the consumer agent's loopback REST API to the
+# co-located gRPC server (config/grpc-server/). Provider-role agents do not
+# run a loopback API, so this Service ships ONLY in the consumer overlay.
+#
+# The service is cluster-internal: only the gRPC server pod should hit it.
+# An optional NetworkPolicy could further lock the namespace down — left to
+# the operator for now (the existing config/network-policy/ overlay covers
+# the metrics endpoint shape).
+apiVersion: v1
+kind: Service
+metadata:
+  name: agent
+  namespace: federation-autoscaler-system
+  labels:
+    app.kubernetes.io/name: federation-autoscaler
+    app.kubernetes.io/component: agent
+spec:
+  type: ClusterIP
+  selector:
+    app.kubernetes.io/name: federation-autoscaler
+    app.kubernetes.io/component: agent
+  ports:
+  - name: localapi
+    port: 9090
+    targetPort: localapi
+    protocol: TCP

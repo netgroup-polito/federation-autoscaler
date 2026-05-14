@@ -1,0 +1,15 @@
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: broker
+  labels:
+    app.kubernetes.io/name: federation-autoscaler
+    app.kubernetes.io/component: broker
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: broker
+subjects:
+- kind: ServiceAccount
+  name: broker
+  namespace: federation-autoscaler-system

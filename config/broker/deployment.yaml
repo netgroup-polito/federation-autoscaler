@@ -1,0 +1,104 @@
+# Broker Deployment.
+#
+# Leader-elected via --leader-elect → the runtime claims the Lease named
+# `broker.federation-autoscaler.io` so the REST API listener (which opts into
+# leader election via internal/broker/api/runnable.go) only terminates traffic
+# on the elected pod. replicas: 2 gives one warm standby; bump to 3 for
+# stronger availability.
+#
+# The broker-server-cert Secret is materialised by cert-manager
+# (config/broker/certmanager.yaml). It carries tls.crt / tls.key the broker
+# serves on TLS handshake and ca.crt the broker uses to verify agent client
+# certs (same CA chain signs both ends).
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: broker
+  namespace: federation-autoscaler-system
+  labels:
+    app.kubernetes.io/name: federation-autoscaler
+    app.kubernetes.io/component: broker
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: federation-autoscaler
+      app.kubernetes.io/component: broker
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: federation-autoscaler
+        app.kubernetes.io/component: broker
+      annotations:
+        kubectl.kubernetes.io/default-container: broker
+    spec:
+      serviceAccountName: broker
+      terminationGracePeriodSeconds: 30
+      securityContext:
+        runAsNonRoot: true
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+      - name: broker
+        image: federation-autoscaler/broker:latest
+        imagePullPolicy: IfNotPresent
+        args:
+        - --leader-elect
+        - --health-probe-bind-address=:8081
+        - --metrics-bind-address=:8443
+        - --api-bind-address=:9443
+        - --api-tls-cert-file=/etc/federation-autoscaler/tls/tls.crt
+        - --api-tls-key-file=/etc/federation-autoscaler/tls/tls.key
+        - --api-client-ca-file=/etc/federation-autoscaler/tls/ca.crt
+        - --namespace=$(POD_NAMESPACE)
+        env:
+        - name: POD_NAMESPACE
+          valueFrom:
+            fieldRef:
+              fieldPath: metadata.namespace
+        ports:
+        - name: api
+          containerPort: 9443
+          protocol: TCP
+        - name: health
+          containerPort: 8081
+          protocol: TCP
+        - name: metrics
+          containerPort: 8443
+          protocol: TCP
+        livenessProbe:
+          httpGet:
+            path: /healthz
+            port: health
+          initialDelaySeconds: 15
+          periodSeconds: 20
+        readinessProbe:
+          httpGet:
+            path: /readyz
+            port: health
+          initialDelaySeconds: 5
+          periodSeconds: 10
+        resources:
+          limits:
+            cpu: 500m
+            memory: 256Mi
+          requests:
+            cpu: 50m
+            memory: 128Mi
+        securityContext:
+          readOnlyRootFilesystem: true
+          allowPrivilegeEscalation: false
+          capabilities:
+            drop:
+            - ALL
+        volumeMounts:
+        - name: tls
+          mountPath: /etc/federation-autoscaler/tls
+          readOnly: true
+      volumes:
+      - name: tls
+        secret:
+          secretName: broker-server-cert
+          # tls.crt + tls.key are the broker server keypair; ca.crt is the
+          # CA bundle the broker uses to verify agent client certs (mTLS).
+          defaultMode: 0400

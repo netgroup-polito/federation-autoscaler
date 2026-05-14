@@ -1,0 +1,118 @@
+# Agent ClusterRole.
+#
+# Union of consumer + provider role needs — both roles share one image (only
+# --role differs), so granting both rule-sets avoids per-role SA juggling.
+#
+# Consumer role uses:
+#   - core/secrets in the agent namespace      kubeconfig staging
+#   - autoscaling.federation-autoscaler.io/    Peer creates VirtualNodeState,
+#       virtualnodestates                       Unpeer/Cleanup delete it
+#   - authentication.liqo.io/resourceslices    Peer creates / Unpeer deletes
+#   - offloading.liqo.io/                      Peer creates / Unpeer deletes,
+#       {namespaceoffloadings,virtualnodes}    reconciler watches VN
+#
+# Provider role uses:
+#   - core/nodes                               snapshot for advertisements
+#   - core/{serviceaccounts,secrets}           created by `liqoctl generate
+#                                              peering-user`
+#   - rbac.authorization.k8s.io/{cluster}roles+{cluster}rolebindings
+#                                              created by liqoctl for the
+#                                              peering-user identity
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: agent
+  labels:
+    app.kubernetes.io/name: federation-autoscaler
+    app.kubernetes.io/component: agent
+rules:
+# --- core ---------------------------------------------------------------
+- apiGroups:
+  - ""
+  resources:
+  - nodes
+  verbs:
+  - get
+  - list
+  - watch
+- apiGroups:
+  - ""
+  resources:
+  - secrets
+  - serviceaccounts
+  verbs:
+  - get
+  - list
+  - watch
+  - create
+  - update
+  - patch
+  - delete
+- apiGroups:
+  - ""
+  resources:
+  - events
+  verbs:
+  - create
+  - patch
+# --- rbac (provider peering-user) ---------------------------------------
+- apiGroups:
+  - rbac.authorization.k8s.io
+  resources:
+  - clusterroles
+  - clusterrolebindings
+  - roles
+  - rolebindings
+  verbs:
+  - get
+  - list
+  - create
+  - update
+  - delete
+# --- federation-autoscaler CRs (consumer role) --------------------------
+- apiGroups:
+  - autoscaling.federation-autoscaler.io
+  resources:
+  - virtualnodestates
+  verbs:
+  - get
+  - list
+  - watch
+  - create
+  - update
+  - patch
+  - delete
+- apiGroups:
+  - autoscaling.federation-autoscaler.io
+  resources:
+  - virtualnodestates/status
+  verbs:
+  - get
+  - patch
+  - update
+# --- Liqo CRs (consumer role) -------------------------------------------
+- apiGroups:
+  - authentication.liqo.io
+  resources:
+  - resourceslices
+  verbs:
+  - get
+  - list
+  - watch
+  - create
+  - update
+  - patch
+  - delete
+- apiGroups:
+  - offloading.liqo.io
+  resources:
+  - namespaceoffloadings
+  - virtualnodes
+  verbs:
+  - get
+  - list
+  - watch
+  - create
+  - update
+  - patch
+  - delete

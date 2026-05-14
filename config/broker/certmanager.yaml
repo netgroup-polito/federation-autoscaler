@@ -1,0 +1,87 @@
+# cert-manager PKI bundle for the broker.
+#
+# Chain:
+#   selfsigned-root (Issuer) → federation-autoscaler-ca (Certificate, IsCA=true)
+#   federation-autoscaler-ca-issuer (Issuer, references the CA Secret) →
+#       broker-server (Certificate, server keypair the broker terminates mTLS with)
+#
+# The same CA-Issuer signs the agent client certs (config/agent/, step 12c),
+# so the broker can verify any agent cert chained to this root via the
+# bundled ca.crt the cert-manager Secret carries.
+---
+apiVersion: cert-manager.io/v1
+kind: Issuer
+metadata:
+  name: selfsigned-root
+  namespace: federation-autoscaler-system
+  labels:
+    app.kubernetes.io/name: federation-autoscaler
+    app.kubernetes.io/component: broker
+spec:
+  selfSigned: {}
+---
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: federation-autoscaler-ca
+  namespace: federation-autoscaler-system
+  labels:
+    app.kubernetes.io/name: federation-autoscaler
+    app.kubernetes.io/component: broker
+spec:
+  isCA: true
+  commonName: federation-autoscaler-ca
+  duration: 87600h     # 10 years — rotate before this fires (cert-manager renews automatically).
+  renewBefore: 720h    # 30 d
+  secretName: federation-autoscaler-ca-cert
+  privateKey:
+    algorithm: ECDSA
+    size: 256
+  issuerRef:
+    name: selfsigned-root
+    kind: Issuer
+    group: cert-manager.io
+---
+apiVersion: cert-manager.io/v1
+kind: Issuer
+metadata:
+  name: federation-autoscaler-ca-issuer
+  namespace: federation-autoscaler-system
+  labels:
+    app.kubernetes.io/name: federation-autoscaler
+    app.kubernetes.io/component: broker
+spec:
+  ca:
+    secretName: federation-autoscaler-ca-cert
+---
+# Server certificate the broker terminates mTLS with. DNS names cover the
+# in-cluster Service FQDN; production deployments will append a public
+# hostname (LoadBalancer / Ingress) via a kustomize patch.
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: broker-server
+  namespace: federation-autoscaler-system
+  labels:
+    app.kubernetes.io/name: federation-autoscaler
+    app.kubernetes.io/component: broker
+spec:
+  commonName: broker.federation-autoscaler-system.svc
+  dnsNames:
+  - broker
+  - broker.federation-autoscaler-system
+  - broker.federation-autoscaler-system.svc
+  - broker.federation-autoscaler-system.svc.cluster.local
+  duration: 8760h      # 1 year
+  renewBefore: 720h    # 30 d
+  secretName: broker-server-cert
+  privateKey:
+    algorithm: ECDSA
+    size: 256
+    rotationPolicy: Always
+  usages:
+  - server auth
+  issuerRef:
+    name: federation-autoscaler-ca-issuer
+    kind: Issuer
+    group: cert-manager.io
