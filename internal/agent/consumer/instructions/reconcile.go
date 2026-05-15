@@ -50,10 +50,10 @@ type ReconcileConfig struct {
 // the handler must be cheap and idempotent — a single List call plus
 // projection.
 //
-// VirtualNodeState CRs are produced by step 11's reconciler; until
-// that lands, the slice will be empty and the broker simply observes
-// "no virtual nodes materialised on this consumer." That is correct
-// pre-step-11 state, not an error.
+// VirtualNodeState CRs are created by the consumer agent's Peer
+// handler and kept in sync by the VirtualNodeStateReconciler; an empty
+// slice here simply means no chunks have been peered yet on this
+// consumer, which is valid state, not an error.
 func NewReconcileHandler(cfg ReconcileConfig) poller.HandlerFunc {
 	if cfg.Logger.GetSink() == nil {
 		cfg.Logger = log.Log.WithName("consumer-handler-reconcile")

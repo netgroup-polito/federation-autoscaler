@@ -1,0 +1,43 @@
+%%{init: {'theme': 'neutral'}}%%
+%% docs/design.md §8.3 — scale-down execution flow (as-built).
+%% Surfaces the liqoctl unpeer exec hop introduced in step 9.
+%% Regenerate the PNG with: mmdc -i scale-down.mmd -o scale-down-execution-flow.png
+sequenceDiagram
+    autonumber
+    participant CA  as Cluster<br/>Autoscaler<br/>(consumer-1)
+    participant GS  as gRPC<br/>Server<br/>(consumer-1)
+    participant CAg as Consumer<br/>Agent<br/>(consumer-1)
+    participant Bk  as Broker<br/>(central)
+    participant PAg as Provider<br/>Agent<br/>(provider-1)
+    participant Lq  as liqoctl<br/>(exec)
+    participant Lo  as Liqo<br/>(networking +<br/>VirtualNode)
+
+    Note over CA: virtual node underutilised<br/>or NodeGroupDeleteNodes call
+    CA->>GS: NodeGroupDeleteNodes([node-xyz])
+    GS->>CAg: DELETE /local/reservations/{id}
+    CAg->>Bk: DELETE /api/v1/reservations/{id}<br/>(mTLS, full release in v1)
+    Note right of Bk: Reservation phase<br/>Peered → Unpeering<br/>ReservationInstruction{Unpeer}<br/>queued for consumer-1
+    Bk-->>CAg: 202
+    CAg-->>GS: 202
+    GS-->>CA: ok
+
+    CAg->>Bk: GET /api/v1/instructions (5 s poll)
+    Bk-->>CAg: ReservationInstruction{Unpeer,<br/>lastChunk=true}
+    CAg->>CAg: delete NamespaceOffloading
+    CAg->>CAg: delete VirtualNodeState CR
+    CAg->>Lo: delete ResourceSlice
+    Lo-->>CAg: ok
+    CAg->>Lq: liqoctl unpeer<br/>--remote-kubeconfig <path>
+    Lq-->>CAg: ok (or "already unpeered")
+    CAg->>CAg: delete kubeconfig Secret<br/>(lastChunk=true)
+    CAg->>Bk: POST /api/v1/instructions/{id}/result<br/>(releasedChunks, tunnelDropped)
+
+    Note right of Bk: Reservation enters terminal phase<br/>handleTerminal emits<br/>ProviderInstruction{Cleanup}
+    PAg->>Bk: GET /api/v1/instructions (5 s poll)
+    Bk-->>PAg: ProviderInstruction{Cleanup}
+    PAg->>PAg: revoke peering-user<br/>ServiceAccount + bindings
+    PAg->>Bk: POST /api/v1/instructions/{id}/result
+    Note right of Bk: Reservation phase<br/>Released<br/>(chunks return to pool)
+
+    Note over Lo: Liqo tears down<br/>VirtualNode + tunnel
+    Note over GS: VirtualNodeStateReconciler<br/>no longer sees the CR;<br/>NodeGroupTargetSize drops

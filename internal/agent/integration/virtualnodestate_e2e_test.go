@@ -312,8 +312,19 @@ var _ = Describe("Step 11 end-to-end: Peer → VirtualNodeState → reconciler �
 		defer func() { _ = resp.Body.Close() }()
 		var list localapi.VirtualNodeListResponse
 		Expect(json.NewDecoder(resp.Body).Decode(&list)).To(Succeed())
-		Expect(list.VirtualNodes).To(HaveLen(1))
-		v := list.VirtualNodes[0]
+		// Other specs in this suite (e.g. the consumer-9f happy-path) may
+		// have left their own VirtualNodeState CRs in the shared envtest
+		// namespace, so filter to the one this spec created instead of
+		// asserting on the whole list length.
+		var v *localapi.VirtualNodeView
+		for i := range list.VirtualNodes {
+			if list.VirtualNodes[i].ReservationID == reservationID {
+				v = &list.VirtualNodes[i]
+				break
+			}
+		}
+		Expect(v).NotTo(BeNil(), "no VirtualNodeView for reservation %q in %+v",
+			reservationID, list.VirtualNodes)
 		Expect(v.Name).To(Equal(liqoVNName))
 		Expect(v.NodeGroupID).To(Equal(nodeGroupID))
 		Expect(v.Phase).To(Equal(autoscalingv1alpha1.VirtualNodeStatePhaseRunning))

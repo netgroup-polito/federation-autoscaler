@@ -25,13 +25,12 @@ import (
 
 // VirtualNodeView is the local-API representation of one consumer-side
 // VirtualNodeState — one entry per Liqo virtual node materialised on
-// the consumer cluster. The gRPC server (step 10) consumes this view
-// when answering Cluster Autoscaler's NodeGroupTargetSize /
-// NodeGroupNodes / NodeGroupTemplateNodeInfo RPCs.
-//
-// Until step 11 wires the VirtualNodeStateReconciler, the agent has no
-// CRs to read; /local/virtual-nodes returns an empty list. Step 11
-// will start populating the slice.
+// the consumer cluster. The gRPC server consumes this view when
+// answering Cluster Autoscaler's NodeGroupTargetSize / NodeGroupNodes /
+// NodeGroupTemplateNodeInfo RPCs. The VirtualNodeStateReconciler keeps
+// the underlying CRs in sync with the corresponding Liqo VirtualNode,
+// and the consumer agent's Peer / Unpeer / Cleanup handlers create and
+// delete them as reservations move through the broker phase machine.
 type VirtualNodeView struct {
 	// Name is the Liqo VirtualNode object name (== virtual-node name
 	// surfaced to the local cluster's scheduler).

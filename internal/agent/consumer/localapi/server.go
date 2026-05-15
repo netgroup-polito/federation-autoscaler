@@ -25,8 +25,10 @@ limitations under the License.
 //	GET    /local/nodegroups             proxy to client.GetNodeGroups
 //	POST   /local/reservations           proxy to client.PostReservation
 //	DELETE /local/reservations/{id}      proxy to client.DeleteReservation
-//	GET    /local/virtual-nodes          read VirtualNodeState CRs (empty
-//	                                     until step 11 wires the reconciler)
+//	GET    /local/virtual-nodes          list VirtualNodeState CRs in the
+//	                                     agent's namespace, projected to
+//	                                     the wire shape the gRPC server
+//	                                     consumes
 //
 // Failures from the broker are forwarded with the broker's HTTP status
 // and ErrorResponse body so the gRPC server can map them to gRPC codes

@@ -456,7 +456,8 @@ func (s *Server) handleReservationRelease(w http.ResponseWriter, r *http.Request
 		return
 	}
 	// Step 4g supports full release only. Partial release lands once the
-	// Reservation reconciler tracks remainingChunks (see docs/design.md §6).
+	// Reservation reconciler tracks remainingChunks (see docs/design.md
+	// §7.3.9 — DELETE /api/v1/reservations/{id}?chunks=N).
 	if chunks != 0 && chunks != resv.Spec.ChunkCount {
 		writeError(w, http.StatusNotImplemented, ErrorResponse{
 			Code: ErrCodeInternalError,

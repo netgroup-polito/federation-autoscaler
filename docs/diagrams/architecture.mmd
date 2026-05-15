@@ -1,0 +1,48 @@
+%%{init: {'theme': 'neutral'}}%%
+%% docs/design.md §3 — system overview (as-built).
+%% Captures the asymmetric communication model and the three-binary split.
+%% Regenerate the PNG with: mmdc -i architecture.mmd -o architecture-diagram.png
+flowchart TB
+    subgraph Central["central cluster"]
+        Bk["Broker<br/>(REST API +<br/>reconcilers)"]
+        BkCRD["CRDs:<br/>ClusterAdvertisement<br/>Reservation<br/>ProviderInstruction<br/>ReservationInstruction"]
+        Bk --- BkCRD
+    end
+
+    subgraph Consumer["consumer-* cluster"]
+        CAg["Consumer<br/>Agent"]
+        GS["gRPC<br/>Server"]
+        CA["Cluster<br/>Autoscaler"]
+        VNS["CRD:<br/>VirtualNodeState"]
+        VN["Liqo VirtualNode<br/>(materialised on peer)"]
+        CA -- "externalgrpc<br/>(mTLS)" --> GS
+        GS -- "loopback REST<br/>/local/*" --> CAg
+        GS --- VNS
+        VNS -. reconciler watches .-> VN
+    end
+
+    subgraph Provider["provider-* cluster"]
+        PAg["Provider<br/>Agent"]
+        Nodes["local nodes<br/>(allocatable)"]
+        PAg -- snapshot --> Nodes
+    end
+
+    Lq1["liqoctl peer / unpeer<br/>(exec)"]
+    Lq2["liqoctl generate<br/>peering-user (exec)"]
+
+    CAg -- "mTLS, agent-initiated<br/>POST /api/v1/{heartbeat,reservations}<br/>GET /api/v1/{nodegroups,instructions}<br/>POST /api/v1/instructions/{id}/result" --> Bk
+    PAg -- "mTLS, agent-initiated<br/>POST /api/v1/advertisements<br/>GET /api/v1/instructions<br/>POST /api/v1/instructions/{id}/result" --> Bk
+
+    CAg -- shell-out --> Lq1
+    PAg -- shell-out --> Lq2
+
+    %% Broker NEVER dials agents — emphasised by absent arrow in the
+    %% opposite direction.
+    classDef central fill:#ffd,stroke:#888,stroke-width:1px
+    classDef consumer fill:#dfe,stroke:#888,stroke-width:1px
+    classDef provider fill:#def,stroke:#888,stroke-width:1px
+    classDef exec fill:#fee,stroke:#a44,stroke-width:1px
+    class Bk,BkCRD central
+    class CAg,GS,CA,VNS,VN consumer
+    class PAg,Nodes provider
+    class Lq1,Lq2 exec

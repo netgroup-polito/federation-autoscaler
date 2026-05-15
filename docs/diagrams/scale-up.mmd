@@ -1,0 +1,49 @@
+%%{init: {'theme': 'neutral'}}%%
+%% docs/design.md §8.2 — scale-up execution flow (as-built).
+%% Surfaces every liqoctl exec hop introduced in steps 8/9.
+%% Regenerate the PNG with: mmdc -i scale-up.mmd -o scale-up-execution-flow.png
+sequenceDiagram
+    autonumber
+    participant CA  as Cluster<br/>Autoscaler<br/>(consumer-1)
+    participant GS  as gRPC<br/>Server<br/>(consumer-1)
+    participant CAg as Consumer<br/>Agent<br/>(consumer-1)
+    participant Bk  as Broker<br/>(central)
+    participant PAg as Provider<br/>Agent<br/>(provider-1)
+    participant Lq  as liqoctl<br/>(exec)
+    participant Lo  as Liqo<br/>(networking +<br/>VirtualNode)
+
+    Note over CA: unschedulable Pods detected
+    CA->>GS: NodeGroupIncreaseSize(delta=2)
+    GS->>CAg: POST /local/reservations
+    CAg->>Bk: POST /api/v1/reservations<br/>(mTLS, X-Reservation-Id)
+    Note right of Bk: Reservation phase<br/>Pending → GeneratingKubeconfig
+    Bk-->>CAg: 201 + reservationId
+    CAg-->>GS: 202 + reservationId
+    GS-->>CA: ok
+
+    Note over Bk: ProviderInstruction{<br/>GenerateKubeconfig}<br/>queued for provider-1
+    PAg->>Bk: GET /api/v1/instructions (5 s poll)
+    Bk-->>PAg: ProviderInstruction{GenerateKubeconfig}
+    PAg->>Lq: liqoctl generate peering-user<br/>--consumer-cluster-id <consumer-1>
+    Lq-->>PAg: kubeconfig (stdout)
+    PAg->>Bk: POST /api/v1/instructions/{id}/result<br/>(payload: kubeconfig)
+    Note right of Bk: Reservation phase<br/>KubeconfigReady → Peering<br/>ReservationInstruction{Peer}<br/>queued (kubeconfig inlined)
+
+    CAg->>Bk: GET /api/v1/instructions (5 s poll)
+    Bk-->>CAg: ReservationInstruction{Peer}<br/>(kubeconfig inlined)
+    CAg->>CAg: persist kubeconfig Secret
+    CAg->>Lq: liqoctl peer<br/>--remote-kubeconfig <path>
+    Lq-->>CAg: ok
+    CAg->>Lo: create ResourceSlice<br/>+ NamespaceOffloading
+    Lo-->>CAg: ResourceSlice accepted
+    Note over Lo: Liqo materialises<br/>VirtualNode + v1.Node
+    CAg->>CAg: create VirtualNodeState CR
+    CAg->>Bk: POST /api/v1/instructions/{id}/result<br/>(virtualNodeNames)
+    Note right of Bk: Reservation phase<br/>Peered
+
+    Note over GS: VirtualNodeStateReconciler<br/>projects Liqo VN status<br/>onto VirtualNodeState
+    CA->>GS: NodeGroupNodes()
+    GS->>CAg: GET /local/virtual-nodes
+    CAg-->>GS: [{name, Phase=Running, allocatable}]
+    GS-->>CA: Instance{Running}
+    Note over CA: kube-scheduler<br/>places Pods on<br/>the new VirtualNode

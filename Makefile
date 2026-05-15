@@ -82,33 +82,31 @@ test: manifests generate fmt vet setup-envtest ## Run tests.
 	KUBEBUILDER_ASSETS="$(shell $(ENVTEST) use $(ENVTEST_K8S_VERSION) --bin-dir $(LOCALBIN) -p path)" go test $$(go list ./... | grep -v /e2e) -coverprofile cover.out
 
 # TODO(user): To use a different vendor for e2e tests, modify the setup under 'tests/e2e'.
-# The default setup assumes Kind is pre-installed and builds/loads the Manager Docker image locally.
-# CertManager is installed by default; skip with:
-# - CERT_MANAGER_INSTALL_SKIP=true
-KIND_CLUSTER ?= federation-autoscaler-test-e2e
+# The step-13 e2e suite provisions a 4-Kind topology in BeforeSuite (central,
+# consumer-1, provider-1, provider-2 — see test/e2e/kind/) and tears it down
+# in AfterSuite. Kind, kubectl, kustomize, and liqoctl must be on $PATH.
+#
+# Environment knobs (consumed by the Go suite, not the Makefile):
+#   KEEP_CLUSTERS=true     keep the Kind clusters after the suite for debugging
+#   SKIP_IMAGE_BUILD=true  skip `make docker-build`; useful when images are pre-built
+FA_E2E_CLUSTERS ?= fa-central fa-consumer-1 fa-provider-1 fa-provider-2
 
 .PHONY: setup-test-e2e
-setup-test-e2e: ## Set up a Kind cluster for e2e tests if it does not exist
-	@command -v $(KIND) >/dev/null 2>&1 || { \
-		echo "Kind is not installed. Please install Kind manually."; \
-		exit 1; \
-	}
-	@case "$$($(KIND) get clusters)" in \
-		*"$(KIND_CLUSTER)"*) \
-			echo "Kind cluster '$(KIND_CLUSTER)' already exists. Skipping creation." ;; \
-		*) \
-			echo "Creating Kind cluster '$(KIND_CLUSTER)'..."; \
-			$(KIND) create cluster --name $(KIND_CLUSTER) ;; \
-	esac
+setup-test-e2e: ## Verify the e2e prerequisites are on $PATH (clusters come up via the suite itself).
+	@command -v $(KIND) >/dev/null 2>&1 || { echo "kind is not installed; install kind and retry"; exit 1; }
+	@command -v kubectl >/dev/null 2>&1 || { echo "kubectl is not installed; install kubectl and retry"; exit 1; }
+	@command -v kustomize >/dev/null 2>&1 || { echo "kustomize is not installed; install kustomize and retry"; exit 1; }
+	@command -v liqoctl >/dev/null 2>&1 || { echo "liqoctl is not installed; install liqoctl and retry"; exit 1; }
 
 .PHONY: test-e2e
-test-e2e: setup-test-e2e manifests generate fmt vet ## Run the e2e tests. Expected an isolated environment using Kind.
-	KIND=$(KIND) KIND_CLUSTER=$(KIND_CLUSTER) go test -tags=e2e ./test/e2e/ -v -ginkgo.v
-	$(MAKE) cleanup-test-e2e
+test-e2e: setup-test-e2e manifests generate fmt vet ## Run the multi-cluster e2e suite (provisions 4 Kind clusters inside the suite).
+	KIND=$(KIND) go test -tags=e2e ./test/e2e/ -v -ginkgo.v -timeout=45m
 
 .PHONY: cleanup-test-e2e
-cleanup-test-e2e: ## Tear down the Kind cluster used for e2e tests
-	@$(KIND) delete cluster --name $(KIND_CLUSTER)
+cleanup-test-e2e: ## Force-delete every fa-* Kind cluster the e2e suite may have left behind.
+	@for c in $(FA_E2E_CLUSTERS); do \
+		$(KIND) delete cluster --name $$c >/dev/null 2>&1 || true; \
+	done
 
 .PHONY: lint
 lint: golangci-lint ## Run golangci-lint linter

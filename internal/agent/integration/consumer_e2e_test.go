@@ -89,6 +89,12 @@ var _ = Describe("Step 9 end-to-end: real consumer.Run against the broker over m
 		_ = k8sClient.Delete(suiteCtx, &corev1.Secret{
 			ObjectMeta: metav1.ObjectMeta{Name: brokerSecretKey.Name, Namespace: suiteNamespace},
 		})
+		// The Peer handler creates a VirtualNodeState CR (vns-<resv>);
+		// without an explicit delete it leaks into later specs sharing
+		// the envtest namespace.
+		_ = k8sClient.Delete(suiteCtx, &autoscalingv1alpha1.VirtualNodeState{
+			ObjectMeta: metav1.ObjectMeta{Name: "vns-" + resName, Namespace: suiteNamespace},
+		})
 	})
 
 	It("consumer.Run picks up Peer, runs fake liqoctl, creates Liqo CRs, and the broker advances to Peered", func() {

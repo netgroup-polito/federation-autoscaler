@@ -1,10 +1,10 @@
 # Dynamic Multi-Provider Cluster Autoscaling for the Computing Continuum
 
-## Architectural Proposal
+## Architectural Proposal (as-built)
 
-**Version:** 3.0
+**Version:** 3.1
 
-**Date:** April 21, 2026
+**Status:** alpha — the design has shipped end-to-end across the broker, agents, gRPC server, and the four-cluster e2e suite (see §11 and the README "Status" table). The numbered sections below each carry an "Implemented in:" footer pointing at the canonical Go packages, kustomize overlays, or YAML samples that realise the spec.
 
 **Based on:** "Dynamic Multi-Provider Cluster Autoscaling For The Computing Continuum" (ACM SAC 2025)
 
@@ -74,6 +74,8 @@ This proposal defines a complete architecture that achieves this by combining **
 
 ![Architecture Diagram](diagrams/architecture-diagram.png)
 
+> **Source-of-truth diagram:** [`diagrams/architecture.mmd`](diagrams/architecture.mmd). The PNG is a rendering — regenerate via `mmdc` per [`diagrams/README.md`](diagrams/README.md).
+
 The system consists of three deployment domains connected by a strict asymmetric communication model:
 
 | Channel | Initiator | Style | Rationale |
@@ -128,6 +130,8 @@ Each provider cluster runs:
 | Health monitoring | Tracks `lastSeen` on every cluster from advertisements (providers) and heartbeats (consumers). Declares a cluster `Unavailable` after 30 s with no update. |
 | Reconcile on drift | On startup and on leader change, issues `ProviderInstruction/ReservationInstruction {Kind: Reconcile}` to every active cluster; agents reply with a full state snapshot via `POST /instructions/{id}/result` and the Broker adopts it. |
 | Price/priority reporting | Returns per-provider cost values that the agent relays to the gRPC server and ultimately exposes via the CA's `PricingNodePrice` method (enabling the `price` Expander) |
+
+> **Implemented in:** `cmd/broker/`, `internal/broker/api/` (REST surface + middleware + mTLS), `internal/broker/chunk/` (chunk sizing), `internal/controller/broker/` (`clusteradvertisement_controller.go`, `reservation_controller.go`), `internal/controller/autoscaling/` (`providerinstruction_controller.go`, `reservationinstruction_controller.go`, `instruction.go`), `internal/manager/`. Deployed via `config/broker/`.
 
 ---
 
@@ -202,6 +206,8 @@ status:
     pods: "110"
 ```
 
+> **Implemented in:** `cmd/grpc-server/`, `internal/grpcserver/` (server + 14 implemented RPCs across `rpc_readonly.go`, `rpc_mutating.go`, `rpc_lifecycle.go`, `nodetemplate.go`), `internal/grpcserver/agentclient/` (typed loopback REST client), `internal/grpcserver/protos/` (vendored externalgrpc.proto), `internal/controller/autoscaling/virtualnodestate_controller.go`. Deployed via `config/grpc-server/`.
+
 ---
 
 ### 4.3 Consumer Agent (Consumer Cluster)
@@ -248,6 +254,8 @@ No Ingress, LoadBalancer, NodePort, or public DNS is required.
 | Idempotency cache | Keyed by `reservationId + instruction kind`, TTL = `idempotency-cache-ttl` (10 min). Duplicate instructions return the cached result instead of re-executing. |
 | Local cache population | Merge polling results + synchronous Broker responses into a single in-memory view served to the gRPC server |
 
+> **Implemented in:** `cmd/agent/`, `internal/agent/consumer/` (orchestration), `internal/agent/consumer/heartbeat/` (15 s POST), `internal/agent/consumer/localapi/` (loopback REST), `internal/agent/consumer/instructions/` (Peer / Unpeer / Cleanup / Reconcile + Liqo CR creation + VirtualNodeState management), `internal/agent/client/` (mTLS HTTP client), `internal/agent/poller/` (5 s GET /instructions loop), `internal/agent/health/`. Deployed via `config/agent/consumer/` (Deployment `--role=consumer`).
+
 ---
 
 ### 4.4 Provider Agent (Provider Cluster)
@@ -282,6 +290,8 @@ Advertisement doubles as heartbeat — providers never call `/api/v1/heartbeat`.
 
 > **Shared code, separate binaries.** Both agents share the outbound mTLS client, the exponential-backoff retrier, the idempotency cache, and the CRD clients. Role is selected at startup by a CLI flag (`--role=consumer|provider`) that wires in the role-specific instruction executors and the role-specific polling / advertisement loop.
 
+> **Implemented in:** `cmd/agent/`, `internal/agent/provider/` (orchestration), `internal/agent/provider/snapshot/` (allocatable + topology), `internal/agent/provider/advertise/` (30 s POST), `internal/agent/provider/instructions/` (GenerateKubeconfig via `liqoctl generate peering-user` + Cleanup + Reconcile), `internal/agent/client/`, `internal/agent/poller/`, `internal/agent/health/`. Deployed via `config/agent/provider/` (Deployment `--role=provider`). `liqoctl` is bundled in the agent image — see `Dockerfile`.
+
 ---
 
 ### 4.5 Cluster Autoscaler (Consumer Cluster)
@@ -307,6 +317,8 @@ address=localhost:50051
 
 **Key point:** The CA is completely unaware of Liqo, the Broker, the Consumer Agent, or multi-provider topology. It sees node groups and makes decisions using its standard algorithms. The gRPC server acts as the translation layer.
 
+> **Implemented in:** upstream `cluster-autoscaler` (see `../cluster-autoscaler/`); deployment template + cert-manager client cert + cloud-config Secret rendered by `test/e2e/bootstrap/cluster_autoscaler.go` (`registry.k8s.io/autoscaling/cluster-autoscaler:v1.32.0`).
+
 ---
 
 ### 4.6 Liqo (Consumer and Provider Clusters)
@@ -321,6 +333,8 @@ address=localhost:50051
 - `NamespaceOffloading` — Created by the consumer agent to enable pod scheduling on virtual nodes for specific namespaces.
 
 **Peering mode:** On-demand — established only when the CA first requests scale-up on a given provider, torn down when the last chunk is released.
+
+> **Implemented in:** upstream Liqo (see `../liqo/`). Provider Agent shells out to `liqoctl generate peering-user` (`internal/agent/provider/instructions/generatekubeconfig.go`); Consumer Agent shells out to `liqoctl peer` / `unpeer` and creates `ResourceSlice` + `NamespaceOffloading` via `unstructured.Unstructured` (`internal/agent/consumer/instructions/liqo.go`, `peer.go`, `unpeer.go`). `VirtualNode` is read by `internal/controller/autoscaling/virtualnodestate_controller.go`. `liqoctl` is pinned to v1.1.2 in the agent image (`Dockerfile`).
 
 ---
 
@@ -366,6 +380,8 @@ Creating → Running → Deleting → (deleted)
 Creating → Failed → (cleaned up)
 ```
 
+> **Implemented in:** `api/autoscaling/v1alpha1/virtualnodestate_types.go` (CRD), `internal/controller/autoscaling/virtualnodestate_controller.go` (reconciler projecting Liqo `VirtualNode` + `v1.Node` allocatable onto status), `internal/agent/consumer/instructions/virtualnodestate.go` (Peer creates / Unpeer deletes the CR).
+
 ### 5.2 ClusterAdvertisement (Broker)
 
 From `k8s-resource-brokering`, extended with Liqo and chunk fields. **No `agentEndpoint` field** — the Broker never dials the agent.
@@ -396,6 +412,8 @@ status:
   reservedChunks:  1
   availableChunks: 3
 ```
+
+> **Implemented in:** `api/broker/v1alpha1/clusteradvertisement_types.go` (CRD), `internal/controller/broker/clusteradvertisement_controller.go` (`StaleAfter` freshness check flipping `Available`), `internal/broker/api/advertisement.go` (`POST /api/v1/advertisements` handler + chunk decoration).
 
 ### 5.3 Reservation (Broker)
 
@@ -434,6 +452,8 @@ Peered → Unpeering → Released
 {Pending, GeneratingKubeconfig, KubeconfigReady, Peering} → Failed | Expired
 ```
 
+> **Implemented in:** `api/broker/v1alpha1/reservation_types.go` (CRD), `internal/controller/broker/reservation_controller.go` (phase machine + expiry guard + `checkProviderAvailable`), `internal/broker/api/reservation.go` (`POST /api/v1/reservations` synchronous decision engine + `DELETE` handler). v1 limitation: partial release deferred — see `internal/broker/api/reservation.go:458` (`LastChunk: true` always).
+
 ### 5.4 ProviderInstruction (Provider Agent cluster)
 
 From `k8s-resource-brokering`, extended with `kind` and chunk fields. Created by the Broker; polled by the provider agent via `GET /api/v1/instructions`.
@@ -455,6 +475,8 @@ status:
   enforced:       false
   lastUpdateTime: "2026-04-08T10:30:00Z"
 ```
+
+> **Implemented in:** `api/autoscaling/v1alpha1/providerinstruction_types.go` (CRD), `internal/controller/autoscaling/providerinstruction_controller.go` (delivery + enforcement), `internal/controller/autoscaling/instruction.go` (shared `IssuedAt` + `DefaultEnforcedTTL` bookkeeping); emitted by `internal/controller/broker/reservation_controller.go` on phase transitions.
 
 ### 5.5 ReservationInstruction (Consumer Agent cluster)
 
@@ -479,6 +501,8 @@ status:
   delivered:      false
   lastUpdateTime: "2026-04-08T10:30:00Z"
 ```
+
+> **Implemented in:** `api/autoscaling/v1alpha1/reservationinstruction_types.go` (CRD), `internal/controller/autoscaling/reservationinstruction_controller.go` (delivery + enforcement), `internal/controller/autoscaling/instruction.go`. Kubeconfig payload is loaded fresh per poll by `internal/broker/api/instructions.go` (never written to status).
 
 ---
 
@@ -525,6 +549,8 @@ data:
 - For GPU providers: `chunks = min(cpu / gpu-cpu, memory / gpu-memory, gpu / gpu-count)` (floor, discard leftover)
 - Timeouts are aligned: heartbeat timeout `30s` = 2 × heartbeat interval `15s`, giving one missed beat of tolerance
 - `idempotency-cache-ttl` bounds the age of retriable instructions
+
+> **Implemented in:** `internal/broker/chunk/` (chunk-sizing math + `DefaultSizer` fallback constants); sample ConfigMap shipped at `config/samples/chunk-config.yaml`. The broker consumes the ConfigMap on every `/api/v1/reservations` call via `internal/broker/api/reservation.go`.
 
 ---
 
@@ -583,17 +609,23 @@ Content-Type: application/json
 **Timeouts & retries (agent is always the retrier; Broker never retries because it never initiates):**
 - Agent → Broker call timeout: **30 s** per attempt, **3 attempts**, exponential backoff (1 s, 4 s, 16 s, ±20 % jitter).
 
+> **Implemented in:** `internal/broker/api/types.go` (`ErrCode*` constants, `HeaderRequestID`, `HeaderReservationID`), `internal/broker/api/middleware.go` (`ClusterIDMiddleware` deriving identity from the cert CN + `RequestIDMiddleware` + token-bucket rate limiter + structured-logging wrapper), `internal/broker/api/tls.go` (mTLS server config), `internal/agent/client/` (`request.go` retry+backoff, `errors.go` typed `Error` categories, `tls.go` client-side mTLS config).
+
 ---
 
 ### 7.1 gRPC Server ↔ Cluster Autoscaler
 
 Defined by upstream `externalgrpc.proto`. The gRPC server implements all 15 methods listed in § 4.2 with no non-upstream extensions.
 
+> **Implemented in:** `internal/grpcserver/protos/` (vendored proto bindings — `externalgrpc.pb.go`, `externalgrpc_grpc.pb.go`); `internal/grpcserver/server.go` builds the gRPC server with mTLS, and the 14 implemented RPCs land in `rpc_readonly.go`, `rpc_mutating.go`, `rpc_lifecycle.go`. `NodeGroupGetOptions` is the only Unimplemented RPC (per proto contract).
+
 ---
 
 ### 7.2 gRPC Server ↔ Consumer Agent  (REST, in-cluster)
 
 Plain HTTP over a ClusterIP Service, e.g. `http://federation-consumer-agent.federation-system.svc.cluster.local:8080`. Optional `Authorization: Bearer <ServiceAccount token>`. The provider-side cluster has no equivalent surface — this endpoint family exists only on the consumer side.
+
+> **Implemented in:** `internal/agent/consumer/localapi/` (server + per-route handlers + `VirtualNodeView` projection over `VirtualNodeState` CRs); `internal/grpcserver/agentclient/` is the typed client the gRPC server dials with. v1 implements `/local/nodegroups`, `/local/reservations`, `DELETE /local/reservations/{id}`, `/local/virtual-nodes`, and `/healthz`. The single-reservation `GET /local/reservations/{id}` (§7.2.4) and listing (§7.2.6) are not yet implemented — the gRPC server polls broker state directly.
 
 #### 7.2.1 `GET /local/health`
 ```
@@ -696,6 +728,8 @@ Response 200:
 ### 7.3 Consumer / Provider Agent → Broker  (REST over mTLS, **agent-initiated only**)
 
 Base URL: `https://broker.central.example.com:8443/api/v1`. Mutual TLS required; `clusterId` derived from certificate CN. Each endpoint below is annotated with the agent role(s) that call it — the Broker never initiates calls in the opposite direction.
+
+> **Implemented in:** `internal/broker/api/` (server.go wires the mux; per-route handlers in `advertisement.go`, `heartbeat.go`, `nodegroups.go`, `reservation.go`, `instructions.go`); `internal/broker/api/runnable.go` wraps the server as a leader-elected `manager.Runnable`. Client side: `internal/agent/client/endpoints.go` (`PostAdvertisement`, `PostHeartbeat`, `GetNodeGroups`, `PostReservation`, `DeleteReservation`, `GetInstructions`, `PostInstructionResult`). v1 omits `GET /api/v1/advertisements/{clusterId}` (§7.3.2) and `GET /api/v1/reservations/{id}` (§7.3.8) — both are read-only conveniences not yet wired.
 
 #### 7.3.1 `POST /api/v1/advertisements`   *(provider, every 30 s — doubles as heartbeat; response piggybacks instructions)*
 ```
@@ -927,6 +961,8 @@ Response 202:
 
 ### 8.1 Registration Flow
 
+> **Source-of-truth diagram:** [`diagrams/registration.mmd`](diagrams/registration.mmd).
+
 ```
 PROVIDER CLUSTER                      CENTRAL CLUSTER
 ─────────────────                     ───────────────
@@ -959,9 +995,13 @@ Consumer Agent                        Broker
 
 The Broker never needs to dial either cluster.
 
+> **Implemented in:** Provider Agent — `internal/agent/provider/advertise/publisher.go` (30 s POST loop) + `internal/agent/provider/snapshot/snapshot.go` (allocatable + topology); Consumer Agent — `internal/agent/consumer/heartbeat/heartbeat.go` (15 s POST loop); Broker side — `internal/broker/api/advertisement.go`, `internal/broker/api/heartbeat.go`, `internal/broker/api/registry.go` (in-memory `ConsumerRegistry`).
+
 ### 8.2 Scale-Up Flow (Complete)
 
 ![Scale Up](diagrams/scale-up-execution-flow.png)
+
+> **Source-of-truth diagram:** [`diagrams/scale-up.mmd`](diagrams/scale-up.mmd) — includes the `liqoctl generate peering-user` (provider) and `liqoctl peer` (consumer) exec hops the v3.0 PNG predates.
 
 ```
 Step 1: CA detects unschedulable pods.
@@ -1026,9 +1066,13 @@ Step 8: CA calls NodeGroupIncreaseSize(id="ng-provider-1-standard", delta=2).
 
 **Typical latency:** 15-30 s from step 1 to step 36. The two polling gaps (steps 19, 25) add ≤ 5 s each in the worst case and ≤ 0 s when advertisement-piggyback delivers the provider's instruction.
 
+> **Implemented in:** `internal/grpcserver/rpc_mutating.go` (`NodeGroupIncreaseSize`); `internal/broker/api/reservation.go` (`POST /api/v1/reservations` synchronous decision); `internal/controller/broker/reservation_controller.go` (`Pending → GeneratingKubeconfig → KubeconfigReady → Peering → Peered` phase machine + provider/reservation-instruction emission); `internal/agent/provider/instructions/generatekubeconfig.go` (provider side, `liqoctl generate peering-user` shell-out); `internal/agent/consumer/instructions/peer.go` (consumer side, kubeconfig secret + `liqoctl peer` + ResourceSlice + NamespaceOffloading + VirtualNodeState create); `internal/controller/autoscaling/virtualnodestate_controller.go` (projects Liqo `VirtualNode` Ready onto VNS). End-to-end coverage: `internal/integration/scaleup_test.go` and `test/e2e/` (multi-Kind).
+
 ### 8.3 Scale-Down Flow (Complete)
 
 ![Scale Down](diagrams/scale-down-execution-flow.png)
+
+> **Source-of-truth diagram:** [`diagrams/scale-down.mmd`](diagrams/scale-down.mmd) — includes the `liqoctl unpeer` exec hop the v3.0 PNG predates.
 
 ```
 Step 1: CA detects an underutilized virtual node for > 5 minutes.
@@ -1067,6 +1111,8 @@ Step 3: CA calls NodeGroupDeleteNodes(id="ng-provider-1-standard", nodes=[node-x
   Step 20: Deletes VirtualNodeState chunk-0; next NodeGroups() reflects the freed chunk in maxSize.
 ```
 
+> **Implemented in:** `internal/grpcserver/rpc_mutating.go` (`NodeGroupDeleteNodes`); `internal/broker/api/reservation.go` (`DELETE /api/v1/reservations/{id}` — v1 supports full release only, see `LastChunk: true` at `internal/controller/broker/reservation_controller.go:188`); `internal/controller/broker/reservation_controller.go` (`handleUnpeering` + `handleTerminal` emitting `ProviderInstruction{Cleanup}`); `internal/agent/consumer/instructions/unpeer.go` (delete VNS → delete ResourceSlice → `liqoctl unpeer`) and `internal/agent/provider/instructions/cleanup.go`.
+
 ### 8.4 Reservation Timeout Flow
 
 ```
@@ -1083,6 +1129,8 @@ Agents learn about expiry passively:
   - gRPC Server's next GET /local/reservations/{id} returns status=Expired → VirtualNodeState → Failed.
   - CA may retry on a different provider.
 ```
+
+> **Implemented in:** `internal/controller/broker/reservation_controller.go` — expiry guard inside the phase reconciler flips non-terminal Reservations past `Spec.ExpiresAt` to `Expired` and emits cleanup instructions. `instruction.go`'s `DefaultEnforcedTTL` (5 min) garbage-collects the instructions after delivery.
 
 ### 8.5 Provider Heartbeat Timeout Flow
 
@@ -1104,6 +1152,8 @@ When provider-1 agent returns:
   → Provider-1 re-appears in nodegroup responses.
 ```
 
+> **Implemented in:** `internal/controller/broker/clusteradvertisement_controller.go` (`StaleAfter` freshness flips `Status.Available`); `internal/controller/broker/reservation_controller.go` (`checkProviderAvailable` + `requestsForAdvertisement` watch fail-fasts non-terminal Reservations whose provider has dropped).
+
 ### 8.6 Reconciliation / Drift Recovery
 
 ```
@@ -1122,6 +1172,8 @@ Steps:
   5. Broker diff-applies the snapshot to its CRDs (create missing Reservations, release orphans).
 ```
 
+> **Implemented in:** `internal/agent/consumer/instructions/reconcile.go` + `internal/agent/provider/instructions/reconcile.go` (per-role snapshot handlers). The broker's reconcile-instruction emission on startup is part of `internal/controller/broker/`; the diff-apply pass is a v2 deliverable — the v1 reconcile path just reports current state.
+
 ---
 
 ## 9. Failure Handling and Reconciliation
@@ -1135,6 +1187,8 @@ Steps:
 | Virtual node exists but no matching VirtualNodeState | Log warning (manual creation suspected) |
 | Agent unreachable | Serve cached node-group data, retry on next loop |
 
+> **Implemented in:** `internal/controller/autoscaling/virtualnodestate_controller.go` (timer-based `DefaultVirtualNodeStateRequeue=30s` safety net plus the Liqo `VirtualNode` watch wired in `SetupWithManager`). The cached-node-group fallback is the gRPC server's stateless behaviour — every RPC re-fetches via the loopback REST.
+
 ### 9.2 Consumer Agent Reconciliation Loop (every 60 s)
 
 | Check | Action |
@@ -1143,6 +1197,8 @@ Steps:
 | Liqo peering is broken for a provider with active ResourceSlices | Emit event; next Broker Reconcile instruction will surface it |
 | NamespaceOffloading missing for namespaces with active virtual nodes | Recreate NamespaceOffloading CR |
 | Local cache older than 2 × poll interval | Force a fresh `GET /api/v1/nodegroups` |
+
+> **Implemented in:** `internal/agent/consumer/instructions/reconcile.go` (Reconcile-instruction handler) + the Liqo CR delete helpers in `liqo.go`. Drift detection for orphaned ResourceSlices / missing NamespaceOffloading is partial in v1 — the consumer agent only deletes Liqo CRs in response to explicit Unpeer/Cleanup instructions today, not via an independent 60 s loop.
 
 ### 9.3 Broker Reconciliation Loop (every 30 s)
 
@@ -1155,11 +1211,15 @@ Steps:
 | Enforced instructions older than 24 h | GC |
 | Terminal reservations older than 7 days | GC |
 
+> **Implemented in:** `internal/controller/broker/reservation_controller.go` (expiry guard + `checkProviderAvailable` watch off `ClusterAdvertisement`), `internal/controller/broker/clusteradvertisement_controller.go` (`StaleAfter` + `Available` flip), `internal/controller/autoscaling/instruction.go` (`DefaultEnforcedTTL=5m` instruction GC). The 7-day terminal-reservation GC is not yet wired — terminal Reservations persist until manually deleted.
+
 ### 9.4 Idempotency Contract
 
 - Every reservation-scoped call carries `X-Reservation-Id` in header + body; the agent refuses requests where they mismatch.
 - Agents cache `POST /instructions/{id}/result` replies for `idempotency-cache-ttl` so a retried instruction execution reports the same result without re-running `liqoctl`.
 - The Broker's `GET /instructions` handler returns the same instruction repeatedly while `status.enforced == false`; result submission is the only thing that clears it. Agents MUST treat every execution as idempotent (no-op on re-invocation).
+
+> **Implemented in:** Broker side — `internal/broker/api/reservation.go` derives a deterministic `Reservation` CR name from the `X-Reservation-Id` header so retries collapse onto the same CR; `internal/controller/autoscaling/instruction.go` flips `Status.Enforced` on first successful result; `internal/broker/api/middleware.go` provides the request-id middleware. Agent side — every `internal/agent/consumer/instructions/*.go` and `internal/agent/provider/instructions/*.go` handler is idempotent on AlreadyExists / NotFound.
 
 ### 9.5 Agent Crash Recovery
 
@@ -1167,11 +1227,15 @@ Steps:
 - The replacement pod polls `GET /instructions` on startup and re-receives any instruction that was in flight → re-executes idempotently.
 - Agent-side caches are in-memory; a restart loses them, but Broker state is authoritative and the next poll re-populates.
 
+> **Implemented in:** `config/agent/base/deployment.yaml` (`replicas: 1` + `strategy: Recreate`); `internal/agent/poller/poller.go` (single-goroutine poll loop; refuses to start two instances).
+
 ### 9.6 Broker Leader Failover
 
 - HTTP server is stateless; Lease-based leader election swaps the serving pod.
 - Agents experience at most one request failure during swap, absorbed by their 3-attempt retry with backoff.
 - On becoming leader, a pod issues `Reconcile` instructions to every known cluster to resynchronize state (§ 8.6).
+
+> **Implemented in:** `internal/manager/manager.go` (`LeaderElectionID = "broker.federation-autoscaler.io"`); `internal/broker/api/runnable.go` (`NeedLeaderElection() = true` so only the leader serves API traffic); `config/broker/deployment.yaml` runs `replicas: 2`. The reconcile-on-leader-change emission is part of `internal/controller/broker/`'s controller lifecycle.
 
 ---
 
@@ -1188,17 +1252,23 @@ Steps:
 
 No inbound port is required on any agent cluster. Consumer and provider clusters need only outbound egress to the Broker URL.
 
+> **Implemented in:** `internal/broker/api/tls.go` (broker mTLS server config + CN extraction), `internal/agent/client/tls.go` (agent mTLS client), `internal/grpcserver/tls.go` (externalgrpc mTLS server). All three load `tls.crt` / `tls.key` / `ca.crt` from a cert-manager-produced Secret mounted at `/etc/federation-autoscaler/tls`.
+
 ### 10.2 Certificate Management
 
 - **Broker:** server certificate for its `/api/v1/*` endpoints.
 - **Consumer Agent and Provider Agent:** each carries its own client certificate with `CN = <Liqo cluster ID>` used when calling the Broker. No server certificate is required (provider agents have no listener; consumer agents expose only a ClusterIP Service in-cluster).
 - Certificates are issued by a federation CA (e.g. cert-manager `ClusterIssuer`) and delivered to the agent as a Kubernetes Secret at onboarding time. Recommended rotation: 90 days.
 
+> **Implemented in:** `config/broker/certmanager.yaml` (selfsigned root → `federation-autoscaler-ca` (`IsCA=true`, 10y) → `federation-autoscaler-ca-issuer` → broker server cert, 1y / 30d rotation). `config/agent/base/certificate.yaml` and `config/grpc-server/certificate.yaml` chain to the same CA-Issuer. The e2e suite stamps CN=`<clusterId>` via `test/e2e/bootstrap/agent_config.go`.
+
 ### 10.3 Authentication & Authorisation
 
 - The Broker's mTLS middleware extracts `clusterId` from the client certificate CN. Neither the Consumer Agent nor the Provider Agent can spoof another cluster's identity.
 - Every endpoint verifies that `clusterId` in the payload (if present) matches the CN; mismatch → `403 Forbidden`.
 - A Provider Agent cannot reserve resources (it only publishes advertisements); a Consumer Agent cannot publish advertisements. The handler selects the allowed set of operations from the cert's role attribute (or a namespace convention that encodes the role).
+
+> **Implemented in:** `internal/broker/api/middleware.go` (`ClusterIDMiddleware` + 403-on-mismatch); `internal/broker/api/tls.go` (`extractClientCN`). Per-endpoint role gating (provider-only / consumer-only) is not yet implemented — any valid mTLS cert can call any handler today, gated only by CN-vs-payload cross-check.
 
 ### 10.4 Kubeconfig Security
 
@@ -1207,16 +1277,22 @@ No inbound port is required on any agent cluster. Consumer and provider clusters
 - The kubeconfig is *not* written to the Broker's etcd CRD `status` (which would show up in watch streams). It is stored on disk within the Broker pod's PVC-backed instruction blob, or held in memory and replayed from the provider's idempotency cache on agent restart.
 - Agent-side idempotency caches hold the kubeconfig for `idempotency-cache-ttl` (10 min) to tolerate retries; it is cleared thereafter.
 
+> **Implemented in:** `internal/broker/api/instructions.go` (loads kubeconfig from a Broker-cluster Secret on each `/api/v1/instructions` poll and inlines it into the response; never written back to CRD status); `internal/agent/consumer/instructions/secrets.go` (`persistKubeconfig` writes the inlined bytes to a Secret on the consumer cluster); `internal/agent/consumer/instructions/peer.go` stages the kubeconfig under `/tmp` for `liqoctl peer` and removes it on exit.
+
 ### 10.5 Replay Protection
 
 - Every reservation-scoped call carries `X-Reservation-Id`; the Broker rejects calls missing it.
 - Both agents refuse to execute a second instruction for a reservation that is already in a terminal state.
 - Both agents compare `reservationId` in the body against the header and the authenticated `clusterId`.
 
+> **Implemented in:** `internal/broker/api/reservation.go` (rejects `POST /api/v1/reservations` with missing `X-Reservation-Id`; rejects body / header / CN mismatches with 403). Terminal-phase rejection on the agent side is implicit — Peer/Unpeer handlers are idempotent and the broker stops re-emitting the instruction after enforcement.
+
 ### 10.6 Rate Limiting
 
 - Per-cluster token bucket on `GET /api/v1/instructions`: 10 rps burst, 5 rps sustained. Violations → `429 TooManyRequests`; the calling agent's backoff handles it.
 - Per-cluster bucket on `POST /api/v1/reservations` (Consumer Agent only): 2 rps (prevents reservation-spam DoS).
+
+> **Implemented in:** `internal/broker/api/middleware.go` (`rateLimitMiddleware` token bucket — 10 burst / 5 sustained on `/api/v1/instructions`, keyed by clusterID from the cert CN). The dedicated 2 rps bucket on `/api/v1/reservations` is not yet wired separately — both endpoints share the per-cluster bucket today.
 
 ---
 

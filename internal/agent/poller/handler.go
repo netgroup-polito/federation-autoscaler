@@ -23,7 +23,7 @@ limitations under the License.
 //
 // The poller is the only component that runs a goroutine in the agent;
 // keeping a single instance per process is what makes the idempotency
-// model in docs/design.md §7.4 hold (the agent Deployment is
+// model in docs/design.md §7.0 hold (the agent Deployment is
 // strategy=Recreate, single-replica — never add another poller).
 package poller
 
