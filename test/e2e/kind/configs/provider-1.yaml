@@ -1,0 +1,14 @@
+# Provider cluster #1 — donates capacity to the federation. Runs the
+# provider agent (no gRPC server / no CA / no broker).
+#
+# One worker so the agent's snapshot reports non-zero allocatable; the
+# control-plane is excluded from the advertisement (kubernetes.io/master
+# taint).
+kind: Cluster
+apiVersion: kind.x-k8s.io/v1alpha4
+networking:
+  podSubnet: "10.243.0.0/16"
+  serviceSubnet: "10.98.0.0/16"
+nodes:
+- role: control-plane
+- role: worker

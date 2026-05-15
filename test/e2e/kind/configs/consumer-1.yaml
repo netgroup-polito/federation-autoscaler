@@ -1,0 +1,14 @@
+# Consumer cluster #1 — runs the consumer agent + gRPC server + Cluster
+# Autoscaler (with --cloud-provider=externalgrpc). Liqo VirtualNodes appear
+# on this cluster after the broker stamps a Reservation Peered.
+#
+# Single worker so CA / agent / grpc-server have a node to schedule onto;
+# the control-plane is left for system pods only.
+kind: Cluster
+apiVersion: kind.x-k8s.io/v1alpha4
+networking:
+  podSubnet: "10.242.0.0/16"
+  serviceSubnet: "10.97.0.0/16"
+nodes:
+- role: control-plane
+- role: worker

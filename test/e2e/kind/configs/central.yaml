@@ -1,0 +1,13 @@
+# Central cluster — runs the broker (REST API + reconcilers) and the
+# project-wide cert-manager Issuer chain. No federation workloads land here.
+#
+# Pod / Service CIDRs are unique per cluster so Liqo's network gateway can
+# route between them without remapping; Liqo tolerates overlap but distinct
+# CIDRs keep test logs less confusing.
+kind: Cluster
+apiVersion: kind.x-k8s.io/v1alpha4
+networking:
+  podSubnet: "10.241.0.0/16"
+  serviceSubnet: "10.96.0.0/16"
+nodes:
+- role: control-plane
