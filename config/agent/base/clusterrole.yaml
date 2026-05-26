@@ -8,8 +8,21 @@
 #   - autoscaling.federation-autoscaler.io/    Peer creates VirtualNodeState,
 #       virtualnodestates                       Unpeer/Cleanup delete it
 #   - authentication.liqo.io/resourceslices    Peer creates / Unpeer deletes
-#   - offloading.liqo.io/                      Peer creates / Unpeer deletes,
-#       {namespaceoffloadings,virtualnodes}    reconciler watches VN
+#   - authentication.liqo.io/identities        liqoctl peer applies the
+#                                              Identity CR on the consumer
+#                                              as the final handshake step
+#   - offloading.liqo.io/                      Peer creates the singleton
+#       {namespaceoffloadings,virtualnodes}    NamespaceOffloading named
+#                                              literally "offloading"
+#                                              (Liqo webhook hardcodes it);
+#                                              reconciler watches VN
+#   - ipam.liqo.io, networking.liqo.io         liqoctl peer also creates a
+#                                              RoleBinding for the peering
+#                                              user that grants these rules,
+#                                              and K8s RBAC escalation
+#                                              prevention requires the
+#                                              agent SA to hold them too
+#                                              even though we never use them
 #
 # Provider role uses:
 #   - core/nodes                               snapshot for advertisements

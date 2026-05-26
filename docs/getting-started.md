@@ -193,7 +193,16 @@ server actually issues a reservation does the broker queue a
 ## 6. Watch a scale-up
 
 Schedule a synthetic workload on consumer-1 with per-Pod requests too big
-for the consumer cluster's local nodes:
+for the consumer cluster's local nodes. Two specifics are load-bearing:
+
+- `nodeSelector: liqo.io/type=virtual-node` — pins the workload to
+  federation capacity. Without this the Pods would happily fit on the
+  consumer's local worker (Kind workers inherit the host's CPU budget),
+  CA would never see Pending pods, and no scale-up would trigger.
+- `tolerations` for `virtual-node.liqo.io/not-allowed:NoExecute` —
+  Liqo stamps that taint on every materialised VirtualNode; without
+  the toleration the scheduler refuses to bind even after CA spins
+  up the node.
 
 ```bash
 KUBECONFIG=/tmp/consumer-1.kubeconfig kubectl apply -f - <<'EOF'
@@ -212,6 +221,12 @@ spec:
       labels:
         app.kubernetes.io/name: federation-scaleup-driver
     spec:
+      nodeSelector:
+        liqo.io/type: virtual-node
+      tolerations:
+      - key: virtual-node.liqo.io/not-allowed
+        operator: Exists
+        effect: NoExecute
       containers:
       - name: pause
         image: registry.k8s.io/pause:3.10
@@ -230,9 +245,12 @@ KUBECONFIG=/tmp/central.kubeconfig kubectl --namespace federation-autoscaler-sys
   get reservations -w -o custom-columns=NAME:.metadata.name,PHASE:.status.phase,PROVIDER:.spec.providerClusterId
 ```
 
-Within ~30 s you should see a new Reservation cycle through
-`Pending → GeneratingKubeconfig → KubeconfigReady → Peering → Peered`. Each
-phase corresponds to a step in `docs/design.md §8.2`:
+Within ~5 minutes you should see a new Reservation cycle through
+`Pending → GeneratingKubeconfig → KubeconfigReady → Peering → Peered`. The
+big step is `Peering`: `liqoctl peer` brings up the WireGuard tunnel,
+exchanges Identity CRs, and waits for Liqo's controller-manager to
+materialise the `VirtualNode` — this routinely takes 3–5 minutes on
+constrained hosts. Each phase corresponds to a step in `docs/design.md §8.2`:
 
 | Phase                  | What's happening                                                                   |
 |------------------------|------------------------------------------------------------------------------------|
@@ -242,24 +260,38 @@ phase corresponds to a step in `docs/design.md §8.2`:
 | `Peering`              | Consumer agent ran `liqoctl peer` and created the Liqo `ResourceSlice`             |
 | `Peered`               | Liqo materialised the `VirtualNode`; CA can now schedule onto it                   |
 
-Watch the Liqo VirtualNode appear on the consumer:
+Watch the Liqo VirtualNode appear on the consumer. Liqo creates the CR
+in a per-provider tenant namespace (`liqo-tenant-<provider-id>`), not
+the federation-autoscaler namespace — so query across all namespaces:
 
 ```bash
-KUBECONFIG=/tmp/consumer-1.kubeconfig kubectl --namespace federation-autoscaler-system \
-  get virtualnodes.offloading.liqo.io -w
+KUBECONFIG=/tmp/consumer-1.kubeconfig kubectl get virtualnodes.offloading.liqo.io --all-namespaces -w
 ```
 
 Once the VirtualNode reports `status.conditions[type=Node].status=Running`,
-your driver Pods should be Scheduled and Running:
+the v1.Node Liqo materialises shows up under `kubectl get nodes` with
+the `liqo.io/type=virtual-node` label, and the kube-scheduler binds your
+driver Pods to it:
 
 ```bash
 KUBECONFIG=/tmp/consumer-1.kubeconfig kubectl get pods \
-  -l app.kubernetes.io/name=federation-scaleup-driver -w
+  -l app.kubernetes.io/name=federation-scaleup-driver -w \
+  -o custom-columns=NAME:.metadata.name,PHASE:.status.phase,NODE:.spec.nodeName
 ```
 
-End-to-end you'll observe one workload spanning two clusters — the Pod
-spec lives on consumer-1, but the kubelet running it lives on
-provider-1.
+You'll see each Pod's `NODE` column populate with the provider's name
+(e.g. `provider-1`). That's the federation-autoscaler success signal:
+CA → broker → agent → Liqo produced a remote virtual node, and the
+scheduler bound the workload to it.
+
+**Note on `OffloadingBackOff`.** Whether the Pod then transitions to
+`Running` depends on Liqo's data-plane offloading actually pushing the
+shadow Pod across the WireGuard tunnel and starting it on the provider.
+On constrained Kind-on-shared-network setups this step sometimes hits
+`OffloadingBackOff` because of Liqo CNI/IPAM quirks — that's an upstream
+Liqo concern, separate from federation-autoscaler. The Pod being
+*scheduled onto the federation virtual node* is the strongest signal
+the federation-autoscaler chain is healthy end-to-end.
 
 ---
 

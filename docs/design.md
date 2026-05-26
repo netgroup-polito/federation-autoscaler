@@ -174,7 +174,7 @@ Each provider cluster runs:
 | `Refresh` | Issues `GET /local/nodegroups`; refreshes `VirtualNodeState` statuses via `GET /local/reservations/{id}` for non-terminal reservations |
 | `Cleanup` | No-op or cleanup local caches |
 | `PricingPodPrice` | Returns `Unimplemented` (code 12) |
-| `NodeGroupGetOptions` | Returns custom `MaxNodeProvisionDuration` (e.g., 5 minutes to account for peering latency) |
+| `NodeGroupGetOptions` | Returns custom `MaxNodeProvisionDuration` (15 minutes — covers the full `liqoctl peer` handshake including WireGuard tunnel setup and Liqo Identity exchange, which routinely takes 3–5 min on constrained hosts) |
 
 **Node Template Construction (for `NodeGroupTemplateNodeInfo` when `currentSize == 0`):**
 
@@ -206,7 +206,7 @@ status:
     pods: "110"
 ```
 
-> **Implemented in:** `cmd/grpc-server/`, `internal/grpcserver/` (server + 14 implemented RPCs across `rpc_readonly.go`, `rpc_mutating.go`, `rpc_lifecycle.go`, `nodetemplate.go`), `internal/grpcserver/agentclient/` (typed loopback REST client), `internal/grpcserver/protos/` (vendored externalgrpc.proto), `internal/controller/autoscaling/virtualnodestate_controller.go`. Deployed via `config/grpc-server/`.
+> **Implemented in:** `cmd/grpc-server/`, `internal/grpcserver/` (server + 14 implemented RPCs across `rpc_readonly.go`, `rpc_mutating.go`, `rpc_lifecycle.go`, `nodetemplate.go`), `internal/grpcserver/agentclient/` (typed loopback REST client), `internal/grpcserver/protos/` (vendored externalgrpc.proto **pinned to cluster-autoscaler v1.32.0** — the proto changed shape between master and tagged releases; v1.32+ uses `nodeInfo *v1.Node` on `NodeGroupTemplateNodeInfoResponse` and `*metav1.Time` on pricing request fields, neither of which exists on master. Bump only in lock-step with the CA image tag deployed via `config/grpc-server/`), `internal/controller/autoscaling/virtualnodestate_controller.go`. The node template emitted by `nodetemplate.go` carries `liqo.io/type=virtual-node` and the `virtual-node.liqo.io/not-allowed:NoExecute` taint so CA's NodeAffinity predicate matches workloads that select federation capacity via the documented Liqo pattern. Deployed via `config/grpc-server/`.
 
 ---
 
@@ -247,9 +247,9 @@ No Ingress, LoadBalancer, NodePort, or public DNS is required.
 | Serve local API | Handle `/local/*` requests from the in-cluster gRPC server |
 | Heartbeat | Every 15 s `POST /api/v1/heartbeat` — single liveness signal to the Broker |
 | Forward reservations | Translate `/local/reservations` calls into Broker calls synchronously; maintain a local cache of results for the gRPC server |
-| Execute `Peer` | On `ReservationInstruction{Kind: Peer}` (kubeconfig **inlined** in the polling response): store the kubeconfig as a Secret on the consumer cluster, run `liqoctl peer` if not already peered with this provider, create N `ResourceSlice` CRDs (one per chunk), create the `NamespaceOffloading` CR, wait for Liqo to materialize the virtual nodes, then POST result with `virtualNodeNames` |
+| Execute `Peer` | On `ReservationInstruction{Kind: Peer}` (kubeconfig **inlined** in the polling response): store the kubeconfig as a Secret on the consumer cluster, run `liqoctl peer --gw-server-service-type NodePort` if not already peered with this provider (the `NodePort` flag is required because Liqo defaults to `LoadBalancer`, which sits at `<pending>` forever on Kind / on-prem clusters without an LB provisioner). Then create one per-Reservation `ResourceSlice` CRD per chunk, ensure the per-namespace **singleton** `NamespaceOffloading` named literally `offloading` exists (Liqo's `nsoff.validate.liqo.io` admission webhook hardcodes this name — one offloading CR per consumer namespace, shared by every Reservation that targets it), wait for Liqo to materialize the virtual nodes, then POST result with `virtualNodeNames` |
 | Execute `Unpeer` | On `ReservationInstruction{Kind: Unpeer}`: delete the specified `ResourceSlice`s; if `lastChunk == true`, run full `liqoctl unpeer`; report result |
-| Execute `Cleanup` | On `ReservationInstruction{Kind: Cleanup}`: tear down consumer-side artefacts (stale ResourceSlices, NamespaceOffloading entries, orphaned peerings); report result |
+| Execute `Cleanup` | On `ReservationInstruction{Kind: Cleanup}`: tear down per-Reservation consumer-side artefacts (stale ResourceSlices, orphaned peerings); report result. **NamespaceOffloading is intentionally not deleted** — it is the per-namespace singleton shared with sibling Reservations, so a per-Reservation Cleanup must not touch it. Removal happens out-of-band when the namespace itself is decommissioned (v2 chore). |
 | Execute `Reconcile` | On `ReservationInstruction{Kind: Reconcile}`: gather an authoritative local snapshot (active ResourceSlices, VirtualNodeStates, active Liqo peerings) and return it as the `/instructions/{id}/result` payload |
 | Idempotency cache | Keyed by `reservationId + instruction kind`, TTL = `idempotency-cache-ttl` (10 min). Duplicate instructions return the cached result instead of re-executing. |
 | Local cache population | Merge polling results + synchronous Broker responses into a single in-memory view served to the gRPC server |
@@ -283,14 +283,14 @@ Advertisement doubles as heartbeat — providers never call `/api/v1/heartbeat`.
 |---|---|
 | Collect metrics | Reads local node resources (allocatable − used), GPU availability, topology labels (zone/region) |
 | Advertise capacity | Every 30 s `POST /api/v1/advertisements` — also acts as heartbeat; response carries piggybacked `ProviderInstruction`s |
-| Execute `GenerateKubeconfig` | On receipt of a `ProviderInstruction{Kind: GenerateKubeconfig}` (via poll or piggyback): runs `liqoctl generate peering-user --consumer-cluster-id <id>`; POSTs the resulting kubeconfig as payload of `POST /api/v1/instructions/{id}/result` |
+| Execute `GenerateKubeconfig` | On receipt of a `ProviderInstruction{Kind: GenerateKubeconfig}` (via poll or piggyback): runs `liqoctl generate peering-user --consumer-cluster-id <id>`; POSTs the resulting kubeconfig as payload of `POST /api/v1/instructions/{id}/result`. **Per-consumer singleton invariant** — `liqoctl generate peering-user` produces one `liqo-peer-user-<consumer>` identity per consumer, not per Reservation; if N Reservations from the same consumer hit the same provider, only the first GK call succeeds and the others return `CSR already exists`. Failed GKs are propagated up; the broker-side fix (v2: de-duplicate GK across (consumer, provider) pairs and reuse the cached kubeconfig) is tracked separately. Handler intentionally does **not** self-heal by re-running `liqoctl delete peering-user` — every regeneration mints a fresh random CN that invalidates any kubeconfig the broker has already captured for the surviving Reservation. |
 | Execute `Cleanup` | On `ProviderInstruction{Kind: Cleanup}`: tears down provider-side artefacts (peering-user kubeconfig, associated state); reports result |
 | Execute `Reconcile` | On `ProviderInstruction{Kind: Reconcile}`: gathers current live advertisement state and active-reservation state; returns it in `POST /instructions/{id}/result` |
 | Idempotency cache | Keyed by `reservationId + instruction kind`, TTL = `idempotency-cache-ttl` (10 min). Duplicate instructions return the cached result instead of re-executing. |
 
 > **Shared code, separate binaries.** Both agents share the outbound mTLS client, the exponential-backoff retrier, the idempotency cache, and the CRD clients. Role is selected at startup by a CLI flag (`--role=consumer|provider`) that wires in the role-specific instruction executors and the role-specific polling / advertisement loop.
 
-> **Implemented in:** `cmd/agent/`, `internal/agent/provider/` (orchestration), `internal/agent/provider/snapshot/` (allocatable + topology), `internal/agent/provider/advertise/` (30 s POST), `internal/agent/provider/instructions/` (GenerateKubeconfig via `liqoctl generate peering-user` + Cleanup + Reconcile), `internal/agent/client/`, `internal/agent/poller/`, `internal/agent/health/`. Deployed via `config/agent/provider/` (Deployment `--role=provider`). `liqoctl` is bundled in the agent image — see `Dockerfile`.
+> **Implemented in:** `cmd/agent/`, `internal/agent/provider/` (orchestration), `internal/agent/provider/snapshot/` (allocatable + topology), `internal/agent/provider/advertise/` (30 s POST), `internal/agent/provider/instructions/` (GenerateKubeconfig via `liqoctl generate peering-user` + Cleanup + Reconcile), `internal/agent/client/`, `internal/agent/poller/`, `internal/agent/health/`. Deployed via `config/agent/provider/` (Deployment `--role=provider`). `liqoctl` is bundled in the agent image — the **host** prefetches `bin/liqoctl-<version>-<os>-<arch>/liqoctl` via the `Makefile`'s `LIQOCTL_BIN` target and the `Dockerfile` `COPY`s it from the build context (not `curl`-ed from inside the build, because some hosts blackhole the docker daemon's egress to `github.com/releases`). Bump `LIQOCTL_VERSION` in the `Makefile` in lock-step with the Liqo CRDs the consumer / provider instruction handlers create.
 
 ---
 
@@ -334,7 +334,7 @@ address=localhost:50051
 
 **Peering mode:** On-demand — established only when the CA first requests scale-up on a given provider, torn down when the last chunk is released.
 
-> **Implemented in:** upstream Liqo (see `../liqo/`). Provider Agent shells out to `liqoctl generate peering-user` (`internal/agent/provider/instructions/generatekubeconfig.go`); Consumer Agent shells out to `liqoctl peer` / `unpeer` and creates `ResourceSlice` + `NamespaceOffloading` via `unstructured.Unstructured` (`internal/agent/consumer/instructions/liqo.go`, `peer.go`, `unpeer.go`). `VirtualNode` is read by `internal/controller/autoscaling/virtualnodestate_controller.go`. `liqoctl` is pinned to v1.1.2 in the agent image (`Dockerfile`).
+> **Implemented in:** upstream Liqo (see `../liqo/`). Provider Agent shells out to `liqoctl generate peering-user` (`internal/agent/provider/instructions/generatekubeconfig.go`); Consumer Agent shells out to `liqoctl peer --gw-server-service-type NodePort` / `liqoctl unpeer` and creates `ResourceSlice` + (singleton) `NamespaceOffloading` named literally `offloading` via `unstructured.Unstructured` (`internal/agent/consumer/instructions/liqo.go`, `peer.go`, `unpeer.go`). `VirtualNode` is read by `internal/controller/autoscaling/virtualnodestate_controller.go`. `liqoctl` is pinned to v1.1.2 (`LIQOCTL_VERSION` in the `Makefile`), prefetched on the host into `bin/liqoctl-*/liqoctl`, and `COPY`-ed into the agent image at build time.
 
 ---
 
@@ -526,8 +526,13 @@ data:
   gpu-memory: "8Gi"
   gpu-count: "1"
 
-  # Timeouts
-  reservation-timeout: "5m"
+  # Timeouts. reservation-timeout must comfortably exceed a full
+  # `liqoctl peer` invocation (gateway pod start + WireGuard handshake +
+  # Identity exchange) — that's 3–5 min on a healthy host, longer on
+  # constrained CI VMs. 15m gives headroom; the broker hard-codes this
+  # default in internal/broker/api/reservation.go and the gRPC server
+  # mirrors it via MaxNodeProvisionDuration in NodeGroupGetOptions.
+  reservation-timeout: "15m"
   agent-heartbeat-timeout: "30s"
 
   # Polling + rate limiting
@@ -598,7 +603,7 @@ Content-Type: application/json
 | 403  | `Forbidden`            | Cert does not authorize this clusterId |
 | 404  | `NotFound`             | Reservation / NodeGroup / Consumer not found |
 | 409  | `Conflict`             | Idempotency mismatch or reservation in an incompatible phase |
-| 410  | `ReservationExpired`   | Reservation already expired (>5m) |
+| 410  | `ReservationExpired`   | Reservation already expired (default >15m, configurable via `reservation-timeout` in the `chunk-config` ConfigMap) |
 | 422  | `InsufficientCapacity` | Not enough free chunks on the requested provider |
 | 429  | `TooManyRequests`      | Rate-limited |
 | 500  | `InternalError`        | Unhandled server-side failure |
@@ -617,7 +622,9 @@ Content-Type: application/json
 
 Defined by upstream `externalgrpc.proto`. The gRPC server implements all 15 methods listed in § 4.2 with no non-upstream extensions.
 
-> **Implemented in:** `internal/grpcserver/protos/` (vendored proto bindings — `externalgrpc.pb.go`, `externalgrpc_grpc.pb.go`); `internal/grpcserver/server.go` builds the gRPC server with mTLS, and the 14 implemented RPCs land in `rpc_readonly.go`, `rpc_mutating.go`, `rpc_lifecycle.go`. `NodeGroupGetOptions` is the only Unimplemented RPC (per proto contract).
+The vendored proto is pinned to **cluster-autoscaler v1.32.0**. The proto's message shapes changed between unreleased master and tagged 1.32.x releases (notably: `NodeGroupTemplateNodeInfoResponse.nodeInfo` is a structured `v1.Node` on v1.32+ but was `bytes nodeBytes` on master; `PricingNodePriceRequest.{StartTime,EndTime}` are `*metav1.Time` on v1.32+ but `timestamppb.Timestamp` on master). Bump the vendored proto only in lock-step with the CA image tag deployed in `config/cluster-autoscaler/`; running mismatched versions surfaces as a `nil pointer` in CA when it tries to read `NodeInfo` against the wrong wire layout.
+
+> **Implemented in:** `internal/grpcserver/protos/` (vendored proto bindings — `externalgrpc.pb.go`, `externalgrpc_grpc.pb.go` — pinned to v1.32.0); `internal/grpcserver/server.go` builds the gRPC server with mTLS, and the 14 implemented RPCs land in `rpc_readonly.go`, `rpc_mutating.go`, `rpc_lifecycle.go`. `NodeGroupGetOptions` is the only Unimplemented RPC (per proto contract).
 
 ---
 
@@ -1022,7 +1029,7 @@ Step 8: CA calls NodeGroupIncreaseSize(id="ng-provider-1-standard", delta=2).
 
 → Broker:
   Step 12: Validates availability (3 ≥ 2) ✓.
-  Step 13: Creates Reservation (phase=GeneratingKubeconfig, expiresAt=+5m).
+  Step 13: Creates Reservation (phase=GeneratingKubeconfig, expiresAt=+15m).
   Step 14: Updates ClusterAdvertisement (reservedChunks += 2).
   Step 15: Creates a ProviderInstruction{Kind:GenerateKubeconfig} CRD targeted at provider-1.
   Step 16: Returns 201 { reservationId, status: "GeneratingKubeconfig", provider… } synchronously.
@@ -1113,10 +1120,12 @@ Step 3: CA calls NodeGroupDeleteNodes(id="ng-provider-1-standard", nodes=[node-x
 
 > **Implemented in:** `internal/grpcserver/rpc_mutating.go` (`NodeGroupDeleteNodes`); `internal/broker/api/reservation.go` (`DELETE /api/v1/reservations/{id}` — v1 supports full release only, see `LastChunk: true` at `internal/controller/broker/reservation_controller.go:188`); `internal/controller/broker/reservation_controller.go` (`handleUnpeering` + `handleTerminal` emitting `ProviderInstruction{Cleanup}`); `internal/agent/consumer/instructions/unpeer.go` (delete VNS → delete ResourceSlice → `liqoctl unpeer`) and `internal/agent/provider/instructions/cleanup.go`.
 
+> **Chunk-release invariant.** `ClusterAdvertisement.Status.ReservedChunks` is decremented by *exactly one* path per Reservation, gated by the `federation-autoscaler.io/chunks-released` annotation on the Reservation (see `api/broker/v1alpha1/common_types.go`, `IsChunksReleased` / `MarkChunksReleased` helpers). The API `DELETE /api/v1/reservations/{id}` handler is the normal release path (stamps the annotation after decrementing); the reservation reconciler's `handleTerminal` is the safety net that covers any non-Unpeering terminal phase (Failed / Expired / etc.) and only decrements when the annotation is absent. Without this idempotency marker the counter drifts — provider `AvailableChunks` gets stuck at 0 forever after any Reservation that died mid-flight without going through the DELETE path. Do not add a third release path.
+
 ### 8.4 Reservation Timeout Flow
 
 ```
-Broker creates Reservation at T=0 with expiresAt = T+5m.
+Broker creates Reservation at T=0 with expiresAt = T+15m (default reservation-timeout).
 
 Broker reconciliation loop (every 30 s):
   If now > reservation.expiresAt AND phase ∈ {Pending, GeneratingKubeconfig, KubeconfigReady, Peering}:
