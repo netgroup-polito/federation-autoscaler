@@ -1,0 +1,25 @@
+---
+# Installs cert-manager on a target cluster. Mirrors
+# test/e2e/bootstrap/cert_manager.go — kubectl-apply the upstream YAML,
+# wait for the three Deployments to become Available.
+#
+# Runs from the control host against the per-cluster kubeconfig fetched
+# by k3s_install. `delegate_to: localhost` keeps kubectl on the operator's
+# machine where the version is pinned.
+
+- name: Apply cert-manager manifest
+  ansible.builtin.shell:
+    cmd: |
+      kubectl --kubeconfig {{ cluster_kubeconfig }} apply \
+        --validate=false \
+        -f https://github.com/cert-manager/cert-manager/releases/download/{{ cert_manager_version }}/cert-manager.yaml
+  delegate_to: localhost
+  changed_when: true
+
+- name: Wait for cert-manager Deployments to become Available
+  ansible.builtin.shell:
+    cmd: |
+      kubectl --kubeconfig {{ cluster_kubeconfig }} \
+        -n cert-manager wait deploy --all --for=condition=Available --timeout=5m
+  delegate_to: localhost
+  changed_when: false

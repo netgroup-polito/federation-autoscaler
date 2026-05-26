@@ -1,0 +1,6 @@
+---
+# Central-cluster-only variables.
+
+# Local kubeconfig path on the control host (set by k3s_install role,
+# repeated here for clarity / Ansible's variable resolution).
+cluster_kubeconfig: "{{ kubeconfig_dir }}/{{ cluster_id }}.yaml"

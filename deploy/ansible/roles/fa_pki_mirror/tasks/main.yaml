@@ -1,0 +1,53 @@
+---
+# Mirrors the broker's CA Secret + Issuer from the central cluster to
+# each agent cluster. Mirrors test/e2e/bootstrap/ca_mirror.go.
+#
+# Why: each agent cluster's cert-manager mints the agent's client TLS
+# cert. For the broker to trust those certs (mTLS handshake), the agent
+# cert must chain to the same root CA the broker server cert chains to.
+# That root lives as a Secret on the CENTRAL cluster (cert-manager
+# generated it via the broker overlay's Certificate). So we copy that
+# Secret + its Issuer into the agent cluster's federation-autoscaler-
+# system namespace; cert-manager there issues agent client certs from
+# the mirrored CA.
+#
+# Runs once on the control host per agent cluster. Idempotent.
+
+- name: Slurp broker CA Secret from central
+  delegate_to: localhost
+  run_once: true
+  ansible.builtin.shell:
+    cmd: |
+      kubectl --kubeconfig "{{ hostvars[groups['central'][0]].cluster_kubeconfig }}" \
+        -n {{ fa_namespace }} get secret federation-autoscaler-ca-secret -o yaml
+  register: broker_ca_secret
+  changed_when: false
+
+- name: Apply the CA Secret to this agent cluster (status/metadata stripped)
+  delegate_to: localhost
+  ansible.builtin.shell:
+    stdin: |
+      {{ broker_ca_secret.stdout |
+         regex_replace('(?m)^\s*namespace:.*$', '  namespace: ' + fa_namespace) |
+         regex_replace('(?m)^\s*resourceVersion:.*$', '') |
+         regex_replace('(?m)^\s*uid:.*$', '') |
+         regex_replace('(?m)^\s*creationTimestamp:.*$', '') }}
+    cmd: |
+      kubectl --kubeconfig {{ cluster_kubeconfig }} apply -f -
+  changed_when: true
+
+- name: Create the federation-autoscaler-ca-issuer Issuer on this cluster
+  delegate_to: localhost
+  ansible.builtin.shell:
+    stdin: |
+      apiVersion: cert-manager.io/v1
+      kind: Issuer
+      metadata:
+        name: federation-autoscaler-ca-issuer
+        namespace: {{ fa_namespace }}
+      spec:
+        ca:
+          secretName: federation-autoscaler-ca-secret
+    cmd: |
+      kubectl --kubeconfig {{ cluster_kubeconfig }} apply -f -
+  changed_when: true

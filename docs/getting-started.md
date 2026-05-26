@@ -1,14 +1,29 @@
 # Getting Started
 
-This guide walks you from a clean machine to a working federation scale-up
-across four Kind clusters in about 15 minutes. The federation-autoscaler
-runs on top of three sibling projects: Kubernetes Cluster Autoscaler (used
-unmodified), [Liqo](https://liqo.io) (multi-cluster peering + virtual
-nodes), and a tiny [Resource
+This guide walks you from a clean machine to a working federation scale-up.
+The federation-autoscaler runs on top of three sibling projects:
+Kubernetes Cluster Autoscaler (used unmodified),
+[Liqo](https://liqo.io) (multi-cluster peering + virtual nodes), and a
+tiny [Resource
 Broker](https://github.com/netgroup-polito/k8s-resource-brokering)-style
-decision engine packaged in this repo. The end-to-end happy path is what
-`make test-e2e` drives; this tutorial unpacks the same flow step-by-step
-so you can poke at it interactively.
+decision engine packaged in this repo.
+
+**Pick one of three install paths** depending on what you have available:
+
+- **[Option A — Four hosts, real k3s, Ansible-driven](#3-option-a--four-host-real-cluster-install-ansible)** —
+  the production-like path. Four Ubuntu VMs, single-node k3s on each,
+  everything wired together by an Ansible playbook. ~45 minutes;
+  scale-down is fully automatic (Liqo offloading actually works on real
+  k3s). **Recommended for anything resembling a real demo or evaluation.**
+- **[Option B — Single Kind cluster, dev install](#4-option-b--single-cluster-dev-install)** —
+  the broker / agent / gRPC server come up on one local Kind cluster.
+  No peering, no scale-up; only useful for inspecting that the deploys
+  render and the binaries start.
+- **[Option C — Four Kind clusters, full federation in one box](#5-option-c--four-cluster-kind-federation-install)** —
+  the e2e suite's topology. Scale-up works end-to-end, but scale-down
+  has to be triggered manually because Liqo's data-plane offloading on
+  Kind-on-shared-network sometimes traps Pods in `OffloadingBackOff`.
+  ~15 minutes once your laptop is set up.
 
 For the deeper architectural background, see [`design.md`](./design.md).
 
@@ -18,12 +33,13 @@ For the deeper architectural background, see [`design.md`](./design.md).
 
 1. [Prerequisites](#1-prerequisites)
 2. [Build the component images](#2-build-the-component-images)
-3. [Option A — Single-cluster dev install](#3-option-a--single-cluster-dev-install)
-4. [Option B — Four-cluster federation install](#4-option-b--four-cluster-federation-install)
-5. [Peer a first provider](#5-peer-a-first-provider)
-6. [Watch a scale-up](#6-watch-a-scale-up)
-7. [Teardown](#7-teardown)
-8. [Troubleshooting](#8-troubleshooting)
+3. [Option A — Four-host real-cluster install (Ansible)](#3-option-a--four-host-real-cluster-install-ansible)
+4. [Option B — Single-cluster dev install](#4-option-b--single-cluster-dev-install)
+5. [Option C — Four-cluster Kind federation install](#5-option-c--four-cluster-kind-federation-install)
+6. [Peer a first provider](#6-peer-a-first-provider)
+7. [Watch a scale-up](#7-watch-a-scale-up)
+8. [Teardown](#8-teardown)
+9. [Troubleshooting](#9-troubleshooting)
 
 ---
 
@@ -70,7 +86,29 @@ Output: `federation-autoscaler/broker:latest`,
 
 ---
 
-## 3. Option A — Single-cluster dev install
+## 3. Option A — Four-host real-cluster install (Ansible)
+
+The production-like path: four Ubuntu VMs running single-node k3s each,
+bootstrapped + deployed by an Ansible playbook. This is what you want for
+a real demo or for evaluating federation-autoscaler on hardware you
+control. Scale-down is fully automatic because real Liqo on real k3s
+offloads Pods successfully (unlike the Kind option in §5).
+
+The full walkthrough — hardware requirements, network ports, tooling
+install, inventory setup, the three playbooks — is documented as a
+standalone guide:
+
+**→ [`../deploy/ansible/README.md`](../deploy/ansible/README.md)**
+
+Skim that, then jump back to [§6 Peer a first provider](#6-peer-a-first-provider)
+and [§7 Watch a scale-up](#7-watch-a-scale-up) to drive the demo flow —
+the `kubectl` commands there are kubeconfig-driven and work identically
+whether you're pointing at the Ansible-provisioned k3s clusters or the
+Kind clusters from §5.
+
+---
+
+## 4. Option B — Single-cluster dev install
 
 Useful when you want to inspect the broker + agent + gRPC server on one
 cluster without provisioning the full federation. No peering happens in
@@ -119,11 +157,17 @@ provider cluster — see Option B.
 
 ---
 
-## 4. Option B — Four-cluster federation install
+## 5. Option C — Four-cluster Kind federation install
 
-This is the full happy-path topology — central + consumer-1 + provider-1 +
-provider-2 — and is what the e2e suite stands up. The fastest path is to
-let the suite do it for you:
+The full happy-path topology — central + consumer-1 + provider-1 +
+provider-2 — but all four clusters as Kind containers on one host
+sharing a docker network. This is what the e2e suite stands up. Useful
+for development iteration; less useful for a demo because Liqo's
+data-plane offloading on Kind-on-shared-network sometimes traps Pods in
+`OffloadingBackOff` and prevents automatic scale-down. For a real demo,
+use [Option A](#3-option-a--four-host-real-cluster-install-ansible).
+
+The fastest path is to let the e2e suite do the standup for you:
 
 ```bash
 make test-e2e
@@ -158,7 +202,7 @@ kind get kubeconfig --name fa-provider-2  > /tmp/provider-2.kubeconfig
 
 ---
 
-## 5. Peer a first provider
+## 6. Peer a first provider
 
 With the topology up, watch how a provider registers with the broker. The
 provider agent's bootstrap is automatic — it sends `POST /api/v1/advertisements`
@@ -190,7 +234,7 @@ server actually issues a reservation does the broker queue a
 
 ---
 
-## 6. Watch a scale-up
+## 7. Watch a scale-up
 
 Schedule a synthetic workload on consumer-1 with per-Pod requests too big
 for the consumer cluster's local nodes. Two specifics are load-bearing:
@@ -295,7 +339,7 @@ the federation-autoscaler chain is healthy end-to-end.
 
 ---
 
-## 7. Teardown
+## 8. Teardown
 
 Drop the synthetic workload, then either delete the Reservation manually
 (which exercises the scale-down path — `docs/design.md §8.3`) or tear the
@@ -314,7 +358,7 @@ make cleanup-test-e2e
 
 ---
 
-## 8. Troubleshooting
+## 9. Troubleshooting
 
 | Symptom | Where to look |
 |---|---|

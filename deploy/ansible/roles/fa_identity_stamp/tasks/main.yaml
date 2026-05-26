@@ -1,0 +1,49 @@
+---
+# Patches the agent-client Certificate's commonName to this cluster's
+# cluster_id. Mirrors test/e2e/bootstrap/agent_config.go's
+# PatchAgentConfig.
+#
+# Why: the base config/agent/base/certificate.yaml ships
+# commonName: REPLACE_ME_CLUSTER_ID. The broker derives the caller's
+# identity from the cert CN (docs/design.md §7.2), and the agent reads
+# the same value to send as --cluster-id. Both must match the inventory's
+# cluster_id; this role updates the CN and forces a rollout so the agent
+# Pod picks up the rotated TLS Secret.
+
+- name: Patch agent-client Certificate commonName to "{{ cluster_id }}"
+  delegate_to: localhost
+  ansible.builtin.shell:
+    cmd: |
+      kubectl --kubeconfig {{ cluster_kubeconfig }} -n {{ fa_namespace }} \
+        patch certificate agent-client --type merge -p \
+        '{"spec":{"commonName":"{{ cluster_id }}"}}'
+  changed_when: true
+
+- name: Wait for cert-manager to reissue the agent-client Secret
+  delegate_to: localhost
+  ansible.builtin.shell:
+    cmd: |
+      kubectl --kubeconfig {{ cluster_kubeconfig }} -n {{ fa_namespace }} \
+        wait certificate agent-client --for=condition=Ready --timeout=2m
+  changed_when: false
+
+- name: Rollout-restart agent so it loads the rotated TLS Secret
+  delegate_to: localhost
+  ansible.builtin.shell:
+    cmd: |
+      kubectl --kubeconfig {{ cluster_kubeconfig }} -n {{ fa_namespace }} \
+        rollout restart deploy/agent
+      kubectl --kubeconfig {{ cluster_kubeconfig }} -n {{ fa_namespace }} \
+        rollout status deploy/agent --timeout=3m
+  changed_when: true
+
+- name: Rollout-restart grpc-server on consumers (same rotation reason)
+  when: inventory_hostname in groups['consumers']
+  delegate_to: localhost
+  ansible.builtin.shell:
+    cmd: |
+      kubectl --kubeconfig {{ cluster_kubeconfig }} -n {{ fa_namespace }} \
+        rollout restart deploy/grpc-server
+      kubectl --kubeconfig {{ cluster_kubeconfig }} -n {{ fa_namespace }} \
+        rollout status deploy/grpc-server --timeout=3m
+  changed_when: true

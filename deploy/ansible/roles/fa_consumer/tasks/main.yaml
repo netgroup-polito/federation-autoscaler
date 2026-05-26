@@ -1,0 +1,67 @@
+---
+# Deploys the consumer agent + gRPC server on a consumer cluster.
+# Mirrors test/e2e/bootstrap/overlays.go's ApplyOverlay calls for
+# config/agent/consumer and config/grpc-server.
+
+- name: Patch agent-config ConfigMap with this cluster's identity + broker URL
+  delegate_to: localhost
+  ansible.builtin.shell:
+    cmd: |
+      kubectl --kubeconfig {{ cluster_kubeconfig }} -n {{ fa_namespace }} \
+        get configmap agent-config --ignore-not-found -o name | grep -q . || \
+      kubectl --kubeconfig {{ cluster_kubeconfig }} -n {{ fa_namespace }} \
+        create configmap agent-config --from-literal=placeholder=pending
+  changed_when: false
+
+- name: Render consumer-agent overlay with Docker Hub image, apply, then reset
+  delegate_to: localhost
+  block:
+    - name: Set agent image
+      ansible.builtin.shell:
+        cmd: |
+          cd {{ fa_repo_root }}/config/agent/base
+          kustomize edit set image federation-autoscaler/agent={{ fa_image_agent }}
+      changed_when: true
+    - name: Apply consumer agent overlay
+      ansible.builtin.shell:
+        cmd: |
+          kubectl --kubeconfig {{ cluster_kubeconfig }} apply -k {{ fa_repo_root }}/config/agent/consumer
+      changed_when: true
+  always:
+    - name: Reset agent image override
+      ansible.builtin.shell:
+        cmd: |
+          cd {{ fa_repo_root }}/config/agent/base
+          kustomize edit set image federation-autoscaler/agent=federation-autoscaler/agent:latest
+      changed_when: true
+
+- name: Render grpc-server overlay with Docker Hub image, apply, then reset
+  delegate_to: localhost
+  block:
+    - name: Set grpc-server image
+      ansible.builtin.shell:
+        cmd: |
+          cd {{ fa_repo_root }}/config/grpc-server
+          kustomize edit set image federation-autoscaler/grpc-server={{ fa_image_grpc_server }}
+      changed_when: true
+    - name: Apply grpc-server overlay
+      ansible.builtin.shell:
+        cmd: |
+          kubectl --kubeconfig {{ cluster_kubeconfig }} apply -k {{ fa_repo_root }}/config/grpc-server
+      changed_when: true
+  always:
+    - name: Reset grpc-server image override
+      ansible.builtin.shell:
+        cmd: |
+          cd {{ fa_repo_root }}/config/grpc-server
+          kustomize edit set image federation-autoscaler/grpc-server=federation-autoscaler/grpc-server:latest
+      changed_when: true
+
+- name: Patch agent-config ConfigMap with the resolved broker URL
+  delegate_to: localhost
+  ansible.builtin.shell:
+    cmd: |
+      kubectl --kubeconfig {{ cluster_kubeconfig }} -n {{ fa_namespace }} \
+        patch configmap agent-config --type merge -p \
+        '{"data":{"BROKER_URL":"https://{{ broker_address }}:{{ broker_node_port }}","CLUSTER_ID":"{{ cluster_id }}","LIQO_CLUSTER_ID":"{{ cluster_id }}"}}'
+  changed_when: true

@@ -1,0 +1,37 @@
+---
+# 01-bootstrap.yaml
+#
+# Brings every host to a state where federation-autoscaler can be
+# deployed: k3s installed, kubeconfig fetched to the control host,
+# cert-manager + Liqo + the federation-autoscaler CRDs in place.
+#
+# Idempotent — re-running on a partially-installed host skips work
+# that's already done.
+
+- name: Install k3s on every host
+  hosts: all
+  gather_facts: true
+  become: true
+  roles:
+    - k3s_install
+
+- name: Install cert-manager on every cluster
+  hosts: all
+  gather_facts: false
+  become: false
+  roles:
+    - cert_manager
+
+- name: Install Liqo on every cluster
+  hosts: all
+  gather_facts: false
+  become: false
+  roles:
+    - liqo_install
+
+- name: Apply federation-autoscaler CRDs on every cluster
+  hosts: all
+  gather_facts: false
+  become: false
+  roles:
+    - fa_crds

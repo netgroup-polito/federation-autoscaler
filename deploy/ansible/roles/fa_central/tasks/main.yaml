@@ -1,0 +1,73 @@
+---
+# Deploys the broker on the central cluster:
+#   1. Patch the broker Certificate so its SAN list includes the central
+#      host's IP (agents on other clusters dial this IP — without it,
+#      mTLS handshake fails with "certificate is valid for X, not Y").
+#   2. Render config/broker with the Docker Hub image override.
+#   3. Apply.
+#   4. Patch the broker Service from ClusterIP to NodePort 30443 so
+#      agents on other clusters can reach it across the private network.
+#
+# The kustomize edit step writes inside config/broker/. The `block:
+# always:` pattern resets the override back to the local-build default
+# at the end so the git working copy stays clean.
+
+- name: Render broker overlay with Docker Hub image, apply, then reset
+  delegate_to: localhost
+  block:
+
+    - name: Set broker image to the published Docker Hub coordinate
+      ansible.builtin.shell:
+        cmd: |
+          cd {{ fa_repo_root }}/config/broker
+          kustomize edit set image federation-autoscaler/broker={{ fa_image_broker }}
+      changed_when: true
+
+    - name: Apply broker overlay
+      ansible.builtin.shell:
+        cmd: |
+          kubectl --kubeconfig {{ cluster_kubeconfig }} apply -k {{ fa_repo_root }}/config/broker
+      changed_when: true
+
+  always:
+
+    - name: Reset broker image override back to local-build default
+      ansible.builtin.shell:
+        cmd: |
+          cd {{ fa_repo_root }}/config/broker
+          kustomize edit set image federation-autoscaler/broker=federation-autoscaler/broker:latest
+      changed_when: true
+
+- name: Patch broker Certificate to include the central host's IP in the SAN list
+  delegate_to: localhost
+  ansible.builtin.shell:
+    cmd: |
+      kubectl --kubeconfig {{ cluster_kubeconfig }} -n {{ fa_namespace }} \
+        patch certificate broker-server --type merge -p \
+        '{"spec":{"ipAddresses":["{{ broker_address }}"]}}'
+  changed_when: true
+
+- name: Wait for broker Certificate to be Ready
+  delegate_to: localhost
+  ansible.builtin.shell:
+    cmd: |
+      kubectl --kubeconfig {{ cluster_kubeconfig }} -n {{ fa_namespace }} \
+        wait certificate broker-server --for=condition=Ready --timeout=3m
+  changed_when: false
+
+- name: Pin broker Service to NodePort {{ broker_node_port }}
+  delegate_to: localhost
+  ansible.builtin.shell:
+    cmd: |
+      kubectl --kubeconfig {{ cluster_kubeconfig }} -n {{ fa_namespace }} \
+        patch service broker --type strategic --patch \
+        '{"spec":{"type":"NodePort","ports":[{"name":"api","port":9443,"nodePort":{{ broker_node_port }}}]}}'
+  changed_when: true
+
+- name: Wait for broker Deployment to become Available
+  delegate_to: localhost
+  ansible.builtin.shell:
+    cmd: |
+      kubectl --kubeconfig {{ cluster_kubeconfig }} -n {{ fa_namespace }} \
+        wait deploy broker --for=condition=Available --timeout=5m
+  changed_when: false

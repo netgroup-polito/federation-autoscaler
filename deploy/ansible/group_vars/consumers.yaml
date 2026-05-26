@@ -1,0 +1,22 @@
+---
+# Consumer-cluster-only variables.
+
+cluster_kubeconfig: "{{ kubeconfig_dir }}/{{ cluster_id }}.yaml"
+
+# Cluster Autoscaler tuning for the demo.
+#
+# scale_down_unneeded_time is how long CA waits with a node observed as
+# "unneeded" before issuing NodeGroupDeleteNodes. Upstream default is
+# 10m — sensible for production but means a demo audience waits 10 min
+# watching nothing happen. 1m is the demo-fast value; bump it to 10m
+# for any non-demo deployment.
+scale_down_unneeded_time: 1m
+
+# Where the gRPC server listens for CA. CA's --cloud-config points at a
+# Secret containing this address.
+grpc_server_address: "grpc-server.{{ fa_namespace }}.svc.cluster.local:9443"
+
+# Cluster Autoscaler image. v1.32 matches the externalgrpc proto we
+# vendored (internal/grpcserver/protos/ — see docs/design.md §7.1).
+# DO NOT bump independently of the proto pin.
+cluster_autoscaler_image: registry.k8s.io/autoscaling/cluster-autoscaler:v1.32.0

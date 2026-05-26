@@ -1,0 +1,42 @@
+---
+# 04-teardown.yaml
+#
+# Removes federation-autoscaler from every cluster, then uninstalls Liqo.
+# Leaves k3s + cert-manager in place — uninstalling k3s itself is
+# destructive (drops PVs, host iptables rules); do it manually with
+# `/usr/local/bin/k3s-uninstall.sh` on each VM if you want a clean box.
+
+- name: Tear down federation-autoscaler resources
+  hosts: all
+  gather_facts: false
+  become: false
+  tasks:
+
+    - name: Delete federation-autoscaler resources from the {{ fa_namespace }} namespace
+      delegate_to: localhost
+      ansible.builtin.shell:
+        cmd: |
+          kubectl --kubeconfig {{ cluster_kubeconfig }} delete namespace {{ fa_namespace }} \
+            --ignore-not-found --wait=false
+      changed_when: true
+
+    - name: Delete federation-autoscaler CRDs
+      delegate_to: localhost
+      ansible.builtin.shell:
+        cmd: |
+          kubectl --kubeconfig {{ cluster_kubeconfig }} delete -k {{ fa_repo_root }}/config/crd \
+            --ignore-not-found --wait=false
+      changed_when: true
+
+- name: Uninstall Liqo
+  hosts: all
+  gather_facts: false
+  become: false
+  tasks:
+
+    - name: liqoctl uninstall
+      delegate_to: localhost
+      ansible.builtin.shell:
+        cmd: |
+          KUBECONFIG={{ cluster_kubeconfig }} liqoctl uninstall --purge --timeout 5m
+      changed_when: true

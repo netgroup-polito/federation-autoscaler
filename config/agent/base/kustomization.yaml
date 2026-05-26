@@ -29,3 +29,11 @@ labels:
     app.kubernetes.io/name: federation-autoscaler
     app.kubernetes.io/component: agent
   includeSelectors: false
+
+# Image override — same rationale as in config/broker/kustomization.yaml.
+# Ansible flips `newName` + `newTag` to the Docker Hub coordinate at
+# deploy time via `kustomize edit set image`.
+images:
+- name: federation-autoscaler/agent
+  newName: federation-autoscaler/agent
+  newTag: latest

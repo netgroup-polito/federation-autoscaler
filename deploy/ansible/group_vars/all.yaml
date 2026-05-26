@@ -1,0 +1,57 @@
+---
+# Shared variables for every cluster in the inventory.
+
+# -----------------------------------------------------------------------------
+# Image distribution
+# -----------------------------------------------------------------------------
+
+# The Docker Hub repo namespace where federation-autoscaler images live.
+# Combined with `fa_tag` to form the full pull coordinate, e.g.:
+#   docker.io/kazem26/federation-autoscaler-broker:v0.1.0
+# Push the images once with `make docker-push REGISTRY=docker.io/kazem26 TAG=…`
+# from the repo root; this playbook only references them.
+fa_registry: docker.io/kazem26
+fa_tag: v0.1.0
+
+# Resolved by Ansible's templating; do not edit directly.
+fa_image_broker:      "{{ fa_registry }}/federation-autoscaler-broker:{{ fa_tag }}"
+fa_image_agent:       "{{ fa_registry }}/federation-autoscaler-agent:{{ fa_tag }}"
+fa_image_grpc_server: "{{ fa_registry }}/federation-autoscaler-grpc-server:{{ fa_tag }}"
+
+# -----------------------------------------------------------------------------
+# Software versions
+# -----------------------------------------------------------------------------
+
+k3s_version:          v1.32.5+k3s1
+cert_manager_version: v1.18.0
+liqo_version:         v1.1.2
+
+# -----------------------------------------------------------------------------
+# Repo layout (used by tasks that apply kustomize overlays from the
+# control host's checkout of federation-autoscaler).
+# -----------------------------------------------------------------------------
+
+# Absolute path to the federation-autoscaler repo on the control host.
+# Defaults to two levels up from this Ansible tree.
+fa_repo_root: "{{ playbook_dir }}/../.."
+
+# All cluster components share this namespace.
+fa_namespace: federation-autoscaler-system
+
+# -----------------------------------------------------------------------------
+# Broker exposure
+# -----------------------------------------------------------------------------
+
+# How agents reach the broker. With no DNS / no public IPs in your network,
+# we expose the broker as a NodePort on the central host's private IP and
+# put that IP in the broker certificate's SAN list.
+broker_node_port: 30443
+
+# Resolved from the inventory: the central host's ansible_host IP. Agents
+# dial https://{{ broker_address }}:{{ broker_node_port }}/.
+broker_address: "{{ hostvars[groups['central'][0]].ansible_host }}"
+
+# Where to drop the fetched kubeconfigs on the control host. Each cluster
+# gets ~/.kube/<cluster_id>.yaml. These are what `kubectl --kubeconfig`
+# expects during the demo's scale-up / scale-down narration.
+kubeconfig_dir: "{{ lookup('env', 'HOME') }}/.kube"

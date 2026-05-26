@@ -1,0 +1,30 @@
+---
+# Deploys Cluster Autoscaler on a consumer cluster. Mirrors
+# test/e2e/bootstrap/cluster_autoscaler.go.
+#
+# CA's --cloud-provider=externalgrpc dials the in-cluster gRPC server
+# Service. The cluster-admin ClusterRoleBinding is a v1 simplification —
+# production deploys should use the upstream scoped role from the CA
+# Helm chart.
+
+- name: Render Cluster Autoscaler manifest from template
+  delegate_to: localhost
+  ansible.builtin.template:
+    src: cluster-autoscaler.yaml.j2
+    dest: /tmp/cluster-autoscaler-{{ cluster_id }}.yaml
+    mode: '0644'
+
+- name: Apply Cluster Autoscaler manifest
+  delegate_to: localhost
+  ansible.builtin.shell:
+    cmd: |
+      kubectl --kubeconfig {{ cluster_kubeconfig }} apply -f /tmp/cluster-autoscaler-{{ cluster_id }}.yaml
+  changed_when: true
+
+- name: Wait for Cluster Autoscaler to become Available
+  delegate_to: localhost
+  ansible.builtin.shell:
+    cmd: |
+      kubectl --kubeconfig {{ cluster_kubeconfig }} -n {{ fa_namespace }} \
+        wait deploy cluster-autoscaler --for=condition=Available --timeout=5m
+  changed_when: false

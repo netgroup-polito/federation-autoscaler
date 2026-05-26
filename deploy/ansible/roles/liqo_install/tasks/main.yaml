@@ -1,0 +1,32 @@
+---
+# Installs Liqo on a target cluster via `liqoctl install k3s`.
+# Mirrors test/e2e/bootstrap/liqo.go (which uses `liqoctl install kind`
+# for the e2e suite). k3s is the right installer for the production
+# deployment — it knows about k3s's flannel + 6443 apiserver layout.
+
+- name: Check whether Liqo is already installed
+  ansible.builtin.shell:
+    cmd: |
+      kubectl --kubeconfig {{ cluster_kubeconfig }} -n liqo get deploy liqo-controller-manager \
+        --ignore-not-found -o name
+  delegate_to: localhost
+  register: liqo_check
+  changed_when: false
+
+- name: Install Liqo
+  when: liqo_check.stdout | trim == ""
+  ansible.builtin.shell:
+    cmd: |
+      KUBECONFIG={{ cluster_kubeconfig }} liqoctl install k3s \
+        --cluster-id {{ cluster_id }} \
+        --timeout 10m
+  delegate_to: localhost
+  changed_when: true
+
+- name: Wait for the Liqo control-plane to settle
+  ansible.builtin.shell:
+    cmd: |
+      kubectl --kubeconfig {{ cluster_kubeconfig }} \
+        -n liqo wait deploy --all --for=condition=Available --timeout=5m
+  delegate_to: localhost
+  changed_when: false

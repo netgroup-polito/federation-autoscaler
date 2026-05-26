@@ -1,0 +1,4 @@
+---
+# Provider-cluster-only variables.
+
+cluster_kubeconfig: "{{ kubeconfig_dir }}/{{ cluster_id }}.yaml"

@@ -1,0 +1,20 @@
+---
+# Applies the federation-autoscaler CRDs to a cluster. Mirrors
+# test/e2e/bootstrap/crds.go — kubectl-apply the kustomized CRD bundle.
+# Cluster-scoped, so every cluster gets the same set.
+
+- name: Apply federation-autoscaler CRDs
+  ansible.builtin.shell:
+    cmd: |
+      kubectl --kubeconfig {{ cluster_kubeconfig }} apply -k {{ fa_repo_root }}/config/crd
+  delegate_to: localhost
+  changed_when: true
+
+- name: Ensure federation-autoscaler-system namespace exists
+  ansible.builtin.shell:
+    cmd: |
+      kubectl --kubeconfig {{ cluster_kubeconfig }} create namespace {{ fa_namespace }} \
+        --dry-run=client -o yaml | \
+        kubectl --kubeconfig {{ cluster_kubeconfig }} apply -f -
+  delegate_to: localhost
+  changed_when: true

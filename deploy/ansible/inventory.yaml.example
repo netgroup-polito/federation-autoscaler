@@ -1,0 +1,49 @@
+# Copy to inventory.yaml and fill in the IPs / SSH user.
+#
+# The four roles are fixed (one central, one or more consumers, one or
+# more providers); the hostnames in each group can be whatever you want
+# as long as host_vars below match.
+#
+# Per-host required vars:
+#   cluster_id    Logical cluster name. Becomes the agent cert CN, the
+#                 Liqo cluster ID, and the ClusterAdvertisement name.
+#                 Must be unique across the federation and DNS-safe.
+#   pod_cidr      Pod CIDR for k3s. MUST NOT overlap with other clusters
+#                 in this inventory (the Liqo network plane requires it).
+#   service_cidr  Service CIDR for k3s. Same non-overlap rule.
+
+all:
+  vars:
+    ansible_user: ubuntu              # default SSH user; override per host below
+    ansible_ssh_private_key_file: ~/.ssh/id_ed25519
+
+  children:
+
+    central:
+      hosts:
+        fa-central:
+          ansible_host: 10.0.0.10     # <-- replace with your central VM's private IP
+          cluster_id: central
+          pod_cidr: 10.41.0.0/16
+          service_cidr: 10.141.0.0/16
+
+    consumers:
+      hosts:
+        fa-consumer-1:
+          ansible_host: 10.0.0.11     # <-- replace
+          cluster_id: consumer-1
+          pod_cidr: 10.51.0.0/16
+          service_cidr: 10.151.0.0/16
+
+    providers:
+      hosts:
+        fa-provider-1:
+          ansible_host: 10.0.0.12     # <-- replace
+          cluster_id: provider-1
+          pod_cidr: 10.61.0.0/16
+          service_cidr: 10.161.0.0/16
+        fa-provider-2:
+          ansible_host: 10.0.0.13     # <-- replace
+          cluster_id: provider-2
+          pod_cidr: 10.71.0.0/16
+          service_cidr: 10.171.0.0/16

@@ -16,6 +16,18 @@ COMPONENTS ?= broker agent grpc-server
 IMG_PREFIX ?= federation-autoscaler
 TAG        ?= latest
 
+# REGISTRY governs where `make docker-push` ships the images. Empty by
+# default so the local build flow (`kind load docker-image …`) works
+# without a registry round-trip. Set REGISTRY=<host>/<user> to publish —
+# e.g. REGISTRY=docker.io/kazem26 produces
+#   docker.io/kazem26/federation-autoscaler-broker:$(TAG)
+#   docker.io/kazem26/federation-autoscaler-agent:$(TAG)
+#   docker.io/kazem26/federation-autoscaler-grpc-server:$(TAG)
+# Flat naming (with a `-` between the registry's repo namespace and the
+# component) is what Docker Hub requires — extra path segments after
+# user/repo are rejected by the registry API.
+REGISTRY  ?=
+
 # IMG is retained only for the legacy install/deploy/build-installer targets
 # scaffolded by kubebuilder; those will be rewritten per-component in a later
 # step when we add kustomize overlays for each binary.
@@ -183,13 +195,20 @@ $(LIQOCTL_BIN):
 	@rm -f $(LIQOCTL_BIN_DIR)/liqoctl.tar.gz
 
 .PHONY: docker-push
-docker-push: ## Push container image(s). Set COMPONENT=<one> to push a single image.
+docker-push: docker-build ## Tag + push images to $(REGISTRY) as $(REGISTRY)/federation-autoscaler-<component>:$(TAG). Set COMPONENT=<one> to push a single image.
+	@if [ -z "$(REGISTRY)" ]; then \
+		echo "ERROR: REGISTRY is required (e.g. REGISTRY=docker.io/kazem26 TAG=v0.1.0)" >&2; \
+		exit 1; \
+	fi
 	$(if $(COMPONENT),$(call assert-known-component),)
 	@targets="$(if $(COMPONENT),$(COMPONENT),$(COMPONENTS))"; \
 	for c in $$targets; do \
-		img="$(IMG_PREFIX)/$$c:$(TAG)"; \
-		echo ">>> pushing image $$img"; \
-		$(CONTAINER_TOOL) push $$img || exit 1; \
+		local="$(IMG_PREFIX)/$$c:$(TAG)"; \
+		remote="$(REGISTRY)/federation-autoscaler-$$c:$(TAG)"; \
+		echo ">>> tagging $$local -> $$remote"; \
+		$(CONTAINER_TOOL) tag $$local $$remote || exit 1; \
+		echo ">>> pushing $$remote"; \
+		$(CONTAINER_TOOL) push $$remote || exit 1; \
 	done
 
 # Multi-arch cross-build (push). Uses a transient buildx builder and writes a

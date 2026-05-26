@@ -1,0 +1,56 @@
+---
+# 02-deploy.yaml
+#
+# Deploys federation-autoscaler on top of the bootstrap state:
+#
+#   1. Broker on central (with cert SAN extended to central's IP +
+#      Service flipped to NodePort 30443).
+#   2. CA Secret + Issuer mirrored from central to every agent cluster.
+#   3. Consumer agent + grpc-server on each consumer; provider agent on
+#      each provider; per-cluster identity stamped on the agent cert.
+#   4. Cluster Autoscaler on each consumer.
+#
+# Order matters: PKI must be in place before the agents start, agents
+# must be up before CA dials the gRPC server.
+
+- name: Deploy broker on central
+  hosts: central
+  gather_facts: false
+  become: false
+  roles:
+    - fa_central
+
+- name: Mirror broker PKI to agent clusters
+  hosts: consumers:providers
+  gather_facts: false
+  become: false
+  roles:
+    - fa_pki_mirror
+
+- name: Deploy consumer agent + grpc-server
+  hosts: consumers
+  gather_facts: false
+  become: false
+  roles:
+    - fa_consumer
+
+- name: Deploy provider agent
+  hosts: providers
+  gather_facts: false
+  become: false
+  roles:
+    - fa_provider
+
+- name: Stamp per-cluster identity on the agent cert (+ rollout)
+  hosts: consumers:providers
+  gather_facts: false
+  become: false
+  roles:
+    - fa_identity_stamp
+
+- name: Deploy Cluster Autoscaler on consumers
+  hosts: consumers
+  gather_facts: false
+  become: false
+  roles:
+    - cluster_autoscaler

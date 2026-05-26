@@ -31,3 +31,11 @@ labels:
 # federation-autoscaler-system alongside the broker (single-cluster dev) or
 # alongside the consumer agent (multi-cluster). The broker overlay creates
 # the namespace; if you deploy this overlay alone, layer a Namespace on top.
+
+# Image override — same rationale as in config/broker/kustomization.yaml.
+# Ansible flips `newName` + `newTag` to the Docker Hub coordinate at
+# deploy time via `kustomize edit set image`.
+images:
+- name: federation-autoscaler/grpc-server
+  newName: federation-autoscaler/grpc-server
+  newTag: latest

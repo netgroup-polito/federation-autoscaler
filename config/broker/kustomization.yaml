@@ -31,3 +31,14 @@ labels:
 # CRDs are intentionally not included here — they are cluster-scoped and
 # shared across all three overlays. Consumers compose ../crd/ at the meta
 # level (config/default/) so an apply --prune doesn't churn them.
+
+# Image override. The Deployment in deployment.yaml references the
+# default local-build name `federation-autoscaler/broker:latest` (so
+# `kind load docker-image` works for testing without retagging). For
+# production deploys, swap to the published Docker Hub coordinate via
+# `kustomize edit set image` from Ansible — that flips this to e.g.
+# docker.io/kazem26/federation-autoscaler-broker:v0.1.0 at apply time.
+images:
+- name: federation-autoscaler/broker
+  newName: federation-autoscaler/broker
+  newTag: latest

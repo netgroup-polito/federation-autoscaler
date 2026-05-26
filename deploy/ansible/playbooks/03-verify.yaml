@@ -1,0 +1,81 @@
+---
+# 03-verify.yaml
+#
+# Asserts the federation is healthy and ready for the demo. Each step
+# prints a small banner so the audience can follow along live. Failures
+# fail the playbook with a clear message.
+
+- name: Verify federation health
+  hosts: central
+  gather_facts: false
+  become: false
+  tasks:
+
+    - name: "[central] Broker Deployment is Available"
+      delegate_to: localhost
+      ansible.builtin.shell:
+        cmd: |
+          kubectl --kubeconfig {{ cluster_kubeconfig }} -n {{ fa_namespace }} \
+            get deploy broker -o jsonpath='{.status.conditions[?(@.type=="Available")].status}'
+      register: broker_avail
+      changed_when: false
+      failed_when: broker_avail.stdout != "True"
+
+    - name: "[central] At least one provider has a fresh ClusterAdvertisement"
+      delegate_to: localhost
+      ansible.builtin.shell:
+        cmd: |
+          kubectl --kubeconfig {{ cluster_kubeconfig }} -n {{ fa_namespace }} \
+            get clusteradvertisements.broker.federation-autoscaler.io \
+            -o jsonpath='{range .items[?(@.status.available==true)]}{.metadata.name} {end}'
+      register: cadvs
+      changed_when: false
+      failed_when: cadvs.stdout | trim == ""
+
+    - name: "[central] OK — broker ready, providers advertising: {{ cadvs.stdout | trim }}"
+      ansible.builtin.debug:
+        msg: "broker ready; advertising providers = {{ cadvs.stdout | trim }}"
+
+- name: Verify each consumer
+  hosts: consumers
+  gather_facts: false
+  become: false
+  tasks:
+
+    - name: "[{{ cluster_id }}] Agent + grpc-server Deployments Available"
+      delegate_to: localhost
+      ansible.builtin.shell:
+        cmd: |
+          kubectl --kubeconfig {{ cluster_kubeconfig }} -n {{ fa_namespace }} \
+            wait deploy/agent deploy/grpc-server --for=condition=Available --timeout=2m
+      changed_when: false
+
+    - name: "[{{ cluster_id }}] Cluster Autoscaler is Available"
+      delegate_to: localhost
+      ansible.builtin.shell:
+        cmd: |
+          kubectl --kubeconfig {{ cluster_kubeconfig }} -n {{ fa_namespace }} \
+            wait deploy/cluster-autoscaler --for=condition=Available --timeout=2m
+      changed_when: false
+
+    - name: "[{{ cluster_id }}] OK"
+      ansible.builtin.debug:
+        msg: "{{ cluster_id }} ready — agent + grpc-server + CA up"
+
+- name: Verify each provider
+  hosts: providers
+  gather_facts: false
+  become: false
+  tasks:
+
+    - name: "[{{ cluster_id }}] Agent Deployment Available"
+      delegate_to: localhost
+      ansible.builtin.shell:
+        cmd: |
+          kubectl --kubeconfig {{ cluster_kubeconfig }} -n {{ fa_namespace }} \
+            wait deploy/agent --for=condition=Available --timeout=2m
+      changed_when: false
+
+    - name: "[{{ cluster_id }}] OK"
+      ansible.builtin.debug:
+        msg: "{{ cluster_id }} ready — provider agent up, advertising capacity"
