@@ -47,6 +47,23 @@
         '{"spec":{"ipAddresses":["{{ broker_address }}"]}}'
   changed_when: true
 
+# cert-manager won't re-issue an already-Ready certificate when SANs are
+# added (the Ready condition is sticky). Force regeneration by deleting
+# the underlying Secret — cert-manager re-mints with the new SAN within
+# a few seconds. If the Secret doesn't exist yet (first run), this is a
+# no-op via --ignore-not-found.
+- name: Force cert-manager to re-issue the broker Secret with the new IP SAN
+  delegate_to: localhost
+  ansible.builtin.shell:
+    cmd: |
+      kubectl --kubeconfig {{ cluster_kubeconfig }} -n {{ fa_namespace }} \
+        get secret broker-server-cert -o jsonpath='{.data.tls\.crt}' \
+        | base64 -d | openssl x509 -noout -text 2>/dev/null \
+        | grep -q "IP Address:{{ broker_address }}" || \
+      kubectl --kubeconfig {{ cluster_kubeconfig }} -n {{ fa_namespace }} \
+        delete secret broker-server-cert --ignore-not-found
+  changed_when: true
+
 - name: Wait for broker Certificate to be Ready
   delegate_to: localhost
   ansible.builtin.shell:
@@ -54,6 +71,19 @@
       kubectl --kubeconfig {{ cluster_kubeconfig }} -n {{ fa_namespace }} \
         wait certificate broker-server --for=condition=Ready --timeout=3m
   changed_when: false
+
+# After a Secret re-issue, the broker Pod is still serving its old
+# in-memory keypair — restart it so the new Pod loads the freshly
+# regenerated TLS cert with the IP SAN. Idempotent.
+- name: Rollout broker so it loads the freshly issued TLS cert
+  delegate_to: localhost
+  ansible.builtin.shell:
+    cmd: |
+      kubectl --kubeconfig {{ cluster_kubeconfig }} -n {{ fa_namespace }} \
+        rollout restart deploy/broker
+      kubectl --kubeconfig {{ cluster_kubeconfig }} -n {{ fa_namespace }} \
+        rollout status deploy/broker --timeout=3m
+  changed_when: true
 
 - name: Pin broker Service to NodePort {{ broker_node_port }}
   delegate_to: localhost

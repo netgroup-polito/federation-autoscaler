@@ -19,6 +19,8 @@
     cmd: |
       KUBECONFIG={{ cluster_kubeconfig }} liqoctl install k3s \
         --cluster-id {{ cluster_id }} \
+        --pod-cidr {{ pod_cidr }} \
+        --service-cidr {{ service_cidr }} \
         --timeout 10m
   delegate_to: localhost
   changed_when: true

@@ -3,16 +3,6 @@
 # Mirrors test/e2e/bootstrap/overlays.go's ApplyOverlay calls for
 # config/agent/consumer and config/grpc-server.
 
-- name: Patch agent-config ConfigMap with this cluster's identity + broker URL
-  delegate_to: localhost
-  ansible.builtin.shell:
-    cmd: |
-      kubectl --kubeconfig {{ cluster_kubeconfig }} -n {{ fa_namespace }} \
-        get configmap agent-config --ignore-not-found -o name | grep -q . || \
-      kubectl --kubeconfig {{ cluster_kubeconfig }} -n {{ fa_namespace }} \
-        create configmap agent-config --from-literal=placeholder=pending
-  changed_when: false
-
 - name: Render consumer-agent overlay with Docker Hub image, apply, then reset
   delegate_to: localhost
   block:
@@ -63,5 +53,37 @@
     cmd: |
       kubectl --kubeconfig {{ cluster_kubeconfig }} -n {{ fa_namespace }} \
         patch configmap agent-config --type merge -p \
-        '{"data":{"BROKER_URL":"https://{{ broker_address }}:{{ broker_node_port }}","CLUSTER_ID":"{{ cluster_id }}","LIQO_CLUSTER_ID":"{{ cluster_id }}"}}'
+        '{"data":{"brokerUrl":"https://{{ broker_address }}:{{ broker_node_port }}","clusterId":"{{ cluster_id }}","liqoClusterId":"{{ cluster_id }}"}}'
+  changed_when: true
+
+# Stamp the Liqo NamespaceOffloading singleton for the `default`
+# namespace. Liqo's admission webhook hardcodes the name to "offloading"
+# (one per K8s namespace, shared by every Reservation that lands here),
+# so the agent intentionally does NOT create it per-Reservation —
+# multiple in-flight peers to the same namespace would race on the same
+# CR. The selector matches any Liqo virtual node so federation
+# offloading is enabled for `default`; the per-Reservation ResourceSlice
+# picks the specific provider. Operators with workloads outside
+# `default` should stamp their own NSO in those namespaces.
+- name: Bootstrap Liqo NamespaceOffloading for the default namespace
+  delegate_to: localhost
+  ansible.builtin.shell:
+    cmd: |
+      cat <<'EOF' | kubectl --kubeconfig {{ cluster_kubeconfig }} apply -f -
+      apiVersion: offloading.liqo.io/v1beta1
+      kind: NamespaceOffloading
+      metadata:
+        name: offloading
+        namespace: default
+      spec:
+        namespaceMappingStrategy: DefaultName
+        podOffloadingStrategy: Remote
+        clusterSelector:
+          nodeSelectorTerms:
+            - matchExpressions:
+                - key: liqo.io/type
+                  operator: In
+                  values:
+                    - virtual-node
+      EOF
   changed_when: true

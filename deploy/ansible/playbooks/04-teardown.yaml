@@ -5,6 +5,44 @@
 # Leaves k3s + cert-manager in place — uninstalling k3s itself is
 # destructive (drops PVs, host iptables rules); do it manually with
 # `/usr/local/bin/k3s-uninstall.sh` on each VM if you want a clean box.
+#
+# Order matters:
+#   1. Unpeer every consumer→provider tunnel BEFORE removing anything
+#      else. `liqoctl uninstall` blocks indefinitely on an active peering
+#      because the Liqo gateway/Tenant CRs hold finalizers; the namespace
+#      delete in step 2 also stalls if a ResourceSlice still references
+#      a foreign cluster. We tolerate "not peered" / "not found" as
+#      success so a partial-state cluster doesn't break the playbook.
+#   2. Delete the federation-autoscaler namespace + CRDs.
+#   3. `liqoctl uninstall --purge` on every host.
+
+- name: Unpeer every consumer→provider tunnel
+  hosts: consumers
+  gather_facts: false
+  become: false
+  tasks:
+
+    - name: liqoctl unpeer {{ cluster_id }} from each provider
+      delegate_to: localhost
+      ansible.builtin.shell:
+        cmd: |
+          KUBECONFIG={{ cluster_kubeconfig }} liqoctl unpeer \
+            --remote-kubeconfig {{ kubeconfig_dir }}/{{ hostvars[item].cluster_id }}.yaml \
+            --skip-confirm --timeout 2m || true
+      loop: "{{ groups['providers'] }}"
+      changed_when: true
+
+    - name: Wait for virtual nodes to disappear on {{ cluster_id }}
+      delegate_to: localhost
+      ansible.builtin.shell:
+        cmd: |
+          kubectl --kubeconfig {{ cluster_kubeconfig }} get nodes \
+            -l liqo.io/type=virtual-node -o name 2>/dev/null | wc -l
+      register: vn_count
+      until: vn_count.stdout | int == 0
+      retries: 30
+      delay: 5
+      changed_when: false
 
 - name: Tear down federation-autoscaler resources
   hosts: all
@@ -34,9 +72,24 @@
   become: false
   tasks:
 
+    # Skip the uninstall when Liqo isn't installed (the `liqo` namespace
+    # is gone). This makes the play idempotent — re-running teardown
+    # after a successful run or after a manual `liqoctl uninstall`
+    # doesn't fail with "could not find foreignclusters.core.liqo.io".
+    - name: Check whether Liqo is installed on {{ cluster_id }}
+      delegate_to: localhost
+      ansible.builtin.shell:
+        cmd: |
+          kubectl --kubeconfig {{ cluster_kubeconfig }} get namespace liqo \
+            --ignore-not-found -o name
+      register: liqo_ns
+      changed_when: false
+
     - name: liqoctl uninstall
       delegate_to: localhost
       ansible.builtin.shell:
         cmd: |
-          KUBECONFIG={{ cluster_kubeconfig }} liqoctl uninstall --purge --timeout 5m
+          KUBECONFIG={{ cluster_kubeconfig }} liqoctl uninstall \
+            --purge --skip-confirm --timeout 5m
+      when: liqo_ns.stdout | length > 0
       changed_when: true

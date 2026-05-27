@@ -32,8 +32,10 @@ liqo_version:         v1.1.2
 # -----------------------------------------------------------------------------
 
 # Absolute path to the federation-autoscaler repo on the control host.
-# Defaults to two levels up from this Ansible tree.
-fa_repo_root: "{{ playbook_dir }}/../.."
+# playbook_dir is deploy/ansible/playbooks/, so three levels up is the
+# repo root (deploy/ansible/playbooks/ → deploy/ansible/ → deploy/ →
+# repo root).
+fa_repo_root: "{{ playbook_dir }}/../../.."
 
 # All cluster components share this namespace.
 fa_namespace: federation-autoscaler-system

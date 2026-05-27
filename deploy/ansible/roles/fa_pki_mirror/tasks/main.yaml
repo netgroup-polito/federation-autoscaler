@@ -19,7 +19,7 @@
   ansible.builtin.shell:
     cmd: |
       kubectl --kubeconfig "{{ hostvars[groups['central'][0]].cluster_kubeconfig }}" \
-        -n {{ fa_namespace }} get secret federation-autoscaler-ca-secret -o yaml
+        -n {{ fa_namespace }} get secret federation-autoscaler-ca-cert -o yaml
   register: broker_ca_secret
   changed_when: false
 
@@ -47,7 +47,7 @@
         namespace: {{ fa_namespace }}
       spec:
         ca:
-          secretName: federation-autoscaler-ca-secret
+          secretName: federation-autoscaler-ca-cert
     cmd: |
       kubectl --kubeconfig {{ cluster_kubeconfig }} apply -f -
   changed_when: true

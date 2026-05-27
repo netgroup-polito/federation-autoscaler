@@ -85,6 +85,14 @@ spec:
         - --expander=price
         - --scale-down-enabled=true
         - --scale-down-unneeded-time={{ scale_down_unneeded_time }}
+        # The "delay-after-*" knobs default to 10 min upstream — too long
+        # for a live demo where you want scale-down to fire shortly after
+        # the workload disappears. Match them to scale-down-unneeded-time
+        # so the audience sees the chain within ~1 min of the delete.
+        # For production, drop these three lines.
+        - --scale-down-delay-after-add={{ scale_down_unneeded_time }}
+        - --scale-down-delay-after-delete=10s
+        - --scale-down-delay-after-failure={{ scale_down_unneeded_time }}
         - --skip-nodes-with-local-storage=false
         - --skip-nodes-with-system-pods=false
         - --scan-interval=10s

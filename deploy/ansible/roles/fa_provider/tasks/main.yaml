@@ -30,5 +30,5 @@
     cmd: |
       kubectl --kubeconfig {{ cluster_kubeconfig }} -n {{ fa_namespace }} \
         patch configmap agent-config --type merge -p \
-        '{"data":{"BROKER_URL":"https://{{ broker_address }}:{{ broker_node_port }}","CLUSTER_ID":"{{ cluster_id }}","LIQO_CLUSTER_ID":"{{ cluster_id }}"}}'
+        '{"data":{"brokerUrl":"https://{{ broker_address }}:{{ broker_node_port }}","clusterId":"{{ cluster_id }}","liqoClusterId":"{{ cluster_id }}"}}'
   changed_when: true
