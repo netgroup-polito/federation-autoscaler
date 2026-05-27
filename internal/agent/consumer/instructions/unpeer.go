@@ -65,13 +65,17 @@ type UnpeerConfig struct {
 
 // NewUnpeerHandler returns a poller.HandlerFunc that tears down what
 // the Peer handler set up. Execution order is the reverse of Peer:
-//  1. Delete the Liqo NamespaceOffloading.
+//  1. Delete the VirtualNodeState CR (so the gRPC server stops
+//     advertising the chunk before Liqo drops the underlying node).
 //  2. Delete the Liqo ResourceSlice.
 //  3. Run `liqoctl unpeer --remote-kubeconfig <path>` so the cross-
 //     cluster tunnel drops.
 //  4. On LastChunk=true, also delete the kubeconfig Secret — the
 //     reservation is fully released and we should not keep the
 //     peering-user credential lying around.
+//
+// NamespaceOffloading is intentionally NOT touched — it is the per-
+// K8s-namespace singleton the operator owns (see peer.go).
 //
 // All four steps are idempotent on missing so a re-issued Unpeer (or a
 // rebooted agent re-fetching the same instruction) does not falsely
@@ -109,12 +113,7 @@ func NewUnpeerHandler(cfg UnpeerConfig) poller.HandlerFunc {
 			"reservationId", in.ReservationID,
 			"lastChunk", in.LastChunk)
 
-		// 1. Delete NamespaceOffloading (idempotent on missing).
-		if err := deleteNamespaceOffloading(ctx, cfg.LocalClient, cfg.Namespace, in.ReservationID); err != nil {
-			return nil, err
-		}
-
-		// 2. Delete the VirtualNodeState CR (idempotent on missing).
+		// 1. Delete the VirtualNodeState CR (idempotent on missing).
 		// The order matters: tearing the VNS first removes the chunk
 		// from the gRPC server's view of the cluster before Liqo
 		// drops the underlying virtual node, so CA sees the deletion
@@ -123,7 +122,7 @@ func NewUnpeerHandler(cfg UnpeerConfig) poller.HandlerFunc {
 			return nil, err
 		}
 
-		// 3. Delete ResourceSlice (idempotent on missing).
+		// 2. Delete ResourceSlice (idempotent on missing).
 		if err := deleteResourceSlice(ctx, cfg.LocalClient, cfg.Namespace, in.ReservationID); err != nil {
 			return nil, err
 		}

@@ -87,14 +87,9 @@ func TestUnpeer_HappyPath_DeletesEverythingOnLastChunk(t *testing.T) {
 		t.Errorf("want TunnelDropped=true on LastChunk, got false")
 	}
 
-	// ResourceSlice is per-reservation and gets deleted; the singleton
-	// NamespaceOffloading "offloading" is shared across Reservations and
-	// intentionally persists (see deleteNamespaceOffloading).
+	// ResourceSlice is per-reservation and gets deleted.
 	if exists, _ := objectExists(ctx, c, resourceSliceGVK, testNamespace, "rs-"+testResID); exists {
 		t.Error("ResourceSlice still present after Unpeer")
-	}
-	if exists, _ := objectExists(ctx, c, namespaceOffloadingGVK, testNamespace, liqoNamespaceOffloadingName); !exists {
-		t.Error("NamespaceOffloading should still exist after per-reservation Unpeer")
 	}
 	// VirtualNodeState CR gone.
 	if _, err := getVirtualNodeState(ctx, c, testNamespace, testResID); err == nil {

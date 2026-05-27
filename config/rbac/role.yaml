@@ -5,6 +5,14 @@ metadata:
   name: manager-role
 rules:
 - apiGroups:
+  - ""
+  resources:
+  - nodes
+  verbs:
+  - get
+  - list
+  - watch
+- apiGroups:
   - autoscaling.federation-autoscaler.io
   resources:
   - providerinstructions
@@ -65,3 +73,11 @@ rules:
   - get
   - patch
   - update
+- apiGroups:
+  - offloading.liqo.io
+  resources:
+  - virtualnodes
+  verbs:
+  - get
+  - list
+  - watch

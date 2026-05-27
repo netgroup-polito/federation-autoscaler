@@ -39,11 +39,6 @@ var (
 		Version: "v1beta1",
 		Kind:    "ResourceSlice",
 	}
-	namespaceOffloadingGVK = schema.GroupVersionKind{
-		Group:   "offloading.liqo.io",
-		Version: "v1beta1",
-		Kind:    "NamespaceOffloading",
-	}
 )
 
 // resourceSliceName returns the deterministic ResourceSlice name for a
@@ -51,23 +46,6 @@ var (
 // instruction is a no-op (AlreadyExists → success).
 func resourceSliceName(reservationID string) string {
 	return "rs-" + reservationID
-}
-
-// liqoNamespaceOffloadingName is the only name Liqo's admission webhook
-// "nsoff.validate.liqo.io" accepts for a NamespaceOffloading CR — it
-// rejects anything else with "NamespaceOffloading name must match
-// offloading". This is by design: NamespaceOffloading is per-namespace,
-// not per-reservation, so multiple Reservations that target the same
-// consumer namespace share the same CR. Our ensure/delete helpers must
-// be idempotent on AlreadyExists / NotFound for this to hold across
-// concurrent Reservations.
-const liqoNamespaceOffloadingName = "offloading"
-
-// namespaceOffloadingName returns the (fixed) NamespaceOffloading name.
-// The reservationID is accepted for symmetry with resourceSliceName but
-// intentionally ignored — see liqoNamespaceOffloadingName.
-func namespaceOffloadingName(_ string) string {
-	return liqoNamespaceOffloadingName
 }
 
 // ensureResourceSlice creates a Liqo ResourceSlice claiming `resources`
@@ -125,55 +103,14 @@ func deleteResourceSlice(
 	return nil
 }
 
-// ensureNamespaceOffloading creates a NamespaceOffloading that targets
-// every offloadable namespace at the named virtual node selector.
-// Idempotent.
-func ensureNamespaceOffloading(
-	ctx context.Context,
-	c ctrlclient.Client,
-	namespace, reservationID string,
-) (string, error) {
-	name := namespaceOffloadingName(reservationID)
-	obj := &unstructured.Unstructured{}
-	obj.SetGroupVersionKind(namespaceOffloadingGVK)
-	obj.SetName(name)
-	obj.SetNamespace(namespace)
-	obj.SetLabels(map[string]string{
-		"federation-autoscaler.io/reservation": reservationID,
-	})
-
-	spec := map[string]interface{}{
-		"namespaceMappingStrategy": "DefaultName",
-		"podOffloadingStrategy":    "Remote",
-	}
-	_ = unstructured.SetNestedField(obj.Object, spec, "spec")
-
-	if err := c.Create(ctx, obj); err != nil {
-		if apierrors.IsAlreadyExists(err) {
-			return name, nil
-		}
-		return "", fmt.Errorf("create NamespaceOffloading %q: %w", name, err)
-	}
-	return name, nil
-}
-
-// deleteNamespaceOffloading is intentionally a no-op. The Liqo
-// NamespaceOffloading "offloading" is a per-namespace singleton shared
-// by every Reservation that targets that namespace; per-reservation
-// Cleanup must not tear it down or it would break offloading for any
-// sibling Reservation that's still active. The CR is removed by the
-// operator when the consumer fully unpeers (a future v2 chore — for
-// v1 it persists for the lifetime of the cluster, which is harmless).
-//
-// reservationID is kept on the signature so callers stay symmetric with
-// deleteResourceSlice; both args are intentionally ignored.
-func deleteNamespaceOffloading(
-	_ context.Context,
-	_ ctrlclient.Client,
-	_, _ string,
-) error {
-	return nil
-}
+// NamespaceOffloading is intentionally NOT managed by the agent. It is
+// a per-K8s-namespace singleton (the Liqo admission webhook rejects any
+// name other than "offloading"); creating or deleting it per-reservation
+// would either collide with sibling reservations targeting the same
+// namespace or rip offloading out from under them. The bootstrap-time
+// NSO for the `default` namespace is stamped by Ansible (see
+// deploy/ansible/roles/fa_consumer); workloads in other namespaces stamp
+// their own as a one-shot operator action.
 
 // resourceListToInterface converts a ResourceList into the
 // map[string]interface{} shape Unstructured expects.

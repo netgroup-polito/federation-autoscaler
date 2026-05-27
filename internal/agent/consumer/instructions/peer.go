@@ -83,8 +83,15 @@ type PeerConfig struct {
 //  2. writes the kubeconfig to a temp file and runs
 //     `liqoctl peer --remote-kubeconfig <path>`;
 //  3. creates a Liqo ResourceSlice claiming the reservation's resources;
-//  4. creates a Liqo NamespaceOffloading so the consumer's pods can
-//     schedule onto the virtual node Liqo materialises in response.
+//  4. materialises a VirtualNodeState CR so the gRPC server starts
+//     advertising the chunk.
+//
+// The Liqo NamespaceOffloading is intentionally NOT created here — it
+// is a per-K8s-namespace singleton (Liqo's webhook hardcodes the name
+// to "offloading") that operators stamp once per workload namespace
+// (see deploy/ansible/roles/fa_consumer for the `default` namespace
+// bootstrap). Creating it per-Reservation would race with sibling
+// Reservations targeting the same namespace.
 //
 // On success the handler returns a Succeeded result with payload
 // {Kind: PeerPayload, ResourceSliceNames: […]}. VirtualNodeNames is
@@ -176,11 +183,17 @@ func NewPeerHandler(cfg PeerConfig) poller.HandlerFunc {
 			return nil, err
 		}
 
-		// 4. Create the NamespaceOffloading so workloads schedule onto
-		// the virtual node Liqo will materialise.
-		if _, err := ensureNamespaceOffloading(ctx, cfg.LocalClient, cfg.Namespace, in.ReservationID); err != nil {
-			return nil, err
-		}
+		// 4. (NamespaceOffloading is intentionally NOT created here.)
+		// Liqo NamespaceOffloading is a per-K8s-namespace singleton named
+		// literally "offloading" — one per workload namespace, shared by
+		// every Reservation that targets that namespace. The operator
+		// owns this CR, not the agent: the agent doesn't know which
+		// namespaces should be offload-enabled, and creating it from the
+		// agent's namespace (federation-autoscaler-system) instead of
+		// the workload's namespace would silently disable Pod reflection.
+		// See deploy/ansible's fa_consumer role for the bootstrap-time
+		// creation of the NSO in `default`; users with workloads in
+		// other namespaces stamp their own.
 
 		// 5. Materialise the VirtualNodeState CR. This is what the
 		// gRPC server consumes via /local/virtual-nodes; the

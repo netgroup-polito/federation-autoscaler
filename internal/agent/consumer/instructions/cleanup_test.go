@@ -68,12 +68,6 @@ func TestCleanup_HappyPath_DeletesAllLocalState(t *testing.T) {
 	if exists, _ := objectExists(ctx, c, resourceSliceGVK, testNamespace, "rs-"+testResID); exists {
 		t.Error("ResourceSlice still present after Cleanup")
 	}
-	// NamespaceOffloading is a per-namespace singleton named "offloading"
-	// shared by every Reservation; Cleanup must NOT delete it (would
-	// break offloading for sibling Reservations). It persists deliberately.
-	if exists, _ := objectExists(ctx, c, namespaceOffloadingGVK, testNamespace, liqoNamespaceOffloadingName); !exists {
-		t.Error("NamespaceOffloading should still exist after per-reservation Cleanup")
-	}
 	if _, err := getVirtualNodeState(ctx, c, testNamespace, testResID); err == nil {
 		t.Error("VirtualNodeState still present after Cleanup")
 	}

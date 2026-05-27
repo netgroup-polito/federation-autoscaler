@@ -246,16 +246,18 @@ var _ = Describe("Step 9 end-to-end: real consumer.Run against the broker over m
 			g.Expect(ri.Status.Enforced).To(BeTrue())
 		}, suiteTimeout, suiteInterval).Should(Succeed())
 
-		By("the consumer agent created the Liqo ResourceSlice and NamespaceOffloading")
-		// Both CRs were created via Unstructured; we don't have their Go
-		// types in scope here. The Peer handler's tests already cover
-		// the GVK/name shape — for the e2e check it is enough that the
-		// instruction was Enforced (which only happens after the
-		// handler returned Succeeded, which only happens after both CR
-		// creates succeed).
+		By("the consumer agent created the Liqo ResourceSlice")
+		// The ResourceSlice is created via Unstructured; we don't have
+		// its Go type in scope here. The Peer handler's tests already
+		// cover the GVK/name shape — for the e2e check it is enough
+		// that the instruction was Enforced (which only happens after
+		// the handler returned Succeeded, which only happens after the
+		// CR create succeeded).
 		// We also assert the consumer-side kubeconfig Secret is on the
 		// API server (the only Liqo-side artefact we can read via a
-		// typed client).
+		// typed client). NamespaceOffloading is operator-owned (stamped
+		// at install time by Ansible) and intentionally outside the
+		// agent's lifecycle.
 		Eventually(func(g Gomega) {
 			sec := &corev1.Secret{}
 			g.Expect(k8sClient.Get(suiteCtx, types.NamespacedName{

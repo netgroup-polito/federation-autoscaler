@@ -26,11 +26,12 @@ import (
 )
 
 // installLiqoStubCRDs registers minimal CustomResourceDefinitions for
-// the two Liqo types the consumer Peer / Unpeer / Cleanup handlers
-// create via unstructured.Unstructured:
+// the Liqo types the consumer agent reads or creates via
+// unstructured.Unstructured:
 //
-//   - authentication.liqo.io/v1beta1/ResourceSlice
-//   - offloading.liqo.io/v1beta1/NamespaceOffloading
+//   - authentication.liqo.io/v1beta1/ResourceSlice — created by Peer
+//   - offloading.liqo.io/v1beta1/VirtualNode — read by the
+//     VirtualNodeStateReconciler (status-only consumer)
 //
 // envtest's apiserver rejects creates of unregistered GVKs with
 // "no matches for kind", so the consumer e2e test would otherwise fail
@@ -38,12 +39,16 @@ import (
 // (x-kubernetes-preserve-unknown-fields) so the agent's minimal Spec
 // shape is accepted without us mirroring Liqo's full validation rules.
 //
+// NamespaceOffloading is intentionally NOT stubbed here — the agent no
+// longer creates it (it's stamped once by Ansible at install time, see
+// deploy/ansible/roles/fa_consumer), so the integration suite never
+// exercises that GVK.
+//
 // Production deployments use Liqo's real CRD YAMLs; this stub is
 // strictly for the integration suite.
 func installLiqoStubCRDs(ctx context.Context, c ctrlclient.Client) error {
 	crds := []*apiextensionsv1.CustomResourceDefinition{
 		permissiveCRD("resourceslices.authentication.liqo.io", "authentication.liqo.io", "ResourceSlice", "resourceslices", "resourceslice", "v1beta1", apiextensionsv1.NamespaceScoped),
-		permissiveCRD("namespaceoffloadings.offloading.liqo.io", "offloading.liqo.io", "NamespaceOffloading", "namespaceoffloadings", "namespaceoffloading", "v1beta1", apiextensionsv1.NamespaceScoped),
 		permissiveCRDWithStatus("virtualnodes.offloading.liqo.io", "offloading.liqo.io", "VirtualNode", "virtualnodes", "virtualnode", "v1beta1", apiextensionsv1.NamespaceScoped),
 	}
 	for _, crd := range crds {

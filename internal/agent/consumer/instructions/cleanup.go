@@ -49,9 +49,12 @@ type CleanupConfig struct {
 // / Failed / Expired), so the provider may be unreachable. The
 // handler does:
 //
-//  1. Delete the Liqo NamespaceOffloading (idempotent on missing).
+//  1. Delete the VirtualNodeState CR (idempotent on missing).
 //  2. Delete the Liqo ResourceSlice (idempotent on missing).
 //  3. Delete the kubeconfig Secret (idempotent on missing).
+//
+// NamespaceOffloading is intentionally NOT touched — it is the
+// per-K8s-namespace singleton owned by the operator (see peer.go).
 //
 // Returns Succeeded with no payload.
 func NewCleanupHandler(cfg CleanupConfig) poller.HandlerFunc {
@@ -76,9 +79,9 @@ func NewCleanupHandler(cfg CleanupConfig) poller.HandlerFunc {
 
 		logger := cfg.Logger.WithValues("reservationId", in.ReservationID)
 
-		if err := deleteNamespaceOffloading(ctx, cfg.LocalClient, cfg.Namespace, in.ReservationID); err != nil {
-			return nil, err
-		}
+		// NamespaceOffloading is intentionally NOT deleted here — it's a
+		// per-K8s-namespace singleton owned by the operator, not the
+		// agent. See peer.go for the matching ensure-side rationale.
 		if err := deleteVirtualNodeState(ctx, cfg.LocalClient, cfg.Namespace, in.ReservationID); err != nil {
 			return nil, err
 		}
