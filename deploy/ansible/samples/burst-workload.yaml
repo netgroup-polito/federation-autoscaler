@@ -1,0 +1,58 @@
+# Burst workload — the SOLE manual action that drives a federated scale-up.
+#
+#   kubectl --kubeconfig ~/.kube/consumer-1.yaml apply  -f burst-workload.yaml   # scale UP
+#   kubectl --kubeconfig ~/.kube/consumer-1.yaml delete -f burst-workload.yaml   # scale DOWN
+#
+# How it triggers scale-up: each replica reserves more CPU/memory than the
+# consumer cluster's own node(s) can satisfy, so some Pods stay Pending.
+# Cluster Autoscaler (running with --cloud-provider=externalgrpc against the
+# federation gRPC server) sees the Pending Pods, the price expander picks the
+# federation node group, a Reservation is created, a Liqo virtual node
+# materialises, and the Pending Pods schedule onto the borrowed chunk.
+# Deleting the Deployment removes the Pods → the virtual node goes unneeded →
+# CA calls NodeGroupDeleteNodes → the Reservation is released → scale-down.
+#
+# Namespace: `default`, because that is where the fa_consumer role stamps the
+# Liqo NamespaceOffloading. Workloads in other namespaces need their own NSO.
+#
+# Tuning: if your consumer node is large enough to fit all replicas, no Pod
+# pends and nothing scales up — raise `replicas` until `kubectl get pods -w`
+# shows Pending Pods. A chunk is 2 CPU / 4Gi (config/samples/chunk-config.yaml),
+# so the 500m requests below let a couple of Pods land per borrowed chunk.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: federation-demo
+  namespace: default
+  labels:
+    app: federation-demo
+spec:
+  replicas: 8
+  selector:
+    matchLabels:
+      app: federation-demo
+  template:
+    metadata:
+      labels:
+        app: federation-demo
+    spec:
+      # Tolerate the Liqo virtual-node taint so Pending Pods may schedule onto
+      # the borrowed chunk once it appears. Liqo taints every virtual node with
+      # virtual-node.liqo.io/not-allowed=true:NoExecute; without this the Pods
+      # would never land on the federated capacity. (Liqo's webhook adds this
+      # for offloaded namespaces, but stating it explicitly keeps the demo
+      # robust across Liqo versions.)
+      tolerations:
+        - key: virtual-node.liqo.io/not-allowed
+          operator: Exists
+          effect: NoExecute
+      containers:
+        - name: pause
+          image: registry.k8s.io/pause:3.9
+          resources:
+            requests:
+              cpu: "500m"
+              memory: "256Mi"
+            limits:
+              cpu: "500m"
+              memory: "256Mi"
