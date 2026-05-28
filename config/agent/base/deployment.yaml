@@ -49,9 +49,18 @@ spec:
         - --client-key=/etc/federation-autoscaler/tls/tls.key
         - --broker-ca=/etc/federation-autoscaler/tls/ca.crt
         - --health-probe-bind-address=:8081
+        # Pin the consumer agent's resources (VirtualNodeState, Liqo
+        # ResourceSlice, kubeconfig Secret) to the agent's own namespace
+        # rather than the binary default — keeps federation-autoscaler
+        # CRs out of the liqo namespace.
+        - --namespace=$(POD_NAMESPACE)
         # --role and (for consumer) --local-api-bind-address are appended
         # by the per-role overlays.
         env:
+        - name: POD_NAMESPACE
+          valueFrom:
+            fieldRef:
+              fieldPath: metadata.namespace
         - name: CLUSTER_ID
           valueFrom:
             configMapKeyRef:

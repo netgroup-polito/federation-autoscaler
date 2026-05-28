@@ -74,7 +74,9 @@ var _ = Describe("Step 9 end-to-end: real consumer.Run against the broker over m
 	resvKey := types.NamespacedName{Name: resName, Namespace: suiteNamespace}
 	peerKey := types.NamespacedName{Name: "peer-" + resName, Namespace: suiteNamespace}
 	cadvKey := types.NamespacedName{Name: providerCluster, Namespace: suiteNamespace}
-	brokerSecretKey := types.NamespacedName{Name: "kubeconfig-" + resName, Namespace: suiteNamespace}
+	// The broker-side staging Secret is (consumer, provider)-keyed (bug #5).
+	credKey := consumerCluster + "-" + providerCluster
+	brokerSecretKey := types.NamespacedName{Name: "kubeconfig-" + credKey, Namespace: suiteNamespace}
 
 	AfterEach(func() {
 		_ = k8sClient.Delete(suiteCtx, &autoscalingv1alpha1.ReservationInstruction{

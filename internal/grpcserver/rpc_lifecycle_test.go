@@ -233,14 +233,17 @@ func TestCleanup_NoOp(t *testing.T) {
 // -----------------------------------------------------------------------------
 
 func TestNodeGroupNodes_MapsPhasesToInstanceStates(t *testing.T) {
+	// Each materialised entry carries a VirtualNodeName (== the real
+	// v1.Node Liqo registered). The Instance Id must be that name, not
+	// the CR-name placeholder in Name.
 	fb := &fakeLocalAPI{
 		virtualNodes: &localapi.VirtualNodeListResponse{
 			VirtualNodes: []localapi.VirtualNodeView{
-				{Name: "vn-running", NodeGroupID: "p1/standard", Phase: autoscalingv1alpha1.VirtualNodeStatePhaseRunning},
-				{Name: "vn-creating", NodeGroupID: "p1/standard", Phase: autoscalingv1alpha1.VirtualNodeStatePhaseCreating},
-				{Name: "vn-deleting", NodeGroupID: "p1/standard", Phase: autoscalingv1alpha1.VirtualNodeStatePhaseDeleting},
-				{Name: "vn-failed", NodeGroupID: "p1/standard", Phase: autoscalingv1alpha1.VirtualNodeStatePhaseFailed},
-				{Name: "vn-other-group", NodeGroupID: "p2/gpu", Phase: autoscalingv1alpha1.VirtualNodeStatePhaseRunning},
+				{Name: "vns-running", VirtualNodeName: "vn-running", NodeGroupID: "p1/standard", Phase: autoscalingv1alpha1.VirtualNodeStatePhaseRunning},
+				{Name: "vns-creating", VirtualNodeName: "vn-creating", NodeGroupID: "p1/standard", Phase: autoscalingv1alpha1.VirtualNodeStatePhaseCreating},
+				{Name: "vns-deleting", VirtualNodeName: "vn-deleting", NodeGroupID: "p1/standard", Phase: autoscalingv1alpha1.VirtualNodeStatePhaseDeleting},
+				{Name: "vns-failed", VirtualNodeName: "vn-failed", NodeGroupID: "p1/standard", Phase: autoscalingv1alpha1.VirtualNodeStatePhaseFailed},
+				{Name: "vns-other-group", VirtualNodeName: "vn-other-group", NodeGroupID: "p2/gpu", Phase: autoscalingv1alpha1.VirtualNodeStatePhaseRunning},
 			},
 		},
 	}
@@ -267,6 +270,35 @@ func TestNodeGroupNodes_MapsPhasesToInstanceStates(t *testing.T) {
 	}
 	if vn := byName["vn-failed"]; vn.Status.ErrorInfo == nil || vn.Status.ErrorInfo.ErrorCode == "" {
 		t.Errorf("vn-failed: want non-empty ErrorInfo, got %+v", vn.Status)
+	}
+}
+
+// TestNodeGroupNodes_SkipsUnmaterialisedNodes is the regression guard
+// for the scale-down-stuck bug: a VNS whose v1.Node hasn't registered
+// (VirtualNodeName empty) must NOT be reported, or CA sees an
+// "unregistered node" that never appears and never scales down.
+func TestNodeGroupNodes_SkipsUnmaterialisedNodes(t *testing.T) {
+	fb := &fakeLocalAPI{
+		virtualNodes: &localapi.VirtualNodeListResponse{
+			VirtualNodes: []localapi.VirtualNodeView{
+				// Registered: reported, Id == real v1.Node name.
+				{Name: "vns-ready", VirtualNodeName: "provider-1", NodeGroupID: "p1/standard", Phase: autoscalingv1alpha1.VirtualNodeStatePhaseRunning},
+				// In-flight: VirtualNodeName empty → skipped even though
+				// the CR name placeholder is present in Name.
+				{Name: "vns-inflight", VirtualNodeName: "", NodeGroupID: "p1/standard", Phase: autoscalingv1alpha1.VirtualNodeStatePhaseCreating},
+			},
+		},
+	}
+	client := newRunningServer(t, fb)
+	resp, err := client.NodeGroupNodes(context.Background(), &protos.NodeGroupNodesRequest{Id: "p1/standard"})
+	if err != nil {
+		t.Fatalf("err: %v", err)
+	}
+	if len(resp.Instances) != 1 {
+		t.Fatalf("want 1 instance (only the registered node), got %d", len(resp.Instances))
+	}
+	if got := resp.Instances[0].Id; got != "provider-1" {
+		t.Errorf("Instance Id: want real v1.Node name provider-1, got %q", got)
 	}
 }
 

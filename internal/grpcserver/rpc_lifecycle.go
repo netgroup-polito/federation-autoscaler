@@ -160,11 +160,21 @@ func (s *Server) Cleanup(context.Context, *protos.CleanupRequest) (*protos.Clean
 	return &protos.CleanupResponse{}, nil
 }
 
-// NodeGroupNodes lists every virtual-node currently materialised on
-// the consumer cluster for the requested group, projected to the
-// proto Instance shape. CA uses this to map its node-by-node view
-// (status, errors) back to specific scale-up calls — without it,
-// scale-downs can't target the right nodes.
+// NodeGroupNodes lists the nodes in the requested group that have a
+// real v1.Node on the consumer cluster, projected to the proto Instance
+// shape. CA uses this to map its node-by-node view (status, errors)
+// back to specific scale-up calls and to target scale-downs.
+//
+// Only VirtualNodeStates whose Status.VirtualNodeName is populated are
+// reported — i.e. nodes Liqo has actually materialised and registered.
+// An in-flight chunk (VirtualNodeName still empty) is deliberately
+// omitted: reporting its CR-name placeholder would make CA believe a
+// node exists in the cloud that never registers in the cluster, which
+// CA logs as "unregistered nodes present" and which wedges
+// scaleDownInCooldown=true so NodeGroupDeleteNodes is never called —
+// automatic scale-down then becomes impossible. The Instance Id is the
+// real v1.Node name (== Status.VirtualNodeName, which Liqo derives from
+// the provider cluster id) so CA's node-to-instance matching lines up.
 func (s *Server) NodeGroupNodes(ctx context.Context, req *protos.NodeGroupNodesRequest) (*protos.NodeGroupNodesResponse, error) {
 	if req == nil || req.Id == "" {
 		return nil, status.Error(codes.InvalidArgument, "id is required")
@@ -183,8 +193,13 @@ func (s *Server) NodeGroupNodes(ctx context.Context, req *protos.NodeGroupNodesR
 		if vn.NodeGroupID != req.Id {
 			continue
 		}
+		// Skip chunks whose v1.Node hasn't registered yet — see the
+		// "unregistered nodes" rationale above.
+		if vn.VirtualNodeName == "" {
+			continue
+		}
 		out.Instances = append(out.Instances, &protos.Instance{
-			Id:     vn.Name,
+			Id:     vn.VirtualNodeName,
 			Status: instanceStatusFromVNS(vn),
 		})
 	}

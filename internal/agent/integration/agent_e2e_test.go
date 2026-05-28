@@ -45,7 +45,8 @@ var _ = Describe("Step 7 end-to-end: agent client + poller against the real brok
 	)
 
 	resvKey := types.NamespacedName{Name: resName, Namespace: suiteNamespace}
-	gkKey := types.NamespacedName{Name: "gk-" + resName, Namespace: suiteNamespace}
+	// GenerateKubeconfig is (consumer, provider)-keyed (bug #5), not per-reservation.
+	gkKey := types.NamespacedName{Name: "gk-" + consumerCluster + "-" + providerCluster, Namespace: suiteNamespace}
 	cadvKey := types.NamespacedName{Name: providerCluster, Namespace: suiteNamespace}
 
 	AfterEach(func() {

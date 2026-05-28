@@ -463,6 +463,9 @@ func TestVirtualNodes_ProjectsCRsToViews(t *testing.T) {
 	if r.Name != "rs-res-running" {
 		t.Errorf("running.Name: want rs-res-running, got %q", r.Name)
 	}
+	if r.VirtualNodeName != "rs-res-running" {
+		t.Errorf("running.VirtualNodeName: want rs-res-running (status populated), got %q", r.VirtualNodeName)
+	}
 	if r.NodeGroupID != "ng-provider-1-standard" {
 		t.Errorf("running.NodeGroupID: want ng-provider-1-standard, got %q", r.NodeGroupID)
 	}
@@ -477,6 +480,11 @@ func TestVirtualNodes_ProjectsCRsToViews(t *testing.T) {
 	// Status.VirtualNodeName is empty so the CR name is the placeholder.
 	if c.Name != "vns-res-creating" {
 		t.Errorf("creating.Name: want vns-res-creating placeholder, got %q", c.Name)
+	}
+	// The raw VirtualNodeName stays empty (no fallback) — this is what
+	// NodeGroupNodes keys off to skip un-materialised nodes.
+	if c.VirtualNodeName != "" {
+		t.Errorf("creating.VirtualNodeName: want empty (node not materialised), got %q", c.VirtualNodeName)
 	}
 	if c.Phase != autoscalingv1alpha1.VirtualNodeStatePhaseCreating {
 		t.Errorf("creating.Phase: want Creating, got %s", c.Phase)

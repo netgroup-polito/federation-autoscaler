@@ -267,6 +267,7 @@ func virtualNodeStateToView(vns *autoscalingv1alpha1.VirtualNodeState) VirtualNo
 	}
 	return VirtualNodeView{
 		Name:                  name,
+		VirtualNodeName:       vns.Status.VirtualNodeName,
 		ReservationID:         vns.Spec.ReservationID,
 		NodeGroupID:           vns.Spec.NodeGroupID,
 		ProviderClusterID:     vns.Spec.ProviderClusterID,

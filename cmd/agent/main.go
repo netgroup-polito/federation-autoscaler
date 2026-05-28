@@ -50,6 +50,14 @@ import (
 const (
 	roleConsumer = "consumer"
 	roleProvider = "provider"
+
+	// defaultNamespace is where the consumer agent creates its
+	// VirtualNodeState CRs, Liqo ResourceSlices, and kubeconfig Secrets
+	// when neither --namespace nor POD_NAMESPACE is set. It matches the
+	// namespace the agent itself is deployed into so all
+	// federation-autoscaler resources live together; in-cluster the
+	// downward-API POD_NAMESPACE env overrides it (see config/agent).
+	defaultNamespace = "federation-autoscaler-system"
 )
 
 var (
@@ -79,6 +87,7 @@ func main() {
 		pollInterval    time.Duration
 		localAPIAddr    string
 		healthProbeAddr string
+		namespace       string
 	)
 
 	flag.StringVar(&role, "role", "",
@@ -101,6 +110,10 @@ func main() {
 		"(consumer role only) Address the loopback REST API binds to; consumed by the local gRPC server.")
 	flag.StringVar(&healthProbeAddr, "health-probe-bind-address", ":8081",
 		"Address the health/readiness probe endpoint binds to.")
+	flag.StringVar(&namespace, "namespace", envOrDefault("POD_NAMESPACE", defaultNamespace),
+		"(consumer role only) Namespace where the agent creates VirtualNodeState, "+
+			"Liqo ResourceSlice, and kubeconfig Secret resources. Defaults to "+
+			"$POD_NAMESPACE (downward API) or "+defaultNamespace+".")
 
 	opts := zap.Options{Development: true}
 	opts.BindFlags(flag.CommandLine)
@@ -192,6 +205,7 @@ func main() {
 			ClusterID:     clusterID,
 			LiqoClusterID: liqoClusterID,
 			LocalAPIAddr:  localAPIAddr,
+			Namespace:     namespace,
 			Logger:        ctrl.Log.WithName("consumer"),
 			Probe:         probe,
 		}); err != nil {
@@ -215,6 +229,17 @@ func main() {
 
 	pollerInstance.Run(ctx)
 	setupLog.Info("shutdown signal received, exiting")
+}
+
+// envOrDefault returns the value of environment variable key, or def
+// when key is unset or empty. Used so --namespace can default to the
+// downward-API POD_NAMESPACE in-cluster while still working for a bare
+// `go run` outside a pod.
+func envOrDefault(key, def string) string {
+	if v := os.Getenv(key); v != "" {
+		return v
+	}
+	return def
 }
 
 // validateFlags rejects invalid or incomplete CLI configuration up front so

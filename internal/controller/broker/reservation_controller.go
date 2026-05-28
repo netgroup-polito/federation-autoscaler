@@ -22,6 +22,7 @@ import (
 	"time"
 
 	"github.com/go-logr/logr"
+	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
@@ -36,6 +37,15 @@ import (
 	autoscalingv1alpha1 "github.com/netgroup-polito/federation-autoscaler/api/autoscaling/v1alpha1"
 	brokerv1alpha1 "github.com/netgroup-polito/federation-autoscaler/api/broker/v1alpha1"
 )
+
+// ReservationFinalizer guards a Reservation so its reserved chunks are
+// credited back to the provider's ClusterAdvertisement before the CR is
+// removed. Without it, a `kubectl delete reservation` (operator hard
+// delete, bypassing the consumer-initiated DELETE /api/v1/reservations
+// path that decrements + stamps ChunksReleased) would drop the object
+// before handleTerminal ran releaseChunks — leaking ReservedChunks and
+// permanently shrinking the provider's AvailableChunks budget.
+const ReservationFinalizer = "broker.federation-autoscaler.io/release-chunks"
 
 // ReservationReconciler drives a Reservation through the asynchronous
 // Broker-side phase machine described in docs/design.md §5.3:
@@ -65,6 +75,7 @@ type ReservationReconciler struct {
 // +kubebuilder:rbac:groups=broker.federation-autoscaler.io,resources=reservations/finalizers,verbs=update
 // +kubebuilder:rbac:groups=autoscaling.federation-autoscaler.io,resources=providerinstructions,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=autoscaling.federation-autoscaler.io,resources=reservationinstructions,verbs=get;list;watch;create;update;patch;delete
+// +kubebuilder:rbac:groups="",resources=secrets,verbs=get;list;watch;delete
 
 // Reconcile dispatches on the current Reservation phase and emits the
 // matching instruction CR. The function is idempotent: instruction
@@ -76,6 +87,27 @@ func (r *ReservationReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 	var resv brokerv1alpha1.Reservation
 	if err := r.Get(ctx, req.NamespacedName, &resv); err != nil {
 		return ctrl.Result{}, client.IgnoreNotFound(err)
+	}
+
+	// Finalizer bookkeeping.
+	if !resv.DeletionTimestamp.IsZero() {
+		// Being deleted: credit the reserved chunks back (releaseChunks
+		// is gated by IsChunksReleased, so the normal consumer-initiated
+		// release path that already decremented + stamped is a no-op
+		// here — no double-release), then drop the finalizer so the CR
+		// can be garbage-collected.
+		return r.handleDeletion(ctx, log, &resv)
+	}
+	// Live object: ensure the finalizer is present so a future delete
+	// routes through handleDeletion. The metadata Update is persisted
+	// before any side effects below; controller-runtime writes the new
+	// resourceVersion back into resv, so the subsequent status updates
+	// (advancePhase) and instruction creates proceed in this same pass —
+	// no extra reconcile needed.
+	if controllerutil.AddFinalizer(&resv, ReservationFinalizer) {
+		if err := r.Update(ctx, &resv); err != nil {
+			return ctrl.Result{}, fmt.Errorf("add finalizer: %w", err)
+		}
 	}
 
 	// Expiry guard: if a non-terminal reservation has blown past its
@@ -95,6 +127,8 @@ func (r *ReservationReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 	switch resv.Status.Phase {
 	case "", brokerv1alpha1.ReservationPhasePending:
 		return r.handlePending(ctx, log, &resv)
+	case brokerv1alpha1.ReservationPhaseGeneratingKubeconfig:
+		return r.handleGeneratingKubeconfig(ctx, log, &resv)
 	case brokerv1alpha1.ReservationPhaseKubeconfigReady:
 		return r.handleKubeconfigReady(ctx, log, &resv)
 	case brokerv1alpha1.ReservationPhaseUnpeering:
@@ -104,8 +138,7 @@ func (r *ReservationReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 		brokerv1alpha1.ReservationPhaseExpired:
 		return r.handleTerminal(ctx, log, &resv)
 	default:
-		// GeneratingKubeconfig / Peering / Peered are moved by the
-		// instruction-result handler.
+		// Peering / Peered are moved by the instruction-result handler.
 		return ctrl.Result{}, nil
 	}
 }
@@ -117,9 +150,28 @@ func (r *ReservationReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 func (r *ReservationReconciler) handlePending(
 	ctx context.Context, log logr.Logger, resv *brokerv1alpha1.Reservation,
 ) (ctrl.Result, error) {
+	// Fast-path: if the (consumer, provider) peering-user kubeconfig has
+	// already been generated for a sibling Reservation, reuse it and skip
+	// GenerateKubeconfig entirely. Re-issuing it would make the provider
+	// run `liqoctl generate peering-user` a second time and fail with
+	// "CSR already exists". See bug #5.
+	exists, err := r.kubeconfigSecretExists(ctx, resv)
+	if err != nil {
+		return ctrl.Result{}, fmt.Errorf("check kubeconfig secret: %w", err)
+	}
+	if exists {
+		if err := r.advancePhase(ctx, resv, brokerv1alpha1.ReservationPhaseKubeconfigReady,
+			"reusing cached peering-user kubeconfig"); err != nil {
+			return ctrl.Result{}, err
+		}
+		log.Info("reused cached kubeconfig; skipped GenerateKubeconfig",
+			"provider", resv.Spec.ProviderClusterID, "consumer", resv.Spec.ConsumerClusterID)
+		return ctrl.Result{}, nil
+	}
+
 	pi := &autoscalingv1alpha1.ProviderInstruction{
 		ObjectMeta: metav1.ObjectMeta{
-			Name:      providerInstructionGKName(resv.Name),
+			Name:      providerInstructionGKName(resv.Spec.ConsumerClusterID, resv.Spec.ProviderClusterID),
 			Namespace: resv.Namespace,
 		},
 		Spec: autoscalingv1alpha1.ProviderInstructionSpec{
@@ -133,7 +185,12 @@ func (r *ReservationReconciler) handlePending(
 		},
 	}
 
-	if err := r.ensureInstruction(ctx, resv, pi); err != nil {
+	// Shared instruction: no controller-owner reference. A GenerateKubeconfig
+	// outlives the Reservation that first issued it (a sibling may still need
+	// the credential), so it must not be garbage-collected when that one
+	// Reservation is deleted. AlreadyExists is tolerated so two Pending
+	// Reservations racing to the same provider don't double-issue.
+	if err := r.ensureSharedInstruction(ctx, pi); err != nil {
 		return ctrl.Result{}, fmt.Errorf("ensure GenerateKubeconfig instruction: %w", err)
 	}
 
@@ -142,6 +199,44 @@ func (r *ReservationReconciler) handlePending(
 		return ctrl.Result{}, err
 	}
 	log.Info("queued GenerateKubeconfig", "provider", resv.Spec.ProviderClusterID)
+	return ctrl.Result{}, nil
+}
+
+// -----------------------------------------------------------------------------
+// GeneratingKubeconfig → KubeconfigReady (sibling fast-forward)
+// -----------------------------------------------------------------------------
+
+// gkResyncInterval is how often a Reservation parked in
+// GeneratingKubeconfig re-checks for the shared kubeconfig Secret.
+const gkResyncInterval = 5 * time.Second
+
+// handleGeneratingKubeconfig advances a Reservation to KubeconfigReady
+// as soon as the shared (consumer, provider) kubeconfig Secret exists.
+//
+// The Reservation that issued the GenerateKubeconfig instruction is
+// advanced directly by the API result handler when the provider reports
+// back. But a *sibling* Reservation that entered GeneratingKubeconfig
+// before that result landed (it raced past the handlePending fast-path
+// while the Secret didn't yet exist) has no instruction of its own to
+// trigger it — so it polls here until the credential materialises. The
+// reconciler has no Secret watch, hence the bounded RequeueAfter.
+func (r *ReservationReconciler) handleGeneratingKubeconfig(
+	ctx context.Context, log logr.Logger, resv *brokerv1alpha1.Reservation,
+) (ctrl.Result, error) {
+	exists, err := r.kubeconfigSecretExists(ctx, resv)
+	if err != nil {
+		return ctrl.Result{}, fmt.Errorf("check kubeconfig secret: %w", err)
+	}
+	if !exists {
+		// Credential not ready yet; check back shortly.
+		return ctrl.Result{RequeueAfter: gkResyncInterval}, nil
+	}
+	if err := r.advancePhase(ctx, resv, brokerv1alpha1.ReservationPhaseKubeconfigReady,
+		"peering-user kubeconfig delivered"); err != nil {
+		return ctrl.Result{}, err
+	}
+	log.Info("kubeconfig ready; advancing to KubeconfigReady",
+		"provider", resv.Spec.ProviderClusterID, "consumer", resv.Spec.ConsumerClusterID)
 	return ctrl.Result{}, nil
 }
 
@@ -164,7 +259,7 @@ func (r *ReservationReconciler) handleKubeconfigReady(
 			ProviderClusterID:     resv.Spec.ProviderClusterID,
 			ProviderLiqoClusterID: resv.Spec.ProviderLiqoClusterID,
 			ChunkCount:            resv.Spec.ChunkCount,
-			KubeconfigRef:         kubeconfigSecretName(resv.Name),
+			KubeconfigRef:         kubeconfigSecretName(resv.Spec.ConsumerClusterID, resv.Spec.ProviderClusterID),
 			ExpiresAt:             resv.Status.ExpiresAt,
 		},
 	}
@@ -218,18 +313,28 @@ func (r *ReservationReconciler) handleUnpeering(
 // Released / Failed / Expired → emit ProviderInstruction{Cleanup}
 // -----------------------------------------------------------------------------
 
-// handleTerminal queues a ProviderInstruction{Cleanup} so the provider
-// agent can drop the peering-user ServiceAccount/RoleBinding it created
-// in response to the original GenerateKubeconfig. The check on GK's
-// existence is what distinguishes a "we never spoke to the provider"
-// terminal (Pending → Failed direct, e.g. validation failure during
-// expiry on a still-pending reservation) from a normal terminal —
-// without it, every aborted Pending would queue a meaningless cleanup.
+// handleTerminal credits chunks back and, when this is the *last*
+// Reservation for its (consumer, provider) pair, tears down the shared
+// peering-user credential: it queues a ProviderInstruction{Cleanup} so
+// the provider agent drops the peering-user ServiceAccount/RoleBinding
+// and deletes the staging kubeconfig Secret.
+//
+// Because the credential is shared across Reservations (bug #5), the
+// teardown is ref-counted: if any *other* non-terminal Reservation still
+// targets the same (consumer, provider), cleanup is skipped and the
+// Reservation is requeued so the teardown fires once that sibling also
+// terminates. This closes the race where two siblings reach a terminal
+// phase near-simultaneously and both see the other as still active.
+//
+// The presence of the staging Secret is the signal that provider work
+// actually happened: a Pending → Failed direct transition never created
+// it, so there is nothing to clean up. (The Secret is more durable than
+// the GenerateKubeconfig instruction, which the shared-bookkeeping GC
+// reclaims after DefaultEnforcedTTL.)
 //
 // The cleanup is emitted even when the provider's ClusterAdvertisement
 // is currently unavailable: the instruction sits in etcd until the
-// provider re-appears and replays its instruction queue, closing the
-// loop on otherwise-leaked peering-user state.
+// provider re-appears and replays its instruction queue.
 func (r *ReservationReconciler) handleTerminal(
 	ctx context.Context, log logr.Logger, resv *brokerv1alpha1.Reservation,
 ) (ctrl.Result, error) {
@@ -247,22 +352,80 @@ func (r *ReservationReconciler) handleTerminal(
 			"chunkCount", resv.Spec.ChunkCount, "phase", resv.Status.Phase)
 	}
 
-	var gk autoscalingv1alpha1.ProviderInstruction
-	err := r.Get(ctx, types.NamespacedName{
-		Name: providerInstructionGKName(resv.Name), Namespace: resv.Namespace,
-	}, &gk)
-	if apierrors.IsNotFound(err) {
+	// No provider work ever happened (Pending → Failed direct) → no
+	// peering-user to tear down. The staging Secret is the durable marker.
+	exists, err := r.kubeconfigSecretExists(ctx, resv)
+	if err != nil {
+		return ctrl.Result{}, fmt.Errorf("check kubeconfig secret: %w", err)
+	}
+	if !exists {
 		return ctrl.Result{}, nil
 	}
+
+	// Ref-count: a sibling Reservation may still need the shared
+	// credential. Skip teardown and re-check shortly.
+	others, err := r.hasOtherActiveReservation(ctx, resv)
 	if err != nil {
-		return ctrl.Result{}, fmt.Errorf("get GenerateKubeconfig instruction: %w", err)
+		return ctrl.Result{}, fmt.Errorf("check sibling reservations: %w", err)
+	}
+	if others {
+		log.V(1).Info("peering-user still in use by a sibling reservation; deferring cleanup",
+			"provider", resv.Spec.ProviderClusterID, "consumer", resv.Spec.ConsumerClusterID)
+		return ctrl.Result{RequeueAfter: gkResyncInterval}, nil
 	}
 
 	if err := r.ensureProviderCleanupInstruction(ctx, resv); err != nil {
 		return ctrl.Result{}, fmt.Errorf("ensure ProviderInstruction Cleanup: %w", err)
 	}
-	log.Info("queued provider Cleanup", "provider", resv.Spec.ProviderClusterID, "phase", resv.Status.Phase)
+	if err := r.deleteKubeconfigSecret(ctx, resv); err != nil {
+		return ctrl.Result{}, fmt.Errorf("delete staging kubeconfig secret: %w", err)
+	}
+	log.Info("queued provider Cleanup and removed staging kubeconfig",
+		"provider", resv.Spec.ProviderClusterID, "consumer", resv.Spec.ConsumerClusterID, "phase", resv.Status.Phase)
 	return ctrl.Result{}, nil
+}
+
+// handleDeletion runs when a Reservation carries a DeletionTimestamp.
+// It credits the reservation's chunks back to the provider (idempotent
+// via the ChunksReleased annotation), then removes ReservationFinalizer
+// so the API server can finish deleting the object. Re-fetches before
+// removing the finalizer because releaseChunks may have stamped the
+// annotation and bumped the resourceVersion.
+func (r *ReservationReconciler) handleDeletion(
+	ctx context.Context, log logr.Logger, resv *brokerv1alpha1.Reservation,
+) (ctrl.Result, error) {
+	if !controllerutil.ContainsFinalizer(resv, ReservationFinalizer) {
+		// Another reconcile already finalized; nothing to do.
+		return ctrl.Result{}, nil
+	}
+
+	if !brokerv1alpha1.IsChunksReleased(resv) {
+		if err := r.releaseChunks(ctx, resv); err != nil {
+			return ctrl.Result{}, fmt.Errorf("release chunks on delete: %w", err)
+		}
+		log.Info("released reserved chunks on delete", "provider", resv.Spec.ProviderClusterID,
+			"chunkCount", resv.Spec.ChunkCount, "phase", resv.Status.Phase)
+	}
+
+	for attempt := 0; attempt < 3; attempt++ {
+		fresh := &brokerv1alpha1.Reservation{}
+		if err := r.Get(ctx, types.NamespacedName{
+			Name: resv.Name, Namespace: resv.Namespace,
+		}, fresh); err != nil {
+			return ctrl.Result{}, client.IgnoreNotFound(err)
+		}
+		if !controllerutil.RemoveFinalizer(fresh, ReservationFinalizer) {
+			return ctrl.Result{}, nil
+		}
+		if err := r.Update(ctx, fresh); err != nil {
+			if apierrors.IsConflict(err) {
+				continue
+			}
+			return ctrl.Result{}, fmt.Errorf("remove finalizer: %w", err)
+		}
+		return ctrl.Result{}, nil
+	}
+	return ctrl.Result{}, fmt.Errorf("exhausted conflict retries removing finalizer")
 }
 
 // releaseChunks decrements the provider's ReservedChunks by
@@ -337,15 +500,18 @@ func (r *ReservationReconciler) stampChunksReleased(
 }
 
 // ensureProviderCleanupInstruction emits a ProviderInstruction{Cleanup}
-// targeted at the provider. Same idempotency guarantees as
-// ensureInstruction: re-running on a Reservation whose provider Cleanup
-// already exists is a no-op.
+// that tears down the shared (consumer, provider) peering-user. Like the
+// GenerateKubeconfig it pairs with, it is keyed by (consumer, provider)
+// and carries no controller-owner reference — it must outlive the
+// Reservation being torn down (which is about to be garbage-collected)
+// so the provider agent can still fetch it. Idempotent: re-running when
+// the Cleanup already exists is a no-op.
 func (r *ReservationReconciler) ensureProviderCleanupInstruction(
 	ctx context.Context, resv *brokerv1alpha1.Reservation,
 ) error {
 	pi := &autoscalingv1alpha1.ProviderInstruction{
 		ObjectMeta: metav1.ObjectMeta{
-			Name:      providerInstructionCleanupName(resv.Name),
+			Name:      providerInstructionCleanupName(resv.Spec.ConsumerClusterID, resv.Spec.ProviderClusterID),
 			Namespace: resv.Namespace,
 		},
 		Spec: autoscalingv1alpha1.ProviderInstructionSpec{
@@ -357,7 +523,7 @@ func (r *ReservationReconciler) ensureProviderCleanupInstruction(
 			ChunkCount:            resv.Spec.ChunkCount,
 		},
 	}
-	return r.ensureInstruction(ctx, resv, pi)
+	return r.ensureSharedInstruction(ctx, pi)
 }
 
 // -----------------------------------------------------------------------------
@@ -381,6 +547,98 @@ func (r *ReservationReconciler) ensureInstruction(
 		return err
 	}
 	return nil
+}
+
+// ensureSharedInstruction creates an instruction with NO controller-owner
+// reference — used for the (consumer, provider)-scoped GenerateKubeconfig
+// and provider Cleanup, which are shared across Reservations and so must
+// not be garbage-collected when any single Reservation is deleted. Their
+// lifecycle is the shared-bookkeeping DefaultEnforcedTTL GC, not owner
+// references. Idempotent on AlreadyExists.
+func (r *ReservationReconciler) ensureSharedInstruction(
+	ctx context.Context, instruction client.Object,
+) error {
+	if err := r.Create(ctx, instruction); err != nil {
+		if apierrors.IsAlreadyExists(err) {
+			return nil
+		}
+		return err
+	}
+	return nil
+}
+
+// kubeconfigSecretExists reports whether the shared (consumer, provider)
+// staging kubeconfig Secret is already present in the Reservation's
+// namespace.
+func (r *ReservationReconciler) kubeconfigSecretExists(
+	ctx context.Context, resv *brokerv1alpha1.Reservation,
+) (bool, error) {
+	var sec corev1.Secret
+	err := r.Get(ctx, types.NamespacedName{
+		Name:      kubeconfigSecretName(resv.Spec.ConsumerClusterID, resv.Spec.ProviderClusterID),
+		Namespace: resv.Namespace,
+	}, &sec)
+	if apierrors.IsNotFound(err) {
+		return false, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	return true, nil
+}
+
+// deleteKubeconfigSecret removes the shared staging kubeconfig Secret.
+// Idempotent on missing. Called only once the last Reservation for a
+// (consumer, provider) pair terminates, so a future Reservation re-runs
+// GenerateKubeconfig against a freshly minted peering-user rather than
+// fast-pathing onto a credential whose peering-user was just torn down.
+func (r *ReservationReconciler) deleteKubeconfigSecret(
+	ctx context.Context, resv *brokerv1alpha1.Reservation,
+) error {
+	sec := &corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      kubeconfigSecretName(resv.Spec.ConsumerClusterID, resv.Spec.ProviderClusterID),
+			Namespace: resv.Namespace,
+		},
+	}
+	if err := r.Delete(ctx, sec); err != nil && !apierrors.IsNotFound(err) {
+		return err
+	}
+	return nil
+}
+
+// hasOtherActiveReservation reports whether any Reservation *other* than
+// resv targets the same (consumer, provider) pair and is still alive —
+// i.e. not in a terminal phase and not being deleted. Used to ref-count
+// the shared peering-user so its teardown waits for the last sibling.
+func (r *ReservationReconciler) hasOtherActiveReservation(
+	ctx context.Context, resv *brokerv1alpha1.Reservation,
+) (bool, error) {
+	var list brokerv1alpha1.ReservationList
+	if err := r.List(ctx, &list, client.InNamespace(resv.Namespace)); err != nil {
+		return false, err
+	}
+	for i := range list.Items {
+		other := &list.Items[i]
+		if other.Name == resv.Name {
+			continue
+		}
+		if other.Spec.ConsumerClusterID != resv.Spec.ConsumerClusterID ||
+			other.Spec.ProviderClusterID != resv.Spec.ProviderClusterID {
+			continue
+		}
+		if !other.DeletionTimestamp.IsZero() {
+			continue
+		}
+		switch other.Status.Phase {
+		case brokerv1alpha1.ReservationPhaseReleased,
+			brokerv1alpha1.ReservationPhaseFailed,
+			brokerv1alpha1.ReservationPhaseExpired:
+			continue
+		}
+		return true, nil
+	}
+	return false, nil
 }
 
 // advancePhase patches status.phase / status.message and bumps
@@ -538,8 +796,29 @@ func isReservationTerminal(p brokerv1alpha1.ReservationPhase) bool {
 // it races with itself: re-creating an instruction with the same name is
 // a NoOp.
 
-func providerInstructionGKName(reservationName string) string {
-	return "gk-" + reservationName
+// peeringCredentialKey is the (consumer, provider)-scoped identity that
+// the GenerateKubeconfig instruction, the staging kubeconfig Secret, and
+// the provider-side Cleanup all key off. The Liqo peering-user the
+// provider mints in response to GenerateKubeconfig is a singleton per
+// (consumer, provider) pair — re-issuing it for a second Reservation
+// fails with "CSR already exists" — so every artefact tied to that
+// credential must be shared across Reservations rather than named per
+// Reservation. See docs/design.md §5.3 / bug #5.
+//
+// The same scheme is mirrored in internal/broker/api/instructions.go
+// (which persists the Secret on the GenerateKubeconfig result); the two
+// must agree on these names to hand the credential off cleanly. The
+// duplication is intentional — a controller MUST NOT import the HTTP
+// layer.
+func peeringCredentialKey(consumerClusterID, providerClusterID string) string {
+	return consumerClusterID + "-" + providerClusterID
+}
+
+// providerInstructionGKName is keyed by (consumer, provider): one
+// GenerateKubeconfig per credential, shared by every Reservation from
+// that consumer to that provider.
+func providerInstructionGKName(consumerClusterID, providerClusterID string) string {
+	return "gk-" + peeringCredentialKey(consumerClusterID, providerClusterID)
 }
 
 func reservationInstructionPeerName(reservationName string) string {
@@ -554,22 +833,24 @@ func reservationInstructionCleanupName(reservationName string) string {
 	return "cleanup-" + reservationName
 }
 
-// providerInstructionCleanupName uses a distinct prefix from the
-// consumer-side cleanup-<resv> so the two terminal cleanups are
-// trivially distinguishable in `kubectl get` output even though they
-// live in different CRD kinds.
-func providerInstructionCleanupName(reservationName string) string {
-	return "pcleanup-" + reservationName
+// providerInstructionCleanupName is keyed by (consumer, provider) — like
+// the GenerateKubeconfig it pairs with — because it tears down the
+// shared peering-user. It uses a distinct prefix from the consumer-side
+// cleanup-<resv> so the two terminal cleanups are trivially
+// distinguishable in `kubectl get` output even though they live in
+// different CRD kinds.
+func providerInstructionCleanupName(consumerClusterID, providerClusterID string) string {
+	return "pcleanup-" + peeringCredentialKey(consumerClusterID, providerClusterID)
 }
 
 // kubeconfigSecretName must match the value the API instruction handler
 // (internal/broker/api/instructions.go) uses when persisting the
-// peering-user kubeconfig — both have to agree on the Secret name to
-// hand it off cleanly. The duplication is intentional to keep this
-// package free of internal/broker/api imports (a controller MUST NOT
-// depend on the HTTP layer).
-func kubeconfigSecretName(reservationName string) string {
-	return "kubeconfig-" + reservationName
+// peering-user kubeconfig. Keyed by (consumer, provider): the staging
+// Secret is the shared credential, reused by every Reservation for that
+// pair (this is what lets a second Reservation fast-path past
+// GenerateKubeconfig entirely).
+func kubeconfigSecretName(consumerClusterID, providerClusterID string) string {
+	return "kubeconfig-" + peeringCredentialKey(consumerClusterID, providerClusterID)
 }
 
 // SetupWithManager sets up the controller with the Manager.

@@ -32,9 +32,20 @@ import (
 // and the consumer agent's Peer / Unpeer / Cleanup handlers create and
 // delete them as reservations move through the broker phase machine.
 type VirtualNodeView struct {
-	// Name is the Liqo VirtualNode object name (== virtual-node name
-	// surfaced to the local cluster's scheduler).
+	// Name is the best-effort node identifier: the real v1.Node name once
+	// Liqo has materialised it, otherwise the VirtualNodeState CR's own
+	// name as a stable placeholder. NodeGroupTargetSize / NodeGroupForNode
+	// rely on this placeholder so in-flight scale-ups are still counted
+	// and matchable before the node registers.
 	Name string `json:"name"`
+
+	// VirtualNodeName is the *raw* Status.VirtualNodeName — the actual
+	// v1.Node name Liqo materialised, or empty when the node has not yet
+	// registered on the consumer cluster. Unlike Name it never falls back
+	// to the CR name. NodeGroupNodes uses this to report only nodes that
+	// genuinely exist: emitting a placeholder there makes CA see an
+	// "unregistered node" that never appears, which wedges scale-down.
+	VirtualNodeName string `json:"virtualNodeName,omitempty"`
 
 	// ReservationID is the broker-side reservation this virtual node
 	// belongs to. Multiple VirtualNodeViews may share a reservation

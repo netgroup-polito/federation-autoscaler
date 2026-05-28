@@ -37,9 +37,16 @@ import (
 const kubeconfigSecretKey = "kubeconfig"
 
 // kubeconfigSecretName returns the canonical staging-Secret name for a
-// reservation. Kept short so it fits in the 253-char DNS subdomain limit.
-func kubeconfigSecretName(reservationID string) string {
-	return "kubeconfig-" + reservationID
+// (consumer, provider) peering-user credential. It MUST match the
+// controller-side helper of the same name in
+// internal/controller/broker/reservation_controller.go — both have to
+// agree so the GenerateKubeconfig result handler and the Peer-instruction
+// emitter hand the credential off cleanly. The credential is shared
+// across every Reservation for the pair (bug #5), hence keyed by
+// (consumer, provider) and not by reservation. Kept short so it fits in
+// the 253-char DNS subdomain limit.
+func kubeconfigSecretName(consumerClusterID, providerClusterID string) string {
+	return "kubeconfig-" + consumerClusterID + "-" + providerClusterID
 }
 
 // -----------------------------------------------------------------------------
@@ -374,14 +381,19 @@ func (s *Server) persistKubeconfigPayload(
 	if payload == nil || payload.Kubeconfig == "" {
 		return errors.New("KubeconfigPayload requires a non-empty kubeconfig")
 	}
-	secretName := kubeconfigSecretName(pi.Spec.ReservationID)
+	// Keyed by (consumer, provider): the peering-user is a singleton per
+	// pair, so the staging Secret is shared by every Reservation between
+	// that consumer and provider. ConsumerClusterID is the consumer;
+	// TargetClusterID is the provider for a GenerateKubeconfig instruction.
+	secretName := kubeconfigSecretName(pi.Spec.ConsumerClusterID, pi.Spec.TargetClusterID)
 
 	sec := &corev1.Secret{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      secretName,
 			Namespace: s.namespace,
 			Labels: map[string]string{
-				"federation-autoscaler.io/reservation": pi.Spec.ReservationID,
+				"federation-autoscaler.io/consumer": pi.Spec.ConsumerClusterID,
+				"federation-autoscaler.io/provider": pi.Spec.TargetClusterID,
 			},
 		},
 		Type: corev1.SecretTypeOpaque,

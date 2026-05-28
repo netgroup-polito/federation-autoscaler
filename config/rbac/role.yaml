@@ -13,6 +13,15 @@ rules:
   - list
   - watch
 - apiGroups:
+  - ""
+  resources:
+  - secrets
+  verbs:
+  - delete
+  - get
+  - list
+  - watch
+- apiGroups:
   - autoscaling.federation-autoscaler.io
   resources:
   - providerinstructions

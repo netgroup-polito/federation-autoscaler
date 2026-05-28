@@ -44,10 +44,15 @@ var _ = Describe("Reservation lifecycle: Pending → Peered → Released", func(
 		providerName = "provider-int"
 	)
 	resvKey := types.NamespacedName{Name: resName, Namespace: ns}
-	gkKey := types.NamespacedName{Name: "gk-" + resName, Namespace: ns}
+	// GenerateKubeconfig, the staging Secret, and provider Cleanup are
+	// keyed by (consumer, provider) — shared across reservations — not by
+	// reservation name (bug #5). Peer/Unpeer stay per-reservation.
+	credKey := "consumer-int-provider-int"
+	gkKey := types.NamespacedName{Name: "gk-" + credKey, Namespace: ns}
+	kubeconfigSecretKey := types.NamespacedName{Name: "kubeconfig-" + credKey, Namespace: ns}
 	peerKey := types.NamespacedName{Name: "peer-" + resName, Namespace: ns}
 	unpeerKey := types.NamespacedName{Name: "unpeer-" + resName, Namespace: ns}
-	pcleanupKey := types.NamespacedName{Name: "pcleanup-" + resName, Namespace: ns}
+	pcleanupKey := types.NamespacedName{Name: "pcleanup-" + credKey, Namespace: ns}
 	cadvKey := types.NamespacedName{Name: providerName, Namespace: ns}
 
 	AfterEach(func() {
@@ -131,6 +136,14 @@ var _ = Describe("Reservation lifecycle: Pending → Peered → Released", func(
 
 		By("simulating the provider agent reporting a kubeconfig success")
 		simulateInstructionEnforced(gkKey, true)
+		// The API GenerateKubeconfig-result handler stages the peering-user
+		// kubeconfig in a (consumer, provider)-keyed Secret; stand in for it
+		// here. handleTerminal later gates provider Cleanup on this Secret's
+		// existence (it is the durable "provider work happened" marker).
+		Expect(k8sClient.Create(ctx, &corev1.Secret{
+			ObjectMeta: metav1.ObjectMeta{Name: kubeconfigSecretKey.Name, Namespace: ns},
+			Data:       map[string][]byte{"kubeconfig": []byte("dummy")},
+		})).To(Succeed())
 		updateStatus(resvKey, func(r *brokerv1alpha1.Reservation) {
 			r.Status.Phase = brokerv1alpha1.ReservationPhaseKubeconfigReady
 			r.Status.Message = "kubeconfig delivered"
@@ -142,7 +155,7 @@ var _ = Describe("Reservation lifecycle: Pending → Peered → Released", func(
 			g.Expect(k8sClient.Get(ctx, peerKey, ri)).To(Succeed())
 			g.Expect(ri.Spec.Kind).To(Equal(autoscalingv1alpha1.ReservationInstructionPeer))
 			g.Expect(ri.Spec.TargetClusterID).To(Equal("consumer-int"))
-			g.Expect(ri.Spec.KubeconfigRef).To(Equal("kubeconfig-" + resName))
+			g.Expect(ri.Spec.KubeconfigRef).To(Equal(kubeconfigSecretKey.Name))
 
 			r := &brokerv1alpha1.Reservation{}
 			g.Expect(k8sClient.Get(ctx, resvKey, r)).To(Succeed())

@@ -83,7 +83,9 @@ var _ = Describe("Step 8 end-to-end: real provider.Run against the broker over m
 	)
 
 	resvKey := types.NamespacedName{Name: resName, Namespace: suiteNamespace}
-	gkKey := types.NamespacedName{Name: "gk-" + resName, Namespace: suiteNamespace}
+	// GenerateKubeconfig + staging Secret are (consumer, provider)-keyed (bug #5).
+	credKey := consumerCluster + "-" + providerCluster
+	gkKey := types.NamespacedName{Name: "gk-" + credKey, Namespace: suiteNamespace}
 	cadvKey := types.NamespacedName{Name: providerCluster, Namespace: suiteNamespace}
 
 	AfterEach(func() {
@@ -239,7 +241,7 @@ var _ = Describe("Step 8 end-to-end: real provider.Run against the broker over m
 		Eventually(func(g Gomega) {
 			sec := &corev1.Secret{}
 			g.Expect(k8sClient.Get(suiteCtx, types.NamespacedName{
-				Name: "kubeconfig-" + resName, Namespace: suiteNamespace,
+				Name: "kubeconfig-" + credKey, Namespace: suiteNamespace,
 			}, sec)).To(Succeed())
 			g.Expect(string(sec.Data["kubeconfig"])).To(ContainSubstring("https://provider.local"))
 		}, suiteTimeout, suiteInterval).Should(Succeed())

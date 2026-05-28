@@ -84,9 +84,19 @@ type Options struct {
 	// exposed to the co-located pod only.
 	LocalAPIAddr string
 
-	// Namespace is where the Peer/Unpeer handlers create the
-	// kubeconfig Secret and the Liqo ResourceSlice /
-	// NamespaceOffloading CRs. Defaults to "liqo" when unset.
+	// Namespace is where the consumer agent creates the kubeconfig
+	// Secret, the Liqo ResourceSlice, and the VirtualNodeState CR, and
+	// where the loopback API lists VirtualNodeState from. It is the
+	// agent's own deployment namespace (federation-autoscaler-system),
+	// injected via --namespace / POD_NAMESPACE. Defaults to
+	// "federation-autoscaler-system" when unset.
+	//
+	// NOTE: this is deliberately NOT "liqo". The ResourceSlice works in
+	// any namespace (Liqo's controller watches cluster-wide and our spec
+	// sets providerClusterID, so the tenant-namespace derivation is
+	// skipped); keeping the federation-autoscaler-owned VirtualNodeState
+	// out of the liqo namespace avoids confusing it with Liqo's own CRs
+	// during triage.
 	Namespace string
 
 	// Logger is the structured logger every consumer goroutine logs
@@ -118,7 +128,7 @@ func Run(ctx context.Context, opts Options) error {
 	}
 	namespace := opts.Namespace
 	if namespace == "" {
-		namespace = "liqo"
+		namespace = "federation-autoscaler-system"
 	}
 
 	opts.Registry.RegisterReservation(
