@@ -24,36 +24,59 @@
         sh -
     creates: /usr/local/bin/k3s
 
+# Fresh installs already mint a serving cert with --tls-san={{ ansible_host }}.
+# But the install above is `creates:`-guarded, so an ALREADY-installed node
+# whose IP changed keeps a cert minted for the OLD ip — every kubectl from
+# the control host would then fail x509 ("certificate is valid for <old>, not
+# <new>"). Detect that drift and rotate the serving cert in place, so an IP
+# change never needs a manual wipe+reinstall.
+- name: Detect + repair k3s serving-cert SAN drift after an IP change
+  when: k3s_binary.stat.exists
+  become: true
+  block:
+
+    - name: Read the current apiserver serving-cert SANs
+      ansible.builtin.shell:
+        cmd: |
+          openssl x509 -in /var/lib/rancher/k3s/server/tls/serving-kube-apiserver.crt \
+            -noout -text 2>/dev/null | grep -A1 'Subject Alternative Name' || true
+      register: k3s_cert_sans
+      changed_when: false
+
+    - name: Rotate the serving cert when this host's IP is missing from the SAN list
+      when: "'IP Address:' + ansible_host not in k3s_cert_sans.stdout"
+      block:
+
+        - name: Persist the current host IP as a k3s tls-san
+          ansible.builtin.copy:
+            dest: /etc/rancher/k3s/config.yaml
+            content: |
+              tls-san:
+                - {{ ansible_host }}
+            mode: '0644'
+
+        - name: Remove the stale dynamic serving cert so k3s regenerates it
+          ansible.builtin.file:
+            path: "{{ item }}"
+            state: absent
+          loop:
+            - /var/lib/rancher/k3s/server/tls/serving-kube-apiserver.crt
+            - /var/lib/rancher/k3s/server/tls/serving-kube-apiserver.key
+            - /var/lib/rancher/k3s/server/tls/dynamic-cert.json
+
+        - name: Restart k3s to mint a serving cert that covers the new IP
+          ansible.builtin.systemd:
+            name: k3s
+            state: restarted
+
 - name: Wait for k3s apiserver to become reachable
   ansible.builtin.wait_for:
     host: 127.0.0.1
     port: 6443
     timeout: 120
 
-- name: Make the kubeconfig readable to the ansible_user
-  ansible.builtin.file:
-    path: /etc/rancher/k3s/k3s.yaml
-    mode: '0644'
-  become: true
-
-- name: Slurp the on-cluster kubeconfig
-  ansible.builtin.slurp:
-    src: /etc/rancher/k3s/k3s.yaml
-  register: k3s_kubeconfig_raw
-
-- name: Ensure kubeconfig dir exists on the control host
-  ansible.builtin.file:
-    path: "{{ kubeconfig_dir }}"
-    state: directory
-    mode: '0700'
-  delegate_to: localhost
-  run_once: false
-  become: false
-
-- name: Write kubeconfig to control host with reachable apiserver URL
-  ansible.builtin.copy:
-    content: "{{ k3s_kubeconfig_raw.content | b64decode | regex_replace('https://127.0.0.1:6443', 'https://' + ansible_host + ':6443') }}"
-    dest: "{{ kubeconfig_dir }}/{{ cluster_id }}.yaml"
-    mode: '0600'
-  delegate_to: localhost
-  become: false
+# Fetch the kubeconfig back to the control host. Shared with the teardown
+# playbook (include_role tasks_from=fetch_kubeconfig) so a changed VM IP
+# is picked up in both flows once the inventory is updated.
+- name: Fetch kubeconfig to the control host
+  ansible.builtin.include_tasks: fetch_kubeconfig.yaml

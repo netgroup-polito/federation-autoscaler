@@ -60,8 +60,12 @@ var _ = Describe("Step 11 end-to-end: Peer → VirtualNodeState → reconciler �
 		providerCluster = "provider-11f"
 		consumerCluster = "consumer-11f"
 		reservationID   = "res-11f"
-		liqoVNName      = "rs-res-11f"
-		nodeGroupID     = "ng-provider-11f-standard"
+		// The VNS reconciler correlates by the cluster-scoped v1.Node
+		// named after the provider's Liqo cluster ID (== Spec.
+		// ProviderLiqoClusterID), which is what Liqo names it. The stub
+		// node below uses this name so the projection resolves.
+		liqoVNName  = "liqo-" + providerCluster
+		nodeGroupID = "ng-provider-11f-standard"
 	)
 
 	AfterEach(func() {
@@ -155,9 +159,10 @@ var _ = Describe("Step 11 end-to-end: Peer → VirtualNodeState → reconciler �
 		Expect(vns.Spec.ReservationID).To(Equal(reservationID))
 
 		By("simulating Liqo materialising the VirtualNode + v1.Node")
-		// Liqo VirtualNode carries the reservation label so the
-		// reconciler's watch map-func enqueues the right VNS even
-		// before Status.VirtualNodeName has been cached.
+		// The VirtualNode CR is created for fidelity with a real cluster,
+		// but the reconciler now correlates purely off the cluster-scoped
+		// v1.Node below (named after the provider's Liqo cluster ID); the
+		// CR itself is no longer read.
 		vn := &unstructured.Unstructured{}
 		vn.SetGroupVersionKind(liqoVirtualNodeGVK)
 		vn.SetName(liqoVNName)
@@ -183,6 +188,11 @@ var _ = Describe("Step 11 end-to-end: Peer → VirtualNodeState → reconciler �
 			ObjectMeta: metav1.ObjectMeta{Name: liqoVNName},
 		}
 		Expect(k8sClient.Create(suiteCtx, node)).To(Succeed())
+		// Ready condition + allocatable: the reconciler derives Phase=Running
+		// from the node's Ready condition and projects its allocatable.
+		node.Status.Conditions = []corev1.NodeCondition{
+			{Type: corev1.NodeReady, Status: corev1.ConditionTrue},
+		}
 		node.Status.Allocatable = corev1.ResourceList{
 			corev1.ResourceCPU:    resource.MustParse("4"),
 			corev1.ResourceMemory: resource.MustParse("7800Mi"),

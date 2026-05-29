@@ -39,14 +39,6 @@ rules:
   verbs:
   - update
 - apiGroups:
-  - offloading.liqo.io
-  resources:
-  - virtualnodes
-  verbs:
-  - get
-  - list
-  - watch
-- apiGroups:
   - ""
   resources:
   - nodes

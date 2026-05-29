@@ -25,7 +25,6 @@ import (
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
@@ -35,6 +34,10 @@ import (
 
 var _ = Describe("VirtualNodeState Controller", func() {
 	const namespace = "default"
+	// The reconciler correlates by the cluster-scoped v1.Node named after
+	// the provider's Liqo cluster ID — this is what newVNS sets and what
+	// Liqo names the node in a real deployment.
+	const providerLiqoID = "liqo-provider-test"
 
 	ctx := context.Background()
 
@@ -54,7 +57,7 @@ var _ = Describe("VirtualNodeState Controller", func() {
 			ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: namespace},
 			Spec: autoscalingv1alpha1.VirtualNodeStateSpec{
 				ProviderClusterID:     "provider-test",
-				ProviderLiqoClusterID: "liqo-provider-test",
+				ProviderLiqoClusterID: providerLiqoID,
 				NodeGroupID:           "provider-test-standard",
 				ChunkIndex:            0,
 				ReservationID:         reservationID,
@@ -66,25 +69,27 @@ var _ = Describe("VirtualNodeState Controller", func() {
 		}
 	}
 
-	newLiqoVirtualNode := func(name, reservationID string, nodeStatus string) *unstructured.Unstructured {
-		vn := &unstructured.Unstructured{}
-		vn.SetGroupVersionKind(LiqoVirtualNodeGVK)
-		vn.SetName(name)
-		vn.SetNamespace(namespace)
-		vn.SetLabels(map[string]string{ReservationLabel: reservationID})
-		_ = unstructured.SetNestedField(vn.Object, map[string]interface{}{
-			"clusterID": "liqo-provider-test",
-		}, "spec")
-		if nodeStatus != "" {
-			conds := []interface{}{
-				map[string]interface{}{"type": "Node", "status": nodeStatus},
-			}
-			_ = unstructured.SetNestedSlice(vn.Object, conds, "status", "conditions")
+	// newVirtualNode builds the cluster-scoped v1.Node Liqo would create
+	// for the peering (named after the provider's Liqo cluster ID), with
+	// the given Ready status and allocatable.
+	newVirtualNode := func(name string, ready bool, alloc corev1.ResourceList) *corev1.Node {
+		st := corev1.ConditionFalse
+		if ready {
+			st = corev1.ConditionTrue
 		}
-		return vn
+		return &corev1.Node{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:   name,
+				Labels: map[string]string{"liqo.io/type": "virtual-node"},
+			},
+			Status: corev1.NodeStatus{
+				Conditions:  []corev1.NodeCondition{{Type: corev1.NodeReady, Status: st}},
+				Allocatable: alloc,
+			},
+		}
 	}
 
-	Context("when no Liqo VirtualNode exists yet", func() {
+	Context("when no Liqo virtual node exists yet", func() {
 		const name, resv = "vns-empty", "resv-empty"
 
 		BeforeEach(func() {
@@ -110,25 +115,16 @@ var _ = Describe("VirtualNodeState Controller", func() {
 		})
 	})
 
-	Context("when a Liqo VirtualNode is Running and the v1.Node has allocatable", func() {
+	Context("when the Liqo v1.Node is Ready with allocatable", func() {
 		const name, resv = "vns-running", "resv-running"
-		const liqoVNName = "rs-resv-running"
 
 		BeforeEach(func() {
 			Expect(k8sClient.Create(ctx, newVNS(name, resv))).To(Succeed())
-			Expect(k8sClient.Create(ctx, newLiqoVirtualNode(liqoVNName, resv, "Running"))).To(Succeed())
-			// Patch status separately — envtest enforces the status subresource.
-			vn := newLiqoVirtualNode(liqoVNName, resv, "Running")
-			Expect(k8sClient.Get(ctx, types.NamespacedName{Name: liqoVNName, Namespace: namespace}, vn)).To(Succeed())
-			_ = unstructured.SetNestedSlice(vn.Object, []interface{}{
-				map[string]interface{}{"type": "Node", "status": "Running"},
-			}, "status", "conditions")
-			Expect(k8sClient.Status().Update(ctx, vn)).To(Succeed())
-
-			node := &corev1.Node{
-				ObjectMeta: metav1.ObjectMeta{Name: liqoVNName},
-			}
+			node := newVirtualNode(providerLiqoID, false, nil)
 			Expect(k8sClient.Create(ctx, node)).To(Succeed())
+			// Status is a subresource — set it separately.
+			Expect(k8sClient.Get(ctx, types.NamespacedName{Name: providerLiqoID}, node)).To(Succeed())
+			node.Status.Conditions = []corev1.NodeCondition{{Type: corev1.NodeReady, Status: corev1.ConditionTrue}}
 			node.Status.Allocatable = corev1.ResourceList{
 				corev1.ResourceCPU:    resource.MustParse("4"),
 				corev1.ResourceMemory: resource.MustParse("8Gi"),
@@ -138,12 +134,7 @@ var _ = Describe("VirtualNodeState Controller", func() {
 		AfterEach(func() {
 			vns := &autoscalingv1alpha1.VirtualNodeState{ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: namespace}}
 			Expect(client.IgnoreNotFound(k8sClient.Delete(ctx, vns))).To(Succeed())
-			vn := &unstructured.Unstructured{}
-			vn.SetGroupVersionKind(LiqoVirtualNodeGVK)
-			vn.SetName(liqoVNName)
-			vn.SetNamespace(namespace)
-			Expect(client.IgnoreNotFound(k8sClient.Delete(ctx, vn))).To(Succeed())
-			node := &corev1.Node{ObjectMeta: metav1.ObjectMeta{Name: liqoVNName}}
+			node := &corev1.Node{ObjectMeta: metav1.ObjectMeta{Name: providerLiqoID}}
 			Expect(client.IgnoreNotFound(k8sClient.Delete(ctx, node))).To(Succeed())
 		})
 
@@ -153,7 +144,7 @@ var _ = Describe("VirtualNodeState Controller", func() {
 			got := &autoscalingv1alpha1.VirtualNodeState{}
 			Expect(k8sClient.Get(ctx, types.NamespacedName{Name: name, Namespace: namespace}, got)).To(Succeed())
 			Expect(got.Status.Phase).To(Equal(autoscalingv1alpha1.VirtualNodeStatePhaseRunning))
-			Expect(got.Status.VirtualNodeName).To(Equal(liqoVNName))
+			Expect(got.Status.VirtualNodeName).To(Equal(providerLiqoID))
 			Expect(got.Status.Allocatable).To(HaveKeyWithValue(corev1.ResourceCPU, resource.MustParse("4")))
 			Expect(got.Status.Allocatable).To(HaveKeyWithValue(corev1.ResourceMemory, resource.MustParse("8Gi")))
 			Expect(got.Status.Conditions).To(ContainElement(SatisfyAll(
@@ -163,74 +154,34 @@ var _ = Describe("VirtualNodeState Controller", func() {
 		})
 	})
 
-	Context("when a Liqo VirtualNode reports an unexpected Node condition", func() {
-		const name, resv = "vns-fail", "resv-fail"
-		const liqoVNName = "rs-resv-fail"
+	Context("when the v1.Node exists but is not Ready", func() {
+		const name, resv = "vns-notready", "resv-notready"
 
 		BeforeEach(func() {
 			Expect(k8sClient.Create(ctx, newVNS(name, resv))).To(Succeed())
-			Expect(k8sClient.Create(ctx, newLiqoVirtualNode(liqoVNName, resv, "Bogus"))).To(Succeed())
-			vn := newLiqoVirtualNode(liqoVNName, resv, "Bogus")
-			Expect(k8sClient.Get(ctx, types.NamespacedName{Name: liqoVNName, Namespace: namespace}, vn)).To(Succeed())
-			_ = unstructured.SetNestedSlice(vn.Object, []interface{}{
-				map[string]interface{}{"type": "Node", "status": "Bogus"},
-			}, "status", "conditions")
-			Expect(k8sClient.Status().Update(ctx, vn)).To(Succeed())
+			node := newVirtualNode(providerLiqoID, false, nil)
+			Expect(k8sClient.Create(ctx, node)).To(Succeed())
 		})
 		AfterEach(func() {
 			vns := &autoscalingv1alpha1.VirtualNodeState{ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: namespace}}
 			Expect(client.IgnoreNotFound(k8sClient.Delete(ctx, vns))).To(Succeed())
-			vn := &unstructured.Unstructured{}
-			vn.SetGroupVersionKind(LiqoVirtualNodeGVK)
-			vn.SetName(liqoVNName)
-			vn.SetNamespace(namespace)
-			Expect(client.IgnoreNotFound(k8sClient.Delete(ctx, vn))).To(Succeed())
+			node := &corev1.Node{ObjectMeta: metav1.ObjectMeta{Name: providerLiqoID}}
+			Expect(client.IgnoreNotFound(k8sClient.Delete(ctx, node))).To(Succeed())
 		})
 
-		It("flags Phase=Failed and a Failed condition", func() {
+		It("reports Phase=Creating with the node name recorded and no allocatable", func() {
 			reconcileOnce(name)
 
 			got := &autoscalingv1alpha1.VirtualNodeState{}
 			Expect(k8sClient.Get(ctx, types.NamespacedName{Name: name, Namespace: namespace}, got)).To(Succeed())
-			Expect(got.Status.Phase).To(Equal(autoscalingv1alpha1.VirtualNodeStatePhaseFailed))
+			Expect(got.Status.Phase).To(Equal(autoscalingv1alpha1.VirtualNodeStatePhaseCreating))
+			Expect(got.Status.VirtualNodeName).To(Equal(providerLiqoID))
 			Expect(got.Status.Allocatable).To(BeEmpty())
-			Expect(got.Status.Conditions).To(ContainElement(SatisfyAll(
-				HaveField("Type", autoscalingv1alpha1.VirtualNodeStateConditionFailed),
-				HaveField("Status", metav1.ConditionTrue),
-			)))
 		})
 	})
 
-	Context("when the VirtualNodeName was cached but the VirtualNode has been deleted", func() {
-		const name, resv = "vns-gone", "resv-gone"
-		const liqoVNName = "rs-resv-gone"
-
-		BeforeEach(func() {
-			vns := newVNS(name, resv)
-			Expect(k8sClient.Create(ctx, vns)).To(Succeed())
-			// Pre-populate the status pointer so the reconciler skips
-			// label-discovery and goes straight to a missing Get.
-			vns.Status.VirtualNodeName = liqoVNName
-			Expect(k8sClient.Status().Update(ctx, vns)).To(Succeed())
-		})
-		AfterEach(func() {
-			vns := &autoscalingv1alpha1.VirtualNodeState{ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: namespace}}
-			Expect(client.IgnoreNotFound(k8sClient.Delete(ctx, vns))).To(Succeed())
-		})
-
-		It("transitions to Phase=Deleting", func() {
-			reconcileOnce(name)
-
-			got := &autoscalingv1alpha1.VirtualNodeState{}
-			Expect(k8sClient.Get(ctx, types.NamespacedName{Name: name, Namespace: namespace}, got)).To(Succeed())
-			Expect(got.Status.Phase).To(Equal(autoscalingv1alpha1.VirtualNodeStatePhaseDeleting))
-		})
-	})
-
-	Context("requestsForVirtualNode (Liqo VN watch map-func)", func() {
-		const namespace = "default"
-
-		It("enqueues a VNS by reservation label match", func() {
+	Context("requestsForNode (v1.Node watch map-func)", func() {
+		It("enqueues a VNS whose ProviderLiqoClusterID matches the node name", func() {
 			Expect(k8sClient.Create(ctx, newVNS("vns-watch-1", "resv-watch-1"))).To(Succeed())
 			DeferCleanup(func() {
 				_ = k8sClient.Delete(ctx, &autoscalingv1alpha1.VirtualNodeState{
@@ -238,61 +189,25 @@ var _ = Describe("VirtualNodeState Controller", func() {
 			})
 
 			r := &VirtualNodeStateReconciler{Client: k8sClient, Scheme: k8sClient.Scheme()}
-			vn := newLiqoVirtualNode("rs-resv-watch-1", "resv-watch-1", "")
-			reqs := r.requestsForVirtualNode(ctx, vn)
-			Expect(reqs).To(ConsistOf(reconcile.Request{
+			node := newVirtualNode(providerLiqoID, true, nil)
+			reqs := r.requestsForNode(ctx, node)
+			Expect(reqs).To(ContainElement(reconcile.Request{
 				NamespacedName: types.NamespacedName{Name: "vns-watch-1", Namespace: namespace},
 			}))
 		})
 
-		It("enqueues a VNS by cached Status.VirtualNodeName when no label is present", func() {
-			vns := newVNS("vns-watch-2", "resv-watch-2")
-			Expect(k8sClient.Create(ctx, vns)).To(Succeed())
-			vns.Status.VirtualNodeName = "stamped-name"
-			Expect(k8sClient.Status().Update(ctx, vns)).To(Succeed())
+		It("returns no requests when no VNS targets that node", func() {
+			Expect(k8sClient.Create(ctx, newVNS("vns-watch-2", "resv-watch-2"))).To(Succeed())
 			DeferCleanup(func() {
 				_ = k8sClient.Delete(ctx, &autoscalingv1alpha1.VirtualNodeState{
 					ObjectMeta: metav1.ObjectMeta{Name: "vns-watch-2", Namespace: namespace}})
 			})
 
 			r := &VirtualNodeStateReconciler{Client: k8sClient, Scheme: k8sClient.Scheme()}
-			vn := &unstructured.Unstructured{}
-			vn.SetGroupVersionKind(LiqoVirtualNodeGVK)
-			vn.SetName("stamped-name")
-			vn.SetNamespace(namespace)
-			// No reservation label — name-match must rescue.
-			reqs := r.requestsForVirtualNode(ctx, vn)
-			Expect(reqs).To(ConsistOf(reconcile.Request{
+			node := newVirtualNode("some-unrelated-node", true, nil)
+			Expect(r.requestsForNode(ctx, node)).NotTo(ContainElement(reconcile.Request{
 				NamespacedName: types.NamespacedName{Name: "vns-watch-2", Namespace: namespace},
 			}))
-		})
-
-		It("returns no requests when neither route matches", func() {
-			Expect(k8sClient.Create(ctx, newVNS("vns-watch-3", "resv-watch-3"))).To(Succeed())
-			DeferCleanup(func() {
-				_ = k8sClient.Delete(ctx, &autoscalingv1alpha1.VirtualNodeState{
-					ObjectMeta: metav1.ObjectMeta{Name: "vns-watch-3", Namespace: namespace}})
-			})
-
-			r := &VirtualNodeStateReconciler{Client: k8sClient, Scheme: k8sClient.Scheme()}
-			vn := newLiqoVirtualNode("rs-orphan", "resv-unrelated", "")
-			Expect(r.requestsForVirtualNode(ctx, vn)).To(BeEmpty())
-		})
-
-		It("deduplicates when label and cached name both point at the same VNS", func() {
-			vns := newVNS("vns-watch-4", "resv-watch-4")
-			Expect(k8sClient.Create(ctx, vns)).To(Succeed())
-			vns.Status.VirtualNodeName = "rs-resv-watch-4"
-			Expect(k8sClient.Status().Update(ctx, vns)).To(Succeed())
-			DeferCleanup(func() {
-				_ = k8sClient.Delete(ctx, &autoscalingv1alpha1.VirtualNodeState{
-					ObjectMeta: metav1.ObjectMeta{Name: "vns-watch-4", Namespace: namespace}})
-			})
-
-			r := &VirtualNodeStateReconciler{Client: k8sClient, Scheme: k8sClient.Scheme()}
-			vn := newLiqoVirtualNode("rs-resv-watch-4", "resv-watch-4", "")
-			reqs := r.requestsForVirtualNode(ctx, vn)
-			Expect(reqs).To(HaveLen(1))
 		})
 	})
 

@@ -182,6 +182,25 @@ rules:
   - patch
   - update
 # --- Liqo CRs (consumer role) -------------------------------------------
+# `liqoctl unpeer` starts with a "bidirectional peering check" that LISTS
+# foreignclusters.core.liqo.io at cluster scope; without this the Unpeer
+# instruction fails with "foreignclusters... is forbidden" and the
+# reservation goes Failed instead of Released (scale-down breaks). peer
+# does not touch foreignclusters, which is why scale-UP worked without
+# this rule. unpeer reads (not deletes) them; we grant the full verb set
+# to stay ahead of teardown paths that may update/remove them.
+- apiGroups:
+  - core.liqo.io
+  resources:
+  - foreignclusters
+  verbs:
+  - get
+  - list
+  - watch
+  - create
+  - update
+  - patch
+  - delete
 - apiGroups:
   - authentication.liqo.io
   resources:

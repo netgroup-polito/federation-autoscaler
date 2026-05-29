@@ -13,6 +13,20 @@
 # Order matters: PKI must be in place before the agents start, agents
 # must be up before CA dials the gRPC server.
 
+# Re-sync each cluster's kubeconfig from the live node using the current
+# inventory IP, so a changed VM IP (with the inventory updated) doesn't
+# make every kubectl call below hang dialing the old address. Same task
+# the bootstrap uses; safe no-op when nothing changed.
+- name: Refresh kubeconfigs from live nodes (handles changed VM IPs)
+  hosts: all
+  gather_facts: false
+  become: false
+  tasks:
+    - name: Re-fetch {{ cluster_id }} kubeconfig with its current inventory IP
+      ansible.builtin.include_role:
+        name: k3s_install
+        tasks_from: fetch_kubeconfig
+
 - name: Deploy broker on central
   hosts: central
   gather_facts: false

@@ -71,6 +71,7 @@ func main() {
 		apiTLSClientCAFile string
 		apiShutdownTimeout time.Duration
 		apiNamespace       string
+		reservationTimeout time.Duration
 	)
 	flag.StringVar(&apiBindAddress, "api-bind-address", ":8443",
 		"host:port for the Broker REST API HTTPS listener.")
@@ -84,6 +85,10 @@ func main() {
 		"Max time to wait for in-flight HTTP requests to drain on shutdown.")
 	flag.StringVar(&apiNamespace, "namespace", "federation-autoscaler-system",
 		"Namespace where Broker-owned CRs (ClusterAdvertisement, Reservation, *Instruction) are stored.")
+	flag.DurationVar(&reservationTimeout, "reservation-timeout", 24*time.Hour,
+		"Deadline stamped on a new Reservation's ExpiresAt. A non-renewed reservation past this "+
+			"is moved to Expired. v1 has no renewal, so keep this longer than any workload that "+
+			"holds borrowed capacity (the old 15m value force-expired active reservations).")
 
 	flag.Parse()
 
@@ -134,9 +139,10 @@ func main() {
 			KeyFile:      apiTLSKeyFile,
 			ClientCAFile: apiTLSClientCAFile,
 		},
-		ShutdownTimeout: apiShutdownTimeout,
-		Client:          mgr.GetClient(),
-		Namespace:       apiNamespace,
+		ShutdownTimeout:    apiShutdownTimeout,
+		Client:             mgr.GetClient(),
+		Namespace:          apiNamespace,
+		ReservationTimeout: reservationTimeout,
 	})
 	if err != nil {
 		setupLog.Error(err, "unable to build broker api server")

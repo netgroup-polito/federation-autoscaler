@@ -5,6 +5,19 @@
 # prints a small banner so the audience can follow along live. Failures
 # fail the playbook with a clear message.
 
+# Re-sync kubeconfigs first so a changed VM IP (inventory updated) doesn't
+# make the kubectl checks below hang on the old address. Safe no-op when
+# nothing changed.
+- name: Refresh kubeconfigs from live nodes (handles changed VM IPs)
+  hosts: all
+  gather_facts: false
+  become: false
+  tasks:
+    - name: Re-fetch {{ cluster_id }} kubeconfig with its current inventory IP
+      ansible.builtin.include_role:
+        name: k3s_install
+        tasks_from: fetch_kubeconfig
+
 - name: Verify federation health
   hosts: central
   gather_facts: false

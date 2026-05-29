@@ -20,6 +20,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"time"
 
 	"github.com/go-logr/logr"
 	ctrl "sigs.k8s.io/controller-runtime"
@@ -37,11 +38,12 @@ import (
 // kubeconfig, and does not bind a TCP socket. The cmd/broker binary wraps it
 // in a controller-runtime Runnable in step 4e.
 type Server struct {
-	log       logr.Logger
-	client    client.Client
-	namespace string
-	sizer     chunk.Sizer
-	consumers *ConsumerRegistry
+	log                logr.Logger
+	client             client.Client
+	namespace          string
+	sizer              chunk.Sizer
+	consumers          *ConsumerRegistry
+	reservationTimeout time.Duration
 }
 
 // ServerOptions bundles the construction-time settings of a Server. Empty
@@ -64,6 +66,19 @@ type ServerOptions struct {
 	// Sizer translates an advertised resource list into chunks. Defaults to
 	// chunk.DefaultSizer (hard-coded design fallbacks).
 	Sizer chunk.Sizer
+
+	// ReservationTimeout is the deadline stamped on a new Reservation's
+	// Status.ExpiresAt. A non-renewed reservation past this deadline is
+	// moved to Expired by the reconciler. Zero falls back to
+	// defaultReservationTimeout.
+	//
+	// NOTE: v1 has no renewal mechanism — the deadline is fixed at
+	// creation, so this MUST be generous enough to outlast any workload
+	// that legitimately holds borrowed capacity (see
+	// docs/design.md / future work: reservation renewal). The 15-min
+	// origin value force-expired active reservations and is not safe as a
+	// default.
+	ReservationTimeout time.Duration
 }
 
 // NewServer returns a Server ready to serve traffic via Handler(). Panics if
@@ -84,12 +99,17 @@ func NewServer(opts ServerOptions) *Server {
 	if sizer == nil {
 		sizer = chunk.NewDefaultSizer()
 	}
+	resvTimeout := opts.ReservationTimeout
+	if resvTimeout <= 0 {
+		resvTimeout = defaultReservationTimeout
+	}
 	return &Server{
-		log:       log,
-		client:    opts.Client,
-		namespace: opts.Namespace,
-		sizer:     sizer,
-		consumers: NewConsumerRegistry(),
+		log:                log,
+		client:             opts.Client,
+		namespace:          opts.Namespace,
+		sizer:              sizer,
+		consumers:          NewConsumerRegistry(),
+		reservationTimeout: resvTimeout,
 	}
 }
 

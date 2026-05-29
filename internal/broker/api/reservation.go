@@ -35,18 +35,21 @@ import (
 	brokerv1alpha1 "github.com/netgroup-polito/federation-autoscaler/api/broker/v1alpha1"
 )
 
-// defaultReservationTimeout is the deadline by which a reservation must
-// reach Peered (docs/design.md §6 — chunk-config ConfigMap default).
-// Step 4h surfaces the ConfigMap-backed value; 4g hard-codes it.
+// defaultReservationTimeout is the fallback deadline stamped on a new
+// Reservation's Status.ExpiresAt when ServerOptions.ReservationTimeout
+// is unset. A non-renewed reservation past this deadline is moved to
+// Expired by the reconciler.
 //
-// Bumped from the docs default of 5m because the consumer-side
-// `liqoctl peer` regularly takes 3-5 min on constrained CI hosts
-// (gateway Pod pull + start, WireGuard handshake, Service creation,
-// Identity CR materialization). At 5m we'd see Reservations Expire
-// just as they're about to reach Peered — the peer timeout was the
-// real bottleneck, but the reservation deadline is what flips the
-// phase to Expired and triggers a chunk-release + cleanup cascade.
-const defaultReservationTimeout = 15 * time.Minute
+// IMPORTANT: v1 has NO renewal mechanism — the deadline is fixed at
+// creation and the consumer heartbeat does not extend it. So this must
+// outlast any workload that legitimately holds borrowed capacity, NOT
+// merely the time-to-Peered. The original 15-min value (chosen only to
+// cover the 3-5 min `liqoctl peer` window) force-expired ACTIVE
+// reservations — Cluster-Autoscaler-driven scale-down never got to run
+// because expiry reached the terminal phase first. 24h is a safe
+// non-renewing default; tune via --reservation-timeout. Proper renewal
+// is tracked as future work (see docs/design.md / memory).
+const defaultReservationTimeout = 24 * time.Hour
 
 // nodeGroupID returns the canonical node-group identifier the Broker
 // surfaces to consumers (`ng-<provider>-<chunkType>`). Used to validate the
@@ -303,7 +306,7 @@ func (s *Server) perChunkResources(cadv *brokerv1alpha1.ClusterAdvertisement) co
 // the response body has a deterministic shape from request #1 onwards.
 func (s *Server) initReservationStatus(ctx context.Context, resv *brokerv1alpha1.Reservation) error {
 	now := metav1.Now()
-	expires := metav1.NewTime(now.Add(defaultReservationTimeout))
+	expires := metav1.NewTime(now.Add(s.reservationTimeout))
 	resv.Status = brokerv1alpha1.ReservationStatus{
 		ObservedGeneration: resv.Generation,
 		Phase:              brokerv1alpha1.ReservationPhasePending,

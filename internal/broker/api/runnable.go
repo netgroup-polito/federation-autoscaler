@@ -70,6 +70,10 @@ type RunnableOptions struct {
 	// Sizer is the policy used by handlers to split an advertisement into
 	// chunks. Defaults to chunk.DefaultSizer.
 	Sizer chunk.Sizer
+
+	// ReservationTimeout is the deadline stamped on new Reservations'
+	// Status.ExpiresAt. Zero falls back to defaultReservationTimeout.
+	ReservationTimeout time.Duration
 }
 
 // Runnable adapts the Broker's HTTP Server to the manager.Runnable interface
@@ -109,10 +113,11 @@ func NewRunnable(opts RunnableOptions) (*Runnable, error) {
 	}
 
 	srv := NewServer(ServerOptions{
-		Logger:    log,
-		Client:    opts.Client,
-		Namespace: opts.Namespace,
-		Sizer:     opts.Sizer,
+		Logger:             log,
+		Client:             opts.Client,
+		Namespace:          opts.Namespace,
+		Sizer:              opts.Sizer,
+		ReservationTimeout: opts.ReservationTimeout,
 	})
 
 	httpSrv := &http.Server{

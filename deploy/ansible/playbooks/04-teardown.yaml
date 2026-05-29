@@ -1,95 +1,46 @@
 ---
-# 04-teardown.yaml
+# 04-teardown.yaml — full, reliable clean slate (k3s wipe).
 #
-# Removes federation-autoscaler from every cluster, then uninstalls Liqo.
-# Leaves k3s + cert-manager in place — uninstalling k3s itself is
-# destructive (drops PVs, host iptables rules); do it manually with
-# `/usr/local/bin/k3s-uninstall.sh` on each VM if you want a clean box.
+# Wipes k3s on every host, which removes ALL cluster state in one shot:
+# Liqo (peerings, tenants, authentication, offloading), cert-manager,
+# the federation-autoscaler namespace + CRDs, and every workload. Then
+# it removes the control-host kubeconfigs so 01-bootstrap re-fetches them
+# fresh with the current inventory IPs.
 #
-# Order matters:
-#   1. Unpeer every consumer→provider tunnel BEFORE removing anything
-#      else. `liqoctl uninstall` blocks indefinitely on an active peering
-#      because the Liqo gateway/Tenant CRs hold finalizers; the namespace
-#      delete in step 2 also stalls if a ResourceSlice still references
-#      a foreign cluster. We tolerate "not peered" / "not found" as
-#      success so a partial-state cluster doesn't break the playbook.
-#   2. Delete the federation-autoscaler namespace + CRDs.
-#   3. `liqoctl uninstall --purge` on every host.
+# Why a wipe instead of a graceful `liqoctl unpeer`/`uninstall` teardown:
+# Liqo's uninstall pre-checks refuse to proceed while any peering,
+# authentication, or namespace offloading remains, and untangling that
+# reliably (especially after an interrupted run or a VM IP change) proved
+# brittle and kept needing manual intervention. Wiping k3s never runs
+# liqoctl, so there is nothing to get stuck on — it always succeeds.
+#
+# Fully hands-off. The clean cycle is:
+#   04-teardown → 01-bootstrap → 02-deploy → 03-verify
+# then drive scale-up / scale-down with kubectl apply/delete of the
+# sample workload. No manual kubectl / liqoctl / k3s commands anywhere.
+#
+# NOTE: this is destructive by design (drops the whole k3s node, including
+# any PVs and host iptables rules). On the demo VMs that is exactly what
+# we want; do NOT point this at a cluster whose k3s you need to keep.
 
-- name: Unpeer every consumer→provider tunnel
-  hosts: consumers
-  gather_facts: false
-  become: false
-  tasks:
-
-    - name: liqoctl unpeer {{ cluster_id }} from each provider
-      delegate_to: localhost
-      ansible.builtin.shell:
-        cmd: |
-          KUBECONFIG={{ cluster_kubeconfig }} liqoctl unpeer \
-            --remote-kubeconfig {{ kubeconfig_dir }}/{{ hostvars[item].cluster_id }}.yaml \
-            --skip-confirm --timeout 2m || true
-      loop: "{{ groups['providers'] }}"
-      changed_when: true
-
-    - name: Wait for virtual nodes to disappear on {{ cluster_id }}
-      delegate_to: localhost
-      ansible.builtin.shell:
-        cmd: |
-          kubectl --kubeconfig {{ cluster_kubeconfig }} get nodes \
-            -l liqo.io/type=virtual-node -o name 2>/dev/null | wc -l
-      register: vn_count
-      until: vn_count.stdout | int == 0
-      retries: 30
-      delay: 5
-      changed_when: false
-
-- name: Tear down federation-autoscaler resources
+- name: Wipe k3s on every host (full clean slate)
   hosts: all
   gather_facts: false
-  become: false
+  become: true
   tasks:
 
-    - name: Delete federation-autoscaler resources from the {{ fa_namespace }} namespace
-      delegate_to: localhost
+    # k3s-uninstall.sh stops k3s and removes the binary, all CRs/CRDs,
+    # CNI, and iptables rules. `|| true` tolerates a host where k3s is
+    # already gone (the script removes itself on success), so re-runs and
+    # partially-wiped fleets don't fail.
+    - name: Run k3s-uninstall.sh ({{ cluster_id }})
       ansible.builtin.shell:
-        cmd: |
-          kubectl --kubeconfig {{ cluster_kubeconfig }} delete namespace {{ fa_namespace }} \
-            --ignore-not-found --wait=false
+        cmd: "/usr/local/bin/k3s-uninstall.sh || true"
       changed_when: true
 
-    - name: Delete federation-autoscaler CRDs
+    - name: Remove the stale control-host kubeconfig for {{ cluster_id }}
       delegate_to: localhost
-      ansible.builtin.shell:
-        cmd: |
-          kubectl --kubeconfig {{ cluster_kubeconfig }} delete -k {{ fa_repo_root }}/config/crd \
-            --ignore-not-found --wait=false
-      changed_when: true
-
-- name: Uninstall Liqo
-  hosts: all
-  gather_facts: false
-  become: false
-  tasks:
-
-    # Skip the uninstall when Liqo isn't installed (the `liqo` namespace
-    # is gone). This makes the play idempotent — re-running teardown
-    # after a successful run or after a manual `liqoctl uninstall`
-    # doesn't fail with "could not find foreignclusters.core.liqo.io".
-    - name: Check whether Liqo is installed on {{ cluster_id }}
-      delegate_to: localhost
-      ansible.builtin.shell:
-        cmd: |
-          kubectl --kubeconfig {{ cluster_kubeconfig }} get namespace liqo \
-            --ignore-not-found -o name
-      register: liqo_ns
-      changed_when: false
-
-    - name: liqoctl uninstall
-      delegate_to: localhost
-      ansible.builtin.shell:
-        cmd: |
-          KUBECONFIG={{ cluster_kubeconfig }} liqoctl uninstall \
-            --purge --skip-confirm --timeout 5m
-      when: liqo_ns.stdout | length > 0
-      changed_when: true
+      become: false
+      ansible.builtin.file:
+        path: "{{ cluster_kubeconfig }}"
+        state: absent
