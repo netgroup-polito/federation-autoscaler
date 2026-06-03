@@ -165,6 +165,23 @@ func NewPeerHandler(cfg PeerConfig) poller.HandlerFunc {
 			"--remote-kubeconfig", kubeconfigPath,
 			"--gw-server-service-type", "NodePort",
 		}
+		// Size the borrowed VirtualNode to exactly the reserved chunk.
+		// `liqoctl peer` creates (and Liqo accepts) its own ResourceSlice
+		// for the peering; left unconstrained it grants the provider's
+		// FULL allocatable, so the materialised virtual node is the whole
+		// provider instead of one chunk. The scheduler then over-packs
+		// that oversized node (stranding pods that are already bound) and
+		// Cluster Autoscaler — which plans against the chunk-sized node
+		// template — over-provisions (grabs N nodes, needs fewer, releases
+		// the rest). Passing --cpu/--memory from the reservation's chunk
+		// makes the node match what the broker advertised. See
+		// docs/design.md §6 and the liqoctl peer --cpu/--memory flags.
+		if cpu := in.ResourceSliceResources.Cpu(); cpu != nil && !cpu.IsZero() {
+			args = append(args, "--cpu", cpu.String())
+		}
+		if mem := in.ResourceSliceResources.Memory(); mem != nil && !mem.IsZero() {
+			args = append(args, "--memory", mem.String())
+		}
 		logger.V(1).Info("running liqoctl", "path", cfg.LiqoctlPath, "args", args)
 		_, stderr, err := cfg.Run(execCtx, cfg.LiqoctlPath, args...)
 		if err != nil {

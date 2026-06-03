@@ -95,14 +95,6 @@ var _ = Describe("Reservation Controller", func() {
 
 	AfterEach(func() {
 		By("cleaning up Reservation + emitted instructions + ClusterAdvertisement")
-		// Delete the parent first; OwnerReferences should garbage-collect
-		// children, but envtest does not run the garbage collector, so we
-		// remove them explicitly to keep specs isolated.
-		_ = k8sClient.DeleteAllOf(ctx, &autoscalingv1alpha1.ProviderInstruction{},
-			client.InNamespace("default"))
-		_ = k8sClient.DeleteAllOf(ctx, &autoscalingv1alpha1.ReservationInstruction{},
-			client.InNamespace("default"))
-
 		// Delete every Reservation in the namespace (some specs create
 		// sibling reservations for bug #5). ReservationFinalizer holds
 		// each object until a reconcile credits chunks back and removes
@@ -128,6 +120,16 @@ var _ = Describe("Reservation Controller", func() {
 			}
 			return len(remaining.Items) == 0
 		}).Should(BeTrue())
+
+		// Delete emitted instructions AFTER the reservation drain — the
+		// deletion path itself emits an un-owned consumer Cleanup
+		// instruction, so clearing instructions first would leave that one
+		// behind to pollute the next spec. envtest runs no GC, so we
+		// remove them explicitly here.
+		_ = k8sClient.DeleteAllOf(ctx, &autoscalingv1alpha1.ProviderInstruction{},
+			client.InNamespace("default"))
+		_ = k8sClient.DeleteAllOf(ctx, &autoscalingv1alpha1.ReservationInstruction{},
+			client.InNamespace("default"))
 
 		// Staging kubeconfig Secrets are shared (consumer, provider) and
 		// not owned by any Reservation; remove them explicitly.
@@ -315,6 +317,29 @@ var _ = Describe("Reservation Controller", func() {
 		Expect(list.Items).To(HaveLen(2))
 	})
 
+	It("Expired (peered) → emits a consumer Cleanup so the ResourceSlice/VNS don't leak (bug #7)", func() {
+		By("running Pending so GenerateKubeconfig exists, then seeding the staging Secret (provider work happened)")
+		reconcileOnce()
+		secretName := kubeconfigSecretName("consumer-test", providerName)
+		Expect(k8sClient.Create(ctx, &corev1.Secret{
+			ObjectMeta: metav1.ObjectMeta{Name: secretName, Namespace: "default"},
+			Data:       map[string][]byte{"kubeconfig": []byte("dummy")},
+		})).To(Succeed())
+
+		By("the reservation reaches Expired from a peered state (TTL lapsed, NOT the Unpeering path)")
+		setPhase(ctx, key, brokerv1alpha1.ReservationPhaseExpired)
+		reconcileOnce()
+
+		By("a consumer Cleanup instruction is emitted (un-owned) so the agent tears down its Liqo state")
+		cleanup := &autoscalingv1alpha1.ReservationInstruction{}
+		Expect(k8sClient.Get(ctx, types.NamespacedName{
+			Name: "cleanup-" + resName, Namespace: "default",
+		}, cleanup)).To(Succeed())
+		Expect(cleanup.Spec.Kind).To(Equal(autoscalingv1alpha1.ReservationInstructionCleanup))
+		Expect(cleanup.Spec.TargetClusterID).To(Equal("consumer-test"))
+		Expect(cleanup.OwnerReferences).To(BeEmpty())
+	})
+
 	It("does not emit provider Cleanup when the reservation never reached GeneratingKubeconfig", func() {
 		By("flipping straight from Pending to Failed without ever reconciling Pending")
 		setPhase(ctx, key, brokerv1alpha1.ReservationPhaseFailed)
@@ -323,6 +348,10 @@ var _ = Describe("Reservation Controller", func() {
 		piList := &autoscalingv1alpha1.ProviderInstructionList{}
 		Expect(k8sClient.List(ctx, piList, client.InNamespace("default"))).To(Succeed())
 		Expect(piList.Items).To(BeEmpty())
+		// No consumer Cleanup either — never peered, so nothing to tear down.
+		riList := &autoscalingv1alpha1.ReservationInstructionList{}
+		Expect(k8sClient.List(ctx, riList, client.InNamespace("default"))).To(Succeed())
+		Expect(riList.Items).To(BeEmpty())
 	})
 
 	It("flips a non-terminal Reservation past ExpiresAt to Expired without emitting any instruction", func() {
@@ -374,6 +403,16 @@ var _ = Describe("Reservation Controller", func() {
 		Expect(k8sClient.Get(ctx, cadvKey, updatedCA)).To(Succeed())
 		Expect(updatedCA.Status.ReservedChunks).To(Equal(int32(3)))
 		Expect(updatedCA.Status.AvailableChunks).To(Equal(int32(2)))
+
+		By("a consumer Cleanup instruction was emitted (un-owned) so the agent tears down its Liqo state")
+		cleanup := &autoscalingv1alpha1.ReservationInstruction{}
+		Expect(k8sClient.Get(ctx, types.NamespacedName{
+			Name: "cleanup-" + resName, Namespace: "default",
+		}, cleanup)).To(Succeed())
+		Expect(cleanup.Spec.Kind).To(Equal(autoscalingv1alpha1.ReservationInstructionCleanup))
+		Expect(cleanup.Spec.TargetClusterID).To(Equal("consumer-test"))
+		// Un-owned so it survives the Reservation's deletion.
+		Expect(cleanup.OwnerReferences).To(BeEmpty())
 	})
 
 	It("hard delete does not double-release when chunks were already released", func() {

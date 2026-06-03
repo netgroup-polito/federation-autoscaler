@@ -192,14 +192,23 @@ func firstReadyVirtualNode(rawJSON string) (string, bool, error) {
 //
 // Scope decision: the federation-autoscaler is responsible for getting
 // CA to scale up via the federation and producing a Ready VirtualNode
-// that the scheduler can bind to. Whether the Pod then *runs* depends
-// on Liqo's data plane successfully offloading a shadow Pod to the
-// remote cluster — a separate concern that on Kind-on-shared-network
-// regularly trips on Liqo's WireGuard+CNI handshake (`OffloadingBackOff`)
-// without any federation-autoscaler involvement. So we assert
-// "CA scheduled the workload onto a federation virtual node" as the
-// success signal; Pod reaching Running across the tunnel is out of
-// scope for this suite.
+// that the scheduler can bind to. Whether the Pod then *runs* depends on
+// Liqo's data plane successfully offloading a shadow Pod to the remote
+// cluster over the WireGuard tunnel — a concern entirely outside
+// federation-autoscaler.
+//
+// NOTE (corrected): Kind is NOT inherently incapable of this — Liqo's own
+// `offloading-with-policies` example runs entirely on Kind and ends with
+// an offloaded Pod Running on a remote Kind cluster (same shared-docker-
+// network + NodePort gateway ingredients we use). In THIS suite, though,
+// the cross-cluster WireGuard handshake has proven unreliable in CI
+// (`OffloadingBackOff`), most likely an environment factor (host
+// WireGuard kernel-module support, liqoctl/Liqo version, or CI timing)
+// rather than a Kind limitation or a federation-autoscaler bug. To keep
+// the suite deterministic we therefore assert only "CA scheduled the
+// workload onto a federation virtual node"; "Pod Running across the
+// tunnel" is validated on the real multi-VM deployment (where the data
+// plane works end-to-end). See docs/demo or the kind-limitation notes.
 func WaitForPodsScheduled(
 	ctx context.Context,
 	kubeconfigConsumer, namespace, labelSelector string,

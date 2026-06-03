@@ -15,6 +15,14 @@
 
 - name: Install Liqo
   when: liqo_check.stdout | trim == ""
+  # throttle: 1 — every host's liqoctl install runs ON the manager
+  # (delegate_to: localhost), and `liqoctl install` manages a local Helm
+  # repo named "liqo" under ~/.config/helm. Running all four in parallel
+  # races on that shared Helm state, so some invocations fail with
+  # "Error initializing installer: repo liqo not found". Serializing just
+  # this task (one cluster's install at a time) removes the race while
+  # leaving the rest of the play parallel.
+  throttle: 1
   ansible.builtin.shell:
     cmd: |
       KUBECONFIG={{ cluster_kubeconfig }} liqoctl install k3s \

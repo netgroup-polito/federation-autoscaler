@@ -57,6 +57,12 @@ spec:
         - --api-tls-key-file=/etc/federation-autoscaler/tls/tls.key
         - --api-client-ca-file=/etc/federation-autoscaler/tls/ca.crt
         - --namespace=$(POD_NAMESPACE)
+        # Deadline a non-renewed Reservation gets before it is moved to
+        # Expired (v1 has no renewal, so keep it longer than any workload
+        # that legitimately holds borrowed capacity). Flip to a short value
+        # (e.g. 2m) to exercise the expiry → consumer-cleanup path during
+        # testing; 24h is the production default.
+        - --reservation-timeout=24h
         env:
         - name: POD_NAMESPACE
           valueFrom:

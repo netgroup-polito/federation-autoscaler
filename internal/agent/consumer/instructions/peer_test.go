@@ -57,6 +57,17 @@ func stubRun(stderr string, err error) RunFunc {
 	}
 }
 
+// flagHasValue reports whether args contains `flag` immediately followed
+// by `value` (i.e. the `--flag value` two-token form).
+func flagHasValue(args []string, flag, value string) bool {
+	for i := 0; i+1 < len(args); i++ {
+		if args[i] == flag && args[i+1] == value {
+			return true
+		}
+	}
+	return false
+}
+
 func peerInstruction() *brokerapi.InstructionView {
 	return &brokerapi.InstructionView{
 		ID:                    "peer-res-1",
@@ -89,6 +100,15 @@ func TestPeer_HappyPath_PersistsSecretRunsLiqoctlAndCreatesCRs(t *testing.T) {
 			}
 			if len(args) < 3 || args[1] != "--remote-kubeconfig" {
 				t.Errorf("expected --remote-kubeconfig flag, got %v", args)
+			}
+			// The chunk size (2 CPU / 4Gi) must be passed to liqoctl so
+			// the borrowed VirtualNode is sized to the chunk, not the
+			// provider's full capacity.
+			if !flagHasValue(args, "--cpu", "2") {
+				t.Errorf("expected --cpu 2 (chunk size), got %v", args)
+			}
+			if !flagHasValue(args, "--memory", "4Gi") {
+				t.Errorf("expected --memory 4Gi (chunk size), got %v", args)
 			}
 			return nil, nil, nil
 		},

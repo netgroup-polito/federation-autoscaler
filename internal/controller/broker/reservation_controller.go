@@ -362,6 +362,20 @@ func (r *ReservationReconciler) handleTerminal(
 		return ctrl.Result{}, nil
 	}
 
+	// Per-reservation consumer cleanup (bug #7). Unlike the SHARED
+	// peering-user credential torn down below, the consumer's Liqo state
+	// (ResourceSlice / VirtualNodeState) is per-reservation — so it must
+	// be cleaned regardless of the sibling ref-count gate, and emitted
+	// BEFORE it. Without this, a Peered reservation that reaches a
+	// terminal phase by EXPIRY/Failure (rather than the normal Unpeering
+	// path, which already deletes it) leaks the consumer's ResourceSlice
+	// and virtual node. Emitted un-owned (survives the Reservation's GC)
+	// and idempotent: a harmless no-op when the consumer never peered or
+	// already unpeered.
+	if err := r.ensureConsumerCleanupShared(ctx, resv); err != nil {
+		return ctrl.Result{}, fmt.Errorf("ensure consumer Cleanup: %w", err)
+	}
+
 	// Ref-count: a sibling Reservation may still need the shared
 	// credential. Skip teardown and re-check shortly.
 	others, err := r.hasOtherActiveReservation(ctx, resv)
@@ -405,6 +419,21 @@ func (r *ReservationReconciler) handleDeletion(
 		}
 		log.Info("released reserved chunks on delete", "provider", resv.Spec.ProviderClusterID,
 			"chunkCount", resv.Spec.ChunkCount, "phase", resv.Status.Phase)
+	}
+
+	// Tell the consumer agent to tear down its per-reservation Liqo state
+	// (ResourceSlice / VirtualNodeState / kubeconfig Secret). The broker
+	// can't delete cross-cluster resources directly, so this goes through
+	// a Cleanup instruction. It is emitted UN-OWNED (shared) so it
+	// survives this Reservation's own deletion — an owner-referenced
+	// instruction would be garbage-collected along with the Reservation
+	// before the agent could fetch it. The consumer Cleanup handler is
+	// idempotent on missing, so emitting it even when no consumer state
+	// exists (e.g. a Pending reservation deleted before peering) is a
+	// harmless no-op. Without this, a `kubectl delete reservation` (or any
+	// hard delete) leaks the consumer's ResourceSlice + virtual node.
+	if err := r.ensureConsumerCleanupShared(ctx, resv); err != nil {
+		return ctrl.Result{}, fmt.Errorf("ensure consumer cleanup on delete: %w", err)
 	}
 
 	for attempt := 0; attempt < 3; attempt++ {
@@ -735,6 +764,27 @@ func needsConsumerCleanup(p brokerv1alpha1.ReservationPhase) bool {
 func (r *ReservationReconciler) ensureCleanupInstruction(
 	ctx context.Context, resv *brokerv1alpha1.Reservation,
 ) error {
+	return r.emitConsumerCleanup(ctx, resv, true /* owned */)
+}
+
+// ensureConsumerCleanupShared emits the same consumer Cleanup instruction
+// as ensureCleanupInstruction but WITHOUT an owner reference, so it
+// survives the Reservation's own deletion. Used by handleDeletion, where
+// an owned instruction would be garbage-collected with the Reservation
+// before the consumer agent could fetch it.
+func (r *ReservationReconciler) ensureConsumerCleanupShared(
+	ctx context.Context, resv *brokerv1alpha1.Reservation,
+) error {
+	return r.emitConsumerCleanup(ctx, resv, false /* shared/un-owned */)
+}
+
+// emitConsumerCleanup builds the consumer-side Cleanup instruction and
+// creates it either owned by the Reservation (owned=true, for live-object
+// callers like checkProviderAvailable) or un-owned (owned=false, for the
+// deletion path). Idempotent on AlreadyExists.
+func (r *ReservationReconciler) emitConsumerCleanup(
+	ctx context.Context, resv *brokerv1alpha1.Reservation, owned bool,
+) error {
 	ri := &autoscalingv1alpha1.ReservationInstruction{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      reservationInstructionCleanupName(resv.Name),
@@ -750,7 +800,10 @@ func (r *ReservationReconciler) ensureCleanupInstruction(
 			LastChunk:             true,
 		},
 	}
-	return r.ensureInstruction(ctx, resv, ri)
+	if owned {
+		return r.ensureInstruction(ctx, resv, ri)
+	}
+	return r.ensureSharedInstruction(ctx, ri)
 }
 
 // checkExpired flips a non-terminal Reservation to Expired when its
