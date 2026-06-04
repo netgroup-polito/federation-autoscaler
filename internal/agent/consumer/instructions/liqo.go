@@ -39,6 +39,21 @@ var (
 		Version: "v1beta1",
 		Kind:    "ResourceSlice",
 	}
+
+	// foreignClusterGVK identifies the cluster-scoped object Liqo uses to
+	// represent a peering relationship. `liqoctl unpeer` disables the
+	// networking/auth/offloading modules and deletes the control-plane
+	// Identity + Tenant, but it leaves the ForeignCluster object behind as
+	// a dangling shell (it never deletes it). That shell is what keeps
+	// `liqoctl info` reporting an "Active peering" with Authentication
+	// Healthy after scale-down, so the consumer agent deletes it as the
+	// final unpeer step. The object is named after the provider's Liqo
+	// cluster ID.
+	foreignClusterGVK = schema.GroupVersionKind{
+		Group:   "core.liqo.io",
+		Version: "v1beta1",
+		Kind:    "ForeignCluster",
+	}
 )
 
 // resourceSliceName returns the deterministic ResourceSlice name for a
@@ -99,6 +114,26 @@ func deleteResourceSlice(
 	obj.SetNamespace(namespace)
 	if err := c.Delete(ctx, obj); err != nil && !apierrors.IsNotFound(err) {
 		return fmt.Errorf("delete ResourceSlice: %w", err)
+	}
+	return nil
+}
+
+// deleteForeignCluster removes the cluster-scoped ForeignCluster shell
+// Liqo leaves behind after `liqoctl unpeer` (see foreignClusterGVK).
+// Named after the provider's Liqo cluster ID; idempotent on missing.
+// Safe to call only once the unpeer has succeeded — at that point the
+// networking/auth/offloading modules and the Identity/Tenant are already
+// gone, so the ForeignCluster is an inert record.
+func deleteForeignCluster(
+	ctx context.Context,
+	c ctrlclient.Client,
+	providerLiqoClusterID string,
+) error {
+	obj := &unstructured.Unstructured{}
+	obj.SetGroupVersionKind(foreignClusterGVK)
+	obj.SetName(providerLiqoClusterID)
+	if err := c.Delete(ctx, obj); err != nil && !apierrors.IsNotFound(err) {
+		return fmt.Errorf("delete ForeignCluster %q: %w", providerLiqoClusterID, err)
 	}
 	return nil
 }

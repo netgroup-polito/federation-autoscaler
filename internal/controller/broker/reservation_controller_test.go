@@ -317,6 +317,37 @@ var _ = Describe("Reservation Controller", func() {
 		Expect(list.Items).To(HaveLen(2))
 	})
 
+	It("stamps TerminatedAt on the first terminal reconcile and does not GC yet (finding #1)", func() {
+		setPhase(ctx, key, brokerv1alpha1.ReservationPhaseReleased)
+		reconcileOnce()
+
+		got := &brokerv1alpha1.Reservation{}
+		Expect(k8sClient.Get(ctx, key, got)).To(Succeed())
+		Expect(got.Status.TerminatedAt).NotTo(BeNil())
+		// Default TTL is 15m, so a freshly-stamped reservation is NOT yet
+		// collected — it must linger long enough for the cleanup
+		// instructions to be processed.
+		Expect(got.DeletionTimestamp.IsZero()).To(BeTrue())
+	})
+
+	It("garbage-collects a terminal reservation once it is older than the TTL (finding #1)", func() {
+		By("marking the reservation terminal with a TerminatedAt well past the default TTL")
+		res := &brokerv1alpha1.Reservation{}
+		Expect(k8sClient.Get(ctx, key, res)).To(Succeed())
+		res.Status.Phase = brokerv1alpha1.ReservationPhaseReleased
+		stale := metav1.NewTime(time.Now().Add(-2 * DefaultTerminalReservationTTL))
+		res.Status.TerminatedAt = &stale
+		Expect(k8sClient.Status().Update(ctx, res)).To(Succeed())
+
+		By("the reconciler issues a Delete (GC) and the finalizer is cleared so the CR disappears")
+		Eventually(func() bool {
+			r := &ReservationReconciler{Client: k8sClient, Scheme: k8sClient.Scheme()}
+			_, err := r.Reconcile(ctx, reconcile.Request{NamespacedName: key})
+			Expect(err).NotTo(HaveOccurred())
+			return apierrors.IsNotFound(k8sClient.Get(ctx, key, &brokerv1alpha1.Reservation{}))
+		}).Should(BeTrue())
+	})
+
 	It("Expired (peered) → emits a consumer Cleanup so the ResourceSlice/VNS don't leak (bug #7)", func() {
 		By("running Pending so GenerateKubeconfig exists, then seeding the staging Secret (provider work happened)")
 		reconcileOnce()

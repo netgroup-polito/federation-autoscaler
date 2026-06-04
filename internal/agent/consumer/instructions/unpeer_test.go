@@ -25,6 +25,7 @@ import (
 
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/types"
 
 	autoscalingv1alpha1 "github.com/netgroup-polito/federation-autoscaler/api/autoscaling/v1alpha1"
@@ -58,6 +59,15 @@ func TestUnpeer_HappyPath_DeletesEverythingOnLastChunk(t *testing.T) {
 		Run:         stubRun("", nil),
 	})(ctx, peerInstruction()); err != nil {
 		t.Fatal(err)
+	}
+
+	// Seed the ForeignCluster shell liqoctl would have left behind, named
+	// after the provider's Liqo cluster ID (see unpeerInstruction).
+	fc := &unstructured.Unstructured{}
+	fc.SetGroupVersionKind(foreignClusterGVK)
+	fc.SetName("liqo-provider-1")
+	if err := c.Create(ctx, fc); err != nil {
+		t.Fatalf("seed ForeignCluster: %v", err)
 	}
 
 	var ranLiqoctl atomic.Bool
@@ -101,6 +111,11 @@ func TestUnpeer_HappyPath_DeletesEverythingOnLastChunk(t *testing.T) {
 	}, &corev1.Secret{}); err == nil {
 		t.Error("kubeconfig Secret should be gone after LastChunk Unpeer")
 	}
+	// ForeignCluster shell deleted (LastChunk=true) — otherwise liqoctl
+	// info keeps reporting the peering with Authentication Healthy.
+	if exists, _ := objectExists(ctx, c, foreignClusterGVK, "", "liqo-provider-1"); exists {
+		t.Error("ForeignCluster should be gone after LastChunk Unpeer")
+	}
 	if !ranLiqoctl.Load() {
 		t.Error("liqoctl unpeer was not invoked")
 	}
@@ -119,6 +134,12 @@ func TestUnpeer_KubeconfigKept_WhenNotLastChunk(t *testing.T) {
 		},
 		Data: map[string][]byte{KubeconfigSecretDataKey: []byte("apiVersion: v1")},
 	})
+	// Seed the ForeignCluster too — it must survive a non-last-chunk unpeer
+	// since siblings to the same provider still share it.
+	fc := &unstructured.Unstructured{}
+	fc.SetGroupVersionKind(foreignClusterGVK)
+	fc.SetName("liqo-provider-1")
+	_ = c.Create(ctx, fc)
 
 	h := NewUnpeerHandler(UnpeerConfig{
 		LocalClient: c,
@@ -138,6 +159,10 @@ func TestUnpeer_KubeconfigKept_WhenNotLastChunk(t *testing.T) {
 		Name: "kubeconfig-" + testResID, Namespace: testNamespace,
 	}, &corev1.Secret{}); err != nil {
 		t.Errorf("kubeconfig Secret should persist when !LastChunk; got %v", err)
+	}
+	// ForeignCluster retained when !LastChunk.
+	if exists, _ := objectExists(ctx, c, foreignClusterGVK, "", "liqo-provider-1"); !exists {
+		t.Error("ForeignCluster should persist when !LastChunk")
 	}
 }
 

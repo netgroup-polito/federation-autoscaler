@@ -34,7 +34,7 @@ spec:
       type: string
     - jsonPath: .status.expiresAt
       name: Expires
-      type: date
+      type: string
     - jsonPath: .metadata.creationTimestamp
       name: Age
       type: date
@@ -242,6 +242,16 @@ spec:
                 - Released
                 - Expired
                 - Failed
+                type: string
+              terminatedAt:
+                description: |-
+                  TerminatedAt is when the reservation first entered a terminal phase
+                  (Released / Failed / Expired). The reconciler stamps it once and uses
+                  it as the garbage-collection clock: a terminal reservation is deleted
+                  once TerminatedAt is older than the terminal-reservation TTL, so the
+                  CRs don't accumulate in etcd indefinitely. Nil while the reservation
+                  is still active.
+                format: date-time
                 type: string
               virtualNodeNames:
                 description: |-

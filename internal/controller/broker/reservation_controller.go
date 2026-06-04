@@ -68,6 +68,29 @@ const ReservationFinalizer = "broker.federation-autoscaler.io/release-chunks"
 type ReservationReconciler struct {
 	client.Client
 	Scheme *runtime.Scheme
+
+	// TerminalTTL is how long a Reservation may sit in a terminal phase
+	// (Released / Failed / Expired) before the reconciler garbage-collects
+	// it. Zero falls back to DefaultTerminalReservationTTL. Exposed mainly
+	// as a test hook.
+	TerminalTTL time.Duration
+}
+
+// DefaultTerminalReservationTTL is how long a terminal Reservation lingers
+// before GC. It must comfortably exceed the agent instruction round-trip
+// (5 s poll) and the shared-bookkeeping DefaultEnforcedTTL (5 min) so the
+// consumer/provider Cleanup instructions emitted in handleTerminal are
+// always processed before the Reservation disappears. Both Cleanups are
+// un-owned, so even a GC delete never cascades them away — this TTL is the
+// belt-and-suspenders margin, plus it keeps a short audit trail of recent
+// terminal reservations.
+const DefaultTerminalReservationTTL = 15 * time.Minute
+
+func (r *ReservationReconciler) terminalTTL() time.Duration {
+	if r.TerminalTTL > 0 {
+		return r.TerminalTTL
+	}
+	return DefaultTerminalReservationTTL
 }
 
 // +kubebuilder:rbac:groups=broker.federation-autoscaler.io,resources=reservations,verbs=get;list;watch;create;update;patch;delete
@@ -338,6 +361,42 @@ func (r *ReservationReconciler) handleUnpeering(
 func (r *ReservationReconciler) handleTerminal(
 	ctx context.Context, log logr.Logger, resv *brokerv1alpha1.Reservation,
 ) (ctrl.Result, error) {
+	// Garbage-collection clock (finding #1: terminal reservations used to
+	// pile up in etcd forever). Stamp TerminatedAt on the first terminal
+	// reconcile, then delete the Reservation once it has been terminal
+	// longer than the TTL. Deleting routes through handleDeletion (the
+	// finalizer is still present), which credits chunks and re-emits the
+	// idempotent consumer Cleanup before the CR is removed.
+	//
+	// GC never fires on the same pass that stamps TerminatedAt, so the
+	// cleanup logic below always runs at least once before the Reservation
+	// can be collected — even with a tiny test TTL.
+	justStamped := false
+	if resv.Status.TerminatedAt == nil {
+		now := metav1.Now()
+		resv.Status.TerminatedAt = &now
+		if err := r.Status().Update(ctx, resv); err != nil {
+			return ctrl.Result{}, fmt.Errorf("stamp terminatedAt: %w", err)
+		}
+		justStamped = true
+	}
+	ttl := r.terminalTTL()
+	if !justStamped && time.Since(resv.Status.TerminatedAt.Time) >= ttl {
+		log.Info("garbage-collecting terminal reservation",
+			"phase", resv.Status.Phase,
+			"age", time.Since(resv.Status.TerminatedAt.Time).Round(time.Second))
+		if err := r.Delete(ctx, resv); err != nil {
+			return ctrl.Result{}, client.IgnoreNotFound(err)
+		}
+		return ctrl.Result{}, nil
+	}
+	// Come back to collect once the TTL elapses (floored at the short
+	// resync so a sibling-deferred pass still re-checks promptly).
+	gcRequeue := ttl - time.Since(resv.Status.TerminatedAt.Time)
+	if gcRequeue < gkResyncInterval {
+		gcRequeue = gkResyncInterval
+	}
+
 	// Release the reservation's chunk count back to the provider's
 	// AvailableChunks budget if no prior path has already done so. The
 	// API DELETE handler stamps ChunksReleasedAnnotation when the
@@ -359,7 +418,7 @@ func (r *ReservationReconciler) handleTerminal(
 		return ctrl.Result{}, fmt.Errorf("check kubeconfig secret: %w", err)
 	}
 	if !exists {
-		return ctrl.Result{}, nil
+		return ctrl.Result{RequeueAfter: gcRequeue}, nil
 	}
 
 	// Per-reservation consumer cleanup (bug #7). Unlike the SHARED
@@ -396,7 +455,7 @@ func (r *ReservationReconciler) handleTerminal(
 	}
 	log.Info("queued provider Cleanup and removed staging kubeconfig",
 		"provider", resv.Spec.ProviderClusterID, "consumer", resv.Spec.ConsumerClusterID, "phase", resv.Status.Phase)
-	return ctrl.Result{}, nil
+	return ctrl.Result{RequeueAfter: gcRequeue}, nil
 }
 
 // handleDeletion runs when a Reservation carries a DeletionTimestamp.

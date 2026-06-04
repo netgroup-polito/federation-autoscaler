@@ -164,10 +164,25 @@ func NewUnpeerHandler(cfg UnpeerConfig) poller.HandlerFunc {
 			}
 		}
 
-		// 4. On LastChunk=true, wipe the kubeconfig Secret.
+		// 4. On LastChunk=true, finish tearing down the peering: wipe the
+		//    kubeconfig Secret and delete the ForeignCluster shell that
+		//    `liqoctl unpeer` leaves behind (otherwise `liqoctl info` keeps
+		//    listing the peering with Authentication Healthy indefinitely —
+		//    unpeer disables the modules + deletes the Identity/Tenant but
+		//    never the ForeignCluster object itself). Gated on LastChunk
+		//    because the ForeignCluster is shared by all chunks to the same
+		//    provider; v1 always releases the whole reservation at once
+		//    (LastChunk hardcoded true), so this is the point at which the
+		//    provider is fully released.
 		if in.LastChunk {
 			if err := deleteKubeconfigSecret(ctx, cfg.LocalClient, cfg.Namespace, in.ReservationID); err != nil {
 				return nil, err
+			}
+			if in.ProviderLiqoClusterID != "" {
+				if err := deleteForeignCluster(ctx, cfg.LocalClient, in.ProviderLiqoClusterID); err != nil {
+					return nil, err
+				}
+				logger.V(1).Info("deleted ForeignCluster shell", "foreignCluster", in.ProviderLiqoClusterID)
 			}
 		}
 

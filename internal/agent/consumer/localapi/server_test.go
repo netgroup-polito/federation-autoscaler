@@ -404,6 +404,7 @@ func TestVirtualNodes_ProjectsCRsToViews(t *testing.T) {
 		Status: autoscalingv1alpha1.VirtualNodeStateStatus{
 			Phase:           autoscalingv1alpha1.VirtualNodeStatePhaseRunning,
 			VirtualNodeName: "rs-res-running",
+			ProviderID:      "liqo://liqo-provider-1",
 			Allocatable: corev1.ResourceList{
 				corev1.ResourceCPU:    resource.MustParse("4"),
 				corev1.ResourceMemory: resource.MustParse("7800Mi"),
@@ -465,6 +466,9 @@ func TestVirtualNodes_ProjectsCRsToViews(t *testing.T) {
 	}
 	if r.VirtualNodeName != "rs-res-running" {
 		t.Errorf("running.VirtualNodeName: want rs-res-running (status populated), got %q", r.VirtualNodeName)
+	}
+	if r.ProviderID != "liqo://liqo-provider-1" {
+		t.Errorf("running.ProviderID: want liqo://liqo-provider-1, got %q", r.ProviderID)
 	}
 	if r.NodeGroupID != "ng-provider-1-standard" {
 		t.Errorf("running.NodeGroupID: want ng-provider-1-standard, got %q", r.NodeGroupID)

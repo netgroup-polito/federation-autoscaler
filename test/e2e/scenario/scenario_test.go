@@ -107,11 +107,12 @@ func TestFirstReadyVirtualNode(t *testing.T) {
 
 func TestCountScheduledPods(t *testing.T) {
 	// Three of the four pods have spec.nodeName set — those count as
-	// scheduled regardless of whether the kubelet has reported a phase
-	// (the Liqo offloading path keeps a scheduled pod in Pending /
-	// OffloadingBackOff for long stretches, so phase alone is too
-	// strict; we just want CA to have produced a Liqo virtual node
-	// the scheduler could bind to).
+	// scheduled regardless of whether the kubelet has reported a phase.
+	// Without a NamespaceOffloading for the workload namespace (the suite
+	// doesn't stamp one yet — see WaitForPodsScheduled), Liqo leaves a
+	// scheduled pod Pending rather than reflecting it, so phase alone is
+	// too strict; we just want CA to have produced a Liqo virtual node the
+	// scheduler could bind to.
 	const raw = `{"items":[
 		{"spec":{"nodeName":""}},
 		{"spec":{"nodeName":"fa-provider-1"}},

@@ -105,6 +105,7 @@ func (r *VirtualNodeStateReconciler) Reconcile(ctx context.Context, req ctrl.Req
 		applyPhase(&desired.Status, autoscalingv1alpha1.VirtualNodeStatePhaseCreating,
 			"VirtualNodeState missing providerLiqoClusterId")
 		desired.Status.VirtualNodeName = ""
+		desired.Status.ProviderID = ""
 		desired.Status.Allocatable = nil
 	} else if err := r.projectFromNode(ctx, desired, nodeName); err != nil {
 		return ctrl.Result{}, err
@@ -149,6 +150,7 @@ func (r *VirtualNodeStateReconciler) projectFromNode(
 		applyPhase(&desired.Status, autoscalingv1alpha1.VirtualNodeStatePhaseCreating,
 			"waiting for Liqo to materialise node "+nodeName)
 		desired.Status.VirtualNodeName = ""
+		desired.Status.ProviderID = ""
 		desired.Status.Allocatable = nil
 		return nil
 	case err != nil:
@@ -160,6 +162,7 @@ func (r *VirtualNodeStateReconciler) projectFromNode(
 	if node.DeletionTimestamp != nil {
 		applyPhase(&desired.Status, autoscalingv1alpha1.VirtualNodeStatePhaseDeleting,
 			"Liqo virtual node is terminating")
+		desired.Status.ProviderID = ""
 		desired.Status.Allocatable = nil
 		return nil
 	}
@@ -167,12 +170,17 @@ func (r *VirtualNodeStateReconciler) projectFromNode(
 	if !nodeReady(&node) {
 		applyPhase(&desired.Status, autoscalingv1alpha1.VirtualNodeStatePhaseCreating,
 			"Liqo virtual node registered, not Ready yet")
+		desired.Status.ProviderID = ""
 		desired.Status.Allocatable = nil
 		return nil
 	}
 
 	applyPhase(&desired.Status, autoscalingv1alpha1.VirtualNodeStatePhaseRunning,
 		"Liqo virtual node is ready")
+	// Capture the node's providerID so the gRPC server can report it as the
+	// NodeGroupNodes Instance Id — CA matches instances to registered nodes
+	// by providerID, not name (see VirtualNodeStateStatus.ProviderID).
+	desired.Status.ProviderID = node.Spec.ProviderID
 	desired.Status.Allocatable = copyResourceList(node.Status.Allocatable)
 	return nil
 }
@@ -276,6 +284,7 @@ func setCondition(conds *[]metav1.Condition, condType string, ok bool, reason, m
 func statusEqual(a, b *autoscalingv1alpha1.VirtualNodeStateStatus) bool {
 	if a.Phase != b.Phase ||
 		a.VirtualNodeName != b.VirtualNodeName ||
+		a.ProviderID != b.ProviderID ||
 		a.ObservedGeneration != b.ObservedGeneration ||
 		a.Message != b.Message {
 		return false

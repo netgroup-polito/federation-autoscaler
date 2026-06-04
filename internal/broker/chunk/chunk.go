@@ -55,7 +55,7 @@ type Sizer interface {
 }
 
 // DefaultSizer hard-codes the design's fallback chunk sizes (docs/design.md
-// §6.2): standard chunks are cpu=2, memory=4Gi; gpu chunks add 1 GPU and a
+// §6): standard chunks are cpu=2, memory=4Gi; gpu chunks add 1 GPU and a
 // larger cpu/memory box. ConfigMap-driven sizing replaces this in step 4h
 // without changing Sizer's signature.
 type DefaultSizer struct{}

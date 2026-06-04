@@ -47,6 +47,12 @@ type VirtualNodeView struct {
 	// "unregistered node" that never appears, which wedges scale-down.
 	VirtualNodeName string `json:"virtualNodeName,omitempty"`
 
+	// ProviderID is the materialised v1.Node's `.spec.providerID`
+	// (`liqo://…`). NodeGroupNodes returns this as the Instance Id because
+	// CA matches cloud instances to registered nodes by providerID, not by
+	// name. Empty until the node is Ready.
+	ProviderID string `json:"providerID,omitempty"`
+
 	// ReservationID is the broker-side reservation this virtual node
 	// belongs to. Multiple VirtualNodeViews may share a reservation
 	// when a Reservation has ChunkCount > 1.

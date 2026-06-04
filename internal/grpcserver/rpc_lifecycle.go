@@ -172,9 +172,18 @@ func (s *Server) Cleanup(context.Context, *protos.CleanupRequest) (*protos.Clean
 // node exists in the cloud that never registers in the cluster, which
 // CA logs as "unregistered nodes present" and which wedges
 // scaleDownInCooldown=true so NodeGroupDeleteNodes is never called —
-// automatic scale-down then becomes impossible. The Instance Id is the
-// real v1.Node name (== Status.VirtualNodeName, which Liqo derives from
-// the provider cluster id) so CA's node-to-instance matching lines up.
+// automatic scale-down then becomes impossible.
+//
+// The Instance Id MUST be the node's Spec.ProviderID, NOT its name: CA's
+// clusterstate matches cloud instances to registered nodes by inserting
+// each node's ProviderID into a set and flagging any instance Id absent
+// from it (clusterstate.go getNotRegisteredNodes →
+// registered.Insert(node.Spec.ProviderID)). Liqo sets virtual-node
+// providerIDs to `liqo://…`, so returning the bare node name here makes
+// every node look perpetually "unregistered" and CA churns phantom
+// scale-up/scale-down reservations forever. ProviderID is published by
+// the VirtualNodeStateReconciler once the node is Ready; a Ready node
+// always has it, so the VirtualNodeName!="" guard already covers it.
 func (s *Server) NodeGroupNodes(ctx context.Context, req *protos.NodeGroupNodesRequest) (*protos.NodeGroupNodesResponse, error) {
 	if req == nil || req.Id == "" {
 		return nil, status.Error(codes.InvalidArgument, "id is required")
@@ -193,13 +202,14 @@ func (s *Server) NodeGroupNodes(ctx context.Context, req *protos.NodeGroupNodesR
 		if vn.NodeGroupID != req.Id {
 			continue
 		}
-		// Skip chunks whose v1.Node hasn't registered yet — see the
-		// "unregistered nodes" rationale above.
-		if vn.VirtualNodeName == "" {
+		// Skip chunks whose v1.Node hasn't registered yet, or whose
+		// providerID hasn't been published — see the "unregistered nodes"
+		// rationale above. A Ready node always carries both.
+		if vn.VirtualNodeName == "" || vn.ProviderID == "" {
 			continue
 		}
 		out.Instances = append(out.Instances, &protos.Instance{
-			Id:     vn.VirtualNodeName,
+			Id:     vn.ProviderID,
 			Status: instanceStatusFromVNS(vn),
 		})
 	}

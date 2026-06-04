@@ -100,6 +100,17 @@ type VirtualNodeStateStatus struct {
 	// +optional
 	VirtualNodeName string `json:"virtualNodeName,omitempty"`
 
+	// ProviderID mirrors the materialised v1.Node's `.spec.providerID`
+	// (Liqo sets this to a `liqo://…` value). Cluster Autoscaler matches
+	// the cloud instances the gRPC server reports in NodeGroupNodes
+	// against the registered nodes' providerIDs — NOT their names — so the
+	// gRPC server must return this verbatim as the Instance Id, otherwise
+	// CA never matches the node, reports it as "unregistered", and churns
+	// scale-up/scale-down reservations forever. Empty until the node is
+	// Ready (and providerID has been published).
+	// +optional
+	ProviderID string `json:"providerID,omitempty"`
+
 	// ResourceSliceName is the name of the Liqo ResourceSlice the Consumer
 	// Agent created for this chunk. Empty until the Peer instruction succeeds.
 	// +optional

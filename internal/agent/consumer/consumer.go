@@ -60,8 +60,9 @@ type Options struct {
 
 	// LocalClient is the controller-runtime client for the local
 	// cluster's API server. Used by the Peer / Unpeer handlers
-	// (substep 9d) to write Liqo ResourceSlice and NamespaceOffloading
-	// CRs, and by the local-API server (substep 9c) to read
+	// (substep 9d) to write the Liqo ResourceSlice + VirtualNodeState CRs
+	// (the NamespaceOffloading singleton is operator-stamped, never managed
+	// here), and by the local-API server (substep 9c) to read
 	// VirtualNodeState CRs.
 	LocalClient client.Client
 

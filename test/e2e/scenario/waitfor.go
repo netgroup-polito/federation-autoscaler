@@ -192,23 +192,20 @@ func firstReadyVirtualNode(rawJSON string) (string, bool, error) {
 //
 // Scope decision: the federation-autoscaler is responsible for getting
 // CA to scale up via the federation and producing a Ready VirtualNode
-// that the scheduler can bind to. Whether the Pod then *runs* depends on
-// Liqo's data plane successfully offloading a shadow Pod to the remote
-// cluster over the WireGuard tunnel — a concern entirely outside
-// federation-autoscaler.
+// that the scheduler can bind to. The Pods stay *Scheduled* (not
+// *Running*) here for a concrete, fixable reason — see below.
 //
-// NOTE (corrected): Kind is NOT inherently incapable of this — Liqo's own
-// `offloading-with-policies` example runs entirely on Kind and ends with
-// an offloaded Pod Running on a remote Kind cluster (same shared-docker-
-// network + NodePort gateway ingredients we use). In THIS suite, though,
-// the cross-cluster WireGuard handshake has proven unreliable in CI
-// (`OffloadingBackOff`), most likely an environment factor (host
-// WireGuard kernel-module support, liqoctl/Liqo version, or CI timing)
-// rather than a Kind limitation or a federation-autoscaler bug. To keep
-// the suite deterministic we therefore assert only "CA scheduled the
-// workload onto a federation virtual node"; "Pod Running across the
-// tunnel" is validated on the real multi-VM deployment (where the data
-// plane works end-to-end). See docs/demo or the kind-limitation notes.
+// ROOT CAUSE (this is a harness gap, NOT a Kind/Liqo limitation): this
+// suite never stamps a `NamespaceOffloading` for the workload namespace,
+// so Liqo's virtual-kubelet schedules the Pods onto the virtual node but
+// never reflects them to the providers. Liqo's own
+// `offloading-with-policies` example runs offloaded Pods to *Running*
+// entirely on Kind, and our Ansible deploy (which DOES stamp the NSO)
+// runs them on the real VMs. The fix — stamp the NSO in the bootstrap and
+// assert `WaitForPodsRunning` — is tracked as post-demo e2e hardening.
+// Until then we assert only "CA scheduled the workload onto a federation
+// virtual node"; "Pod Running across the tunnel" is validated on the
+// multi-VM deployment.
 func WaitForPodsScheduled(
 	ctx context.Context,
 	kubeconfigConsumer, namespace, labelSelector string,

@@ -109,6 +109,15 @@ type ReservationStatus struct {
 	// +optional
 	VirtualNodeNames []string `json:"virtualNodeNames,omitempty"`
 
+	// TerminatedAt is when the reservation first entered a terminal phase
+	// (Released / Failed / Expired). The reconciler stamps it once and uses
+	// it as the garbage-collection clock: a terminal reservation is deleted
+	// once TerminatedAt is older than the terminal-reservation TTL, so the
+	// CRs don't accumulate in etcd indefinitely. Nil while the reservation
+	// is still active.
+	// +optional
+	TerminatedAt *metav1.Time `json:"terminatedAt,omitempty"`
+
 	// Message is a human-readable description of the most recent transition or
 	// of the current failure, if any.
 	// +optional
@@ -132,7 +141,11 @@ type ReservationStatus struct {
 // +kubebuilder:printcolumn:name="Provider",type=string,JSONPath=`.spec.providerClusterId`
 // +kubebuilder:printcolumn:name="Chunks",type=integer,JSONPath=`.spec.chunkCount`
 // +kubebuilder:printcolumn:name="Type",type=string,JSONPath=`.spec.chunkType`
-// +kubebuilder:printcolumn:name="Expires",type=date,JSONPath=`.status.expiresAt`
+// Expires is a FUTURE timestamp, so it must be type=string: a type=date
+// column renders a relative age from now, which kubectl's humanizer prints
+// as "<invalid>" for any time in the future. string shows the literal
+// RFC3339 deadline instead.
+// +kubebuilder:printcolumn:name="Expires",type=string,JSONPath=`.status.expiresAt`
 // +kubebuilder:printcolumn:name="Age",type=date,JSONPath=`.metadata.creationTimestamp`
 
 // Reservation is a Broker-owned binding of a set of chunks from a single

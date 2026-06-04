@@ -186,6 +186,11 @@ var _ = Describe("Step 11 end-to-end: Peer → VirtualNodeState → reconciler �
 		// Allocatable the reconciler projects into Status.Allocatable.
 		node := &corev1.Node{
 			ObjectMeta: metav1.ObjectMeta{Name: liqoVNName},
+			// Liqo stamps a `liqo://…` providerID on the virtual node. CA
+			// matches NodeGroupNodes instances to registered nodes by this
+			// providerID (not by name), so the reconciler must capture it
+			// and the gRPC server must report it as the Instance Id.
+			Spec: corev1.NodeSpec{ProviderID: "liqo://" + liqoVNName},
 		}
 		Expect(k8sClient.Create(suiteCtx, node)).To(Succeed())
 		// Ready condition + allocatable: the reconciler derives Phase=Running
@@ -205,6 +210,7 @@ var _ = Describe("Step 11 end-to-end: Peer → VirtualNodeState → reconciler �
 			g.Expect(k8sClient.Get(suiteCtx, vnsKey, &got)).To(Succeed())
 			g.Expect(got.Status.Phase).To(Equal(autoscalingv1alpha1.VirtualNodeStatePhaseRunning))
 			g.Expect(got.Status.VirtualNodeName).To(Equal(liqoVNName))
+			g.Expect(got.Status.ProviderID).To(Equal("liqo://" + liqoVNName))
 			g.Expect(got.Status.Allocatable).To(HaveKeyWithValue(corev1.ResourceCPU, resource.MustParse("4")))
 			g.Expect(got.Status.Conditions).To(ContainElement(SatisfyAll(
 				HaveField("Type", autoscalingv1alpha1.VirtualNodeStateConditionReady),
@@ -288,11 +294,13 @@ var _ = Describe("Step 11 end-to-end: Peer → VirtualNodeState → reconciler �
 		Expect(err).NotTo(HaveOccurred())
 		Expect(resForNode.NodeGroup.Id).To(Equal(nodeGroupID))
 
-		By("NodeGroupNodes lists the chunk with Status=Running")
+		By("NodeGroupNodes lists the chunk with Status=Running, keyed by providerID")
 		resNodes, err := client.NodeGroupNodes(ctx, &protos.NodeGroupNodesRequest{Id: nodeGroupID})
 		Expect(err).NotTo(HaveOccurred())
 		Expect(resNodes.Instances).To(HaveLen(1))
-		Expect(resNodes.Instances[0].Id).To(Equal(liqoVNName))
+		// Instance Id is the node's providerID, NOT its name — this is what
+		// CA matches against the registered node to avoid "unregistered".
+		Expect(resNodes.Instances[0].Id).To(Equal("liqo://" + liqoVNName))
 		Expect(resNodes.Instances[0].Status.InstanceState).To(Equal(protos.InstanceStatus_instanceRunning))
 
 		By("waiting for the broker to advertise the matching node group through /local/nodegroups")

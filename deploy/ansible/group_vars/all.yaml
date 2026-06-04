@@ -11,7 +11,7 @@
 # Push the images once with `make docker-push REGISTRY=docker.io/kazem26 TAG=…`
 # from the repo root; this playbook only references them.
 fa_registry: docker.io/kazem26
-fa_tag: v0.2.4
+fa_tag: v0.1
 
 # Resolved by Ansible's templating; do not edit directly.
 fa_image_broker:      "{{ fa_registry }}/federation-autoscaler-broker:{{ fa_tag }}"

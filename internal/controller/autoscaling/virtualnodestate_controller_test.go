@@ -121,6 +121,9 @@ var _ = Describe("VirtualNodeState Controller", func() {
 		BeforeEach(func() {
 			Expect(k8sClient.Create(ctx, newVNS(name, resv))).To(Succeed())
 			node := newVirtualNode(providerLiqoID, false, nil)
+			// Liqo stamps a `liqo://…` providerID on the virtual node; CA
+			// matches instances to registered nodes by this, not by name.
+			node.Spec.ProviderID = "liqo://" + providerLiqoID
 			Expect(k8sClient.Create(ctx, node)).To(Succeed())
 			// Status is a subresource — set it separately.
 			Expect(k8sClient.Get(ctx, types.NamespacedName{Name: providerLiqoID}, node)).To(Succeed())
@@ -138,13 +141,14 @@ var _ = Describe("VirtualNodeState Controller", func() {
 			Expect(client.IgnoreNotFound(k8sClient.Delete(ctx, node))).To(Succeed())
 		})
 
-		It("projects Phase=Running, VirtualNodeName, and Allocatable", func() {
+		It("projects Phase=Running, VirtualNodeName, ProviderID, and Allocatable", func() {
 			reconcileOnce(name)
 
 			got := &autoscalingv1alpha1.VirtualNodeState{}
 			Expect(k8sClient.Get(ctx, types.NamespacedName{Name: name, Namespace: namespace}, got)).To(Succeed())
 			Expect(got.Status.Phase).To(Equal(autoscalingv1alpha1.VirtualNodeStatePhaseRunning))
 			Expect(got.Status.VirtualNodeName).To(Equal(providerLiqoID))
+			Expect(got.Status.ProviderID).To(Equal("liqo://" + providerLiqoID))
 			Expect(got.Status.Allocatable).To(HaveKeyWithValue(corev1.ResourceCPU, resource.MustParse("4")))
 			Expect(got.Status.Allocatable).To(HaveKeyWithValue(corev1.ResourceMemory, resource.MustParse("8Gi")))
 			Expect(got.Status.Conditions).To(ContainElement(SatisfyAll(
@@ -176,6 +180,7 @@ var _ = Describe("VirtualNodeState Controller", func() {
 			Expect(k8sClient.Get(ctx, types.NamespacedName{Name: name, Namespace: namespace}, got)).To(Succeed())
 			Expect(got.Status.Phase).To(Equal(autoscalingv1alpha1.VirtualNodeStatePhaseCreating))
 			Expect(got.Status.VirtualNodeName).To(Equal(providerLiqoID))
+			Expect(got.Status.ProviderID).To(BeEmpty())
 			Expect(got.Status.Allocatable).To(BeEmpty())
 		})
 	})

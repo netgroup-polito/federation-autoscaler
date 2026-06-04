@@ -234,16 +234,17 @@ func TestCleanup_NoOp(t *testing.T) {
 
 func TestNodeGroupNodes_MapsPhasesToInstanceStates(t *testing.T) {
 	// Each materialised entry carries a VirtualNodeName (== the real
-	// v1.Node Liqo registered). The Instance Id must be that name, not
-	// the CR-name placeholder in Name.
+	// v1.Node Liqo registered) and a ProviderID (== node.Spec.ProviderID).
+	// The Instance Id must be the ProviderID — CA matches instances to
+	// registered nodes by providerID, not name.
 	fb := &fakeLocalAPI{
 		virtualNodes: &localapi.VirtualNodeListResponse{
 			VirtualNodes: []localapi.VirtualNodeView{
-				{Name: "vns-running", VirtualNodeName: "vn-running", NodeGroupID: "p1/standard", Phase: autoscalingv1alpha1.VirtualNodeStatePhaseRunning},
-				{Name: "vns-creating", VirtualNodeName: "vn-creating", NodeGroupID: "p1/standard", Phase: autoscalingv1alpha1.VirtualNodeStatePhaseCreating},
-				{Name: "vns-deleting", VirtualNodeName: "vn-deleting", NodeGroupID: "p1/standard", Phase: autoscalingv1alpha1.VirtualNodeStatePhaseDeleting},
-				{Name: "vns-failed", VirtualNodeName: "vn-failed", NodeGroupID: "p1/standard", Phase: autoscalingv1alpha1.VirtualNodeStatePhaseFailed},
-				{Name: "vns-other-group", VirtualNodeName: "vn-other-group", NodeGroupID: "p2/gpu", Phase: autoscalingv1alpha1.VirtualNodeStatePhaseRunning},
+				{Name: "vns-running", VirtualNodeName: "vn-running", ProviderID: "liqo://vn-running", NodeGroupID: "p1/standard", Phase: autoscalingv1alpha1.VirtualNodeStatePhaseRunning},
+				{Name: "vns-creating", VirtualNodeName: "vn-creating", ProviderID: "liqo://vn-creating", NodeGroupID: "p1/standard", Phase: autoscalingv1alpha1.VirtualNodeStatePhaseCreating},
+				{Name: "vns-deleting", VirtualNodeName: "vn-deleting", ProviderID: "liqo://vn-deleting", NodeGroupID: "p1/standard", Phase: autoscalingv1alpha1.VirtualNodeStatePhaseDeleting},
+				{Name: "vns-failed", VirtualNodeName: "vn-failed", ProviderID: "liqo://vn-failed", NodeGroupID: "p1/standard", Phase: autoscalingv1alpha1.VirtualNodeStatePhaseFailed},
+				{Name: "vns-other-group", VirtualNodeName: "vn-other-group", ProviderID: "liqo://vn-other-group", NodeGroupID: "p2/gpu", Phase: autoscalingv1alpha1.VirtualNodeStatePhaseRunning},
 			},
 		},
 	}
@@ -255,37 +256,41 @@ func TestNodeGroupNodes_MapsPhasesToInstanceStates(t *testing.T) {
 	if len(resp.Instances) != 4 {
 		t.Fatalf("want 4 instances in p1/standard, got %d", len(resp.Instances))
 	}
-	byName := map[string]*protos.Instance{}
+	byID := map[string]*protos.Instance{}
 	for _, inst := range resp.Instances {
-		byName[inst.Id] = inst
+		byID[inst.Id] = inst
 	}
-	if got := byName["vn-running"].Status.InstanceState; got != protos.InstanceStatus_instanceRunning {
+	if got := byID["liqo://vn-running"].Status.InstanceState; got != protos.InstanceStatus_instanceRunning {
 		t.Errorf("vn-running state: want Running, got %v", got)
 	}
-	if got := byName["vn-creating"].Status.InstanceState; got != protos.InstanceStatus_instanceCreating {
+	if got := byID["liqo://vn-creating"].Status.InstanceState; got != protos.InstanceStatus_instanceCreating {
 		t.Errorf("vn-creating state: want Creating, got %v", got)
 	}
-	if got := byName["vn-deleting"].Status.InstanceState; got != protos.InstanceStatus_instanceDeleting {
+	if got := byID["liqo://vn-deleting"].Status.InstanceState; got != protos.InstanceStatus_instanceDeleting {
 		t.Errorf("vn-deleting state: want Deleting, got %v", got)
 	}
-	if vn := byName["vn-failed"]; vn.Status.ErrorInfo == nil || vn.Status.ErrorInfo.ErrorCode == "" {
+	if vn := byID["liqo://vn-failed"]; vn.Status.ErrorInfo == nil || vn.Status.ErrorInfo.ErrorCode == "" {
 		t.Errorf("vn-failed: want non-empty ErrorInfo, got %+v", vn.Status)
 	}
 }
 
 // TestNodeGroupNodes_SkipsUnmaterialisedNodes is the regression guard
 // for the scale-down-stuck bug: a VNS whose v1.Node hasn't registered
-// (VirtualNodeName empty) must NOT be reported, or CA sees an
-// "unregistered node" that never appears and never scales down.
+// (VirtualNodeName empty), or whose providerID hasn't been published
+// yet, must NOT be reported — otherwise CA sees an "unregistered node"
+// that never matches a registered node and churns reservations forever.
 func TestNodeGroupNodes_SkipsUnmaterialisedNodes(t *testing.T) {
 	fb := &fakeLocalAPI{
 		virtualNodes: &localapi.VirtualNodeListResponse{
 			VirtualNodes: []localapi.VirtualNodeView{
-				// Registered: reported, Id == real v1.Node name.
-				{Name: "vns-ready", VirtualNodeName: "provider-1", NodeGroupID: "p1/standard", Phase: autoscalingv1alpha1.VirtualNodeStatePhaseRunning},
+				// Registered: reported, Id == node.Spec.ProviderID.
+				{Name: "vns-ready", VirtualNodeName: "provider-1", ProviderID: "liqo://provider-1", NodeGroupID: "p1/standard", Phase: autoscalingv1alpha1.VirtualNodeStatePhaseRunning},
 				// In-flight: VirtualNodeName empty → skipped even though
 				// the CR name placeholder is present in Name.
 				{Name: "vns-inflight", VirtualNodeName: "", NodeGroupID: "p1/standard", Phase: autoscalingv1alpha1.VirtualNodeStatePhaseCreating},
+				// Registered name but providerID not yet published →
+				// skipped, since CA would never match a blank Id.
+				{Name: "vns-noproviderid", VirtualNodeName: "provider-x", ProviderID: "", NodeGroupID: "p1/standard", Phase: autoscalingv1alpha1.VirtualNodeStatePhaseRunning},
 			},
 		},
 	}
@@ -295,10 +300,10 @@ func TestNodeGroupNodes_SkipsUnmaterialisedNodes(t *testing.T) {
 		t.Fatalf("err: %v", err)
 	}
 	if len(resp.Instances) != 1 {
-		t.Fatalf("want 1 instance (only the registered node), got %d", len(resp.Instances))
+		t.Fatalf("want 1 instance (only the registered node with a providerID), got %d", len(resp.Instances))
 	}
-	if got := resp.Instances[0].Id; got != "provider-1" {
-		t.Errorf("Instance Id: want real v1.Node name provider-1, got %q", got)
+	if got := resp.Instances[0].Id; got != "liqo://provider-1" {
+		t.Errorf("Instance Id: want node.Spec.ProviderID liqo://provider-1, got %q", got)
 	}
 }
 
