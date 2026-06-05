@@ -33,7 +33,7 @@ Works from NATed / firewalled clusters: only the Broker needs a public endpoint;
 | Provider Agent (advertisement + `GenerateKubeconfig` / `Cleanup` / `Reconcile`) | ✅ alpha | `internal/agent/provider/` |
 | Consumer Agent (heartbeat + loopback REST + `Peer` / `Unpeer` / `Cleanup` / `Reconcile`) | ✅ alpha | `internal/agent/consumer/` |
 | gRPC Server (14 of 15 `externalgrpc` RPCs implemented) | ✅ alpha | `internal/grpcserver/` — `NodeGroupGetOptions` returns Unimplemented (proto permits it) |
-| `VirtualNodeState` reconciler — projects Liqo `VirtualNode` + `v1.Node` status | ✅ alpha | `internal/controller/autoscaling/virtualnodestate_controller.go` |
+| `VirtualNodeState` reconciler — projects the consumer `v1.Node` status (Ready, allocatable, `providerID`) onto the CR | ✅ alpha | `internal/controller/autoscaling/virtualnodestate_controller.go` (correlates by the cluster-scoped `v1.Node` named after the provider's Liqo cluster ID) |
 | Per-binary kustomize overlays + cert-manager PKI + scoped RBAC | ✅ alpha | `config/broker/`, `config/agent/{base,consumer,provider}/`, `config/grpc-server/`, `config/default/` (meta) |
 | Multi-cluster end-to-end suite (4-Kind topology) | ✅ alpha | `test/e2e/` (build-tagged `e2e`, run via `make test-e2e`) |
 | Partial release (`DELETE /reservations/{id}?chunks=N`) | ⏳ deferred to v2 | `internal/broker/api/reservation.go:458` — v1 always releases the whole reservation |

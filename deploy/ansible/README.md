@@ -190,11 +190,15 @@ alias k='kubectl --kubeconfig ~/.kube/provider-2.yaml'
 ```
 
 The demo narration (workload submit + watches + scale-down) is identical
-to the Kind walkthrough in `docs/getting-started.md §6`. Two real-cluster
-differences:
+to the Kind walkthrough in `docs/getting-started.md §6`. What to expect on
+these real k3s VMs:
 
-- Pods will reach `Running` (Liqo offloads shadow Pods through the
-  WireGuard tunnel successfully on real k3s — unlike Kind-on-shared-network).
+- Pods reach `Running` on the providers: the `fa_consumer` role stamps a
+  Liqo `NamespaceOffloading` for the `default` namespace, so Liqo reflects
+  the shadow Pods across the WireGuard tunnel and they run on the provider
+  clusters. (This is **not** k3s-specific — Liqo offloads Pods to `Running`
+  on Kind too, provided the workload namespace has a `NamespaceOffloading`;
+  the in-tree e2e currently omits that step and so only asserts scheduling.)
 - Scale-down is **fully automatic**: delete the workload, wait
   `scale_down_unneeded_time` (1 min by default — see
   `group_vars/consumers.yaml`), and Cluster Autoscaler fires
@@ -207,10 +211,25 @@ differences:
 ansible-playbook -i inventory.yaml playbooks/04-teardown.yaml
 ```
 
-Removes federation-autoscaler resources first (so finalizers run cleanly),
-then uninstalls Liqo, then leaves k3s in place — uninstalling k3s itself
-is destructive; run `/usr/local/bin/k3s-uninstall.sh` on each VM manually
-if you actually want the boxes wiped.
+Wipes k3s on every host (`k3s-uninstall.sh`), which removes all cluster
+state in one shot — Liqo peerings/tenants/authentication/offloading,
+cert-manager, the federation-autoscaler namespace + CRDs, and every
+workload — then deletes the control-host kubeconfigs so a later
+`01-bootstrap` re-fetches them fresh with the current inventory IPs.
+
+It's fully hands-off and always succeeds: it never runs `liqoctl`, so
+there is nothing to get stuck on. (Liqo's graceful uninstall refuses to
+proceed while any peering/offloading remains, which proved brittle after
+an interrupted run or a VM IP change — hence the wipe.) The full clean
+cycle is:
+
+```
+04-teardown → 01-bootstrap → 02-deploy → 03-verify
+```
+
+> **Destructive by design:** this drops the entire k3s node, including any
+> PersistentVolumes and host iptables rules. That's exactly what we want on
+> the demo VMs — do **not** point it at a k3s cluster you need to keep.
 
 ## Where the variables live
 
@@ -254,7 +273,7 @@ and that `ansible_user` matches the VM's deploy user.
 
 **Any Pod stuck in `ImagePullBackOff`.** Most likely a transient Docker Hub
 issue or your VMs lost outbound HTTPS. Confirm with
-`ssh ubuntu@<vm> docker pull docker.io/kazem26/federation-autoscaler-broker:v0.1.0`
+`ssh ubuntu@<vm> docker pull docker.io/kazem26/federation-autoscaler-broker:v0.1`
 (or whichever component / tag the playbook is using). If that fails, the
 maintainer may have changed registry visibility — open an issue.
 

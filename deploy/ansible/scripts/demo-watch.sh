@@ -35,42 +35,61 @@ WORKLOAD_SELECTOR="${FA_WORKLOAD_SELECTOR:-app=federation-demo}"
 
 kubeconfig_for() { echo "${KUBECONFIG_DIR}/${1}.yaml"; }
 
-# section prints a bold header before a block of output.
-section() { printf '\n\033[1m— %s —\033[0m\n' "$1"; }
+# sec <title> <displayed-command> — section header + the command that produced
+# the block below it. expect <hint> — what to watch for as the demo runs.
+sec()    { printf '\n\033[1;36m▸ %s\033[0m  \033[2m$ %s\033[0m\n' "$1" "$2"; }
+expect() { printf '  \033[33mexpect:\033[0m %s\n' "$*"; }
 
 # -----------------------------------------------------------------------------
 # Pane renderers — one screen-refresh worth of output for each cluster role.
-# Filled in by substeps 2.3 (central / provider) and 2.4 (consumer).
+# Each block prints its command + what to watch for, then the live result.
 # -----------------------------------------------------------------------------
 
 render_central() {
-  section "ClusterAdvertisements — chunk budget (Total/Reserved/Available)"
+  sec "ClusterAdvertisements — chunk budget" "kubectl -n $NAMESPACE get clusteradvertisements"
+  expect "RESERVED rises as chunks are lent, AVAILABLE falls; both revert on scale-down"
   kubectl -n "$NAMESPACE" get clusteradvertisements 2>/dev/null || echo "  (none)"
-  section "Reservations — phase machine"
+
+  sec "Reservations — phase machine" "kubectl -n $NAMESPACE get reservations"
+  expect "Pending → … → Peered on scale-up; → Released then GC'd on scale-down"
   kubectl -n "$NAMESPACE" get reservations 2>/dev/null || echo "  (none)"
-  section "ProviderInstructions (GenerateKubeconfig / Cleanup)"
+
+  sec "ProviderInstructions" "kubectl -n $NAMESPACE get providerinstructions"
+  expect "a GenerateKubeconfig appears during peering, then is enforced + GC'd"
   kubectl -n "$NAMESPACE" get providerinstructions 2>/dev/null || echo "  (none)"
-  section "ReservationInstructions (Peer / Unpeer / Cleanup)"
+
+  sec "ReservationInstructions" "kubectl -n $NAMESPACE get reservationinstructions"
+  expect "Peer on scale-up; Unpeer + Cleanup on scale-down"
   kubectl -n "$NAMESPACE" get reservationinstructions 2>/dev/null || echo "  (none)"
 }
 
 render_consumer() {
-  section "Virtual nodes — borrowed capacity (liqo.io/type=virtual-node)"
+  sec "Virtual nodes — borrowed capacity" "kubectl get nodes -l liqo.io/type=virtual-node"
+  expect "one virtual node per borrowed chunk appears as CA scales up (gone on scale-down)"
   kubectl get nodes -l liqo.io/type=virtual-node -o wide 2>/dev/null || echo "  (none yet)"
-  section "VirtualNodeState — gRPC-server's view fed to Cluster Autoscaler"
+
+  sec "VirtualNodeState — what CA reads" "kubectl -n $NAMESPACE get virtualnodestates"
+  expect "PHASE flips to Running once the borrowed v1.Node is Ready"
   kubectl -n "$NAMESPACE" get virtualnodestates 2>/dev/null || echo "  (none)"
-  section "Workload pods — Pending → Running (NODE shows local vs virtual)"
+
+  sec "Workload pods — local vs borrowed" "kubectl get pods -A -l $WORKLOAD_SELECTOR -o wide"
+  expect "first Pods run locally (NODE=consumer); the overflow pends, then Runs on provider virtual nodes"
   kubectl get pods -A -l "$WORKLOAD_SELECTOR" -o wide 2>/dev/null || echo "  (none)"
-  section "Cluster Autoscaler — recent scale decisions"
+
+  sec "Cluster Autoscaler — recent decisions" "kubectl -n $NAMESPACE logs deploy/cluster-autoscaler | grep -i scale | tail"
+  expect "'Scale-up' when pods pend; NodeGroupDeleteNodes when the workload is gone"
   kubectl -n "$NAMESPACE" logs deploy/cluster-autoscaler --tail=200 2>/dev/null \
     | grep -iE 'scale|expander|node group|nodegroup|unregistered|reservation' | tail -6 \
     || echo "  (no CA logs yet)"
 }
 
 render_provider() {
-  section "Nodes — allocatable headroom to lend"
+  sec "Nodes — allocatable headroom to lend" "kubectl get nodes -o custom-columns=NODE,CPU,MEM,PODS"
+  expect "spare CPU/MEM this provider lends as 2 CPU / 4Gi chunks"
   kubectl get nodes -o custom-columns='NODE:.metadata.name,CPU:.status.allocatable.cpu,MEM:.status.allocatable.memory,PODS:.status.allocatable.pods' 2>/dev/null || echo "  (none)"
-  section "Offloaded pods reflected from the consumer"
+
+  sec "Offloaded pods reflected from the consumer" "kubectl get pods -A -l $WORKLOAD_SELECTOR -o wide"
+  expect "the consumer's Pods show up here Running once scale-up offloads them"
   # Liqo reflects the consumer's Pods onto this provider (in a remapped
   # namespace) while preserving labels, so the workload selector finds them.
   kubectl get pods -A -l "$WORKLOAD_SELECTOR" -o wide 2>/dev/null || echo "  (none yet)"

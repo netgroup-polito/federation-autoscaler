@@ -3,22 +3,27 @@
 #   kubectl --kubeconfig ~/.kube/consumer-1.yaml apply  -f burst-workload.yaml   # scale UP
 #   kubectl --kubeconfig ~/.kube/consumer-1.yaml delete -f burst-workload.yaml   # scale DOWN
 #
-# How it triggers scale-up: each replica reserves more CPU/memory than the
-# consumer cluster's own node(s) can satisfy, so some Pods stay Pending.
-# Cluster Autoscaler (running with --cloud-provider=externalgrpc against the
-# federation gRPC server) sees the Pending Pods, the price expander picks the
-# federation node group, a Reservation is created, a Liqo virtual node
-# materialises, and the Pending Pods schedule onto the borrowed chunk.
-# Deleting the Deployment removes the Pods → the virtual node goes unneeded →
-# CA calls NodeGroupDeleteNodes → the Reservation is released → scale-down.
+# How it triggers scale-up: the `default` namespace is offloaded
+# LocalAndRemote, so the scheduler fills the consumer's OWN node first; the
+# replicas that don't fit locally stay Pending. Cluster Autoscaler (running
+# --cloud-provider=externalgrpc against the federation gRPC server) sees the
+# Pending Pods, the price expander picks the federation node group, a
+# Reservation is created per borrowed chunk, Liqo virtual nodes materialise,
+# and the Pending Pods schedule onto them. Deleting the Deployment removes the
+# Pods → the virtual nodes go unneeded → CA calls NodeGroupDeleteNodes → the
+# Reservations are released → scale-down.
 #
 # Namespace: `default`, because that is where the fa_consumer role stamps the
 # Liqo NamespaceOffloading. Workloads in other namespaces need their own NSO.
 #
-# Tuning: if your consumer node is large enough to fit all replicas, no Pod
-# pends and nothing scales up — raise `replicas` until `kubectl get pods -w`
-# shows Pending Pods. A chunk is 2 CPU / 4Gi (config/samples/chunk-config.yaml),
-# so the 500m requests below let a couple of Pods land per borrowed chunk.
+# Sizing (verified on the 4-VM demo): each Pod requests 1 CPU / 1Gi. The
+# consumer node has ~3.7 CPU free, so ~3 Pods run LOCALLY; the other 4 spill
+# to the federation. A chunk is 2 CPU / 4Gi (config/samples/chunk-config.yaml)
+# = 2 of these Pods, and each provider lends 1 chunk — so the 4 overflow Pods
+# fill BOTH providers (2 + 2). Net: 3 local + 2 provider-1 + 2 provider-2, all
+# Running, none Pending. If your consumer's free capacity differs, re-tune
+# `replicas` so a few Pods pend (too few = no scale-up; too many = some stay
+# Pending once both 2-CPU chunks are full).
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -27,7 +32,7 @@ metadata:
   labels:
     app: federation-demo
 spec:
-  replicas: 8
+  replicas: 7
   selector:
     matchLabels:
       app: federation-demo
@@ -51,8 +56,8 @@ spec:
           image: registry.k8s.io/pause:3.9
           resources:
             requests:
-              cpu: "500m"
-              memory: "256Mi"
+              cpu: "1"
+              memory: "1Gi"
             limits:
-              cpu: "500m"
-              memory: "256Mi"
+              cpu: "1"
+              memory: "1Gi"

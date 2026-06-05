@@ -65,6 +65,14 @@
 # offloading is enabled for `default`; the per-Reservation ResourceSlice
 # picks the specific provider. Operators with workloads outside
 # `default` should stamp their own NSO in those namespaces.
+#
+# podOffloadingStrategy: LocalAndRemote — Pods may run on the consumer's
+# OWN node first and only spill onto borrowed provider nodes when local
+# capacity is exhausted (the natural autoscaler story). 'Remote' would
+# instead force EVERY Pod off the local node onto a virtual node, which
+# is not what we want. Since no virtual node exists until CA scales up,
+# the scheduler fills local first; the overflow pends and triggers the
+# borrow.
 - name: Bootstrap Liqo NamespaceOffloading for the default namespace
   delegate_to: localhost
   ansible.builtin.shell:
@@ -77,7 +85,7 @@
         namespace: default
       spec:
         namespaceMappingStrategy: DefaultName
-        podOffloadingStrategy: Remote
+        podOffloadingStrategy: LocalAndRemote
         clusterSelector:
           nodeSelectorTerms:
             - matchExpressions:

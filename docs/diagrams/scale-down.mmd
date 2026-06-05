@@ -23,16 +23,16 @@ sequenceDiagram
 
     CAg->>Bk: GET /api/v1/instructions (5 s poll)
     Bk-->>CAg: ReservationInstruction{Unpeer,<br/>lastChunk=true}
-    CAg->>CAg: delete NamespaceOffloading
     CAg->>CAg: delete VirtualNodeState CR
     CAg->>Lo: delete ResourceSlice
     Lo-->>CAg: ok
     CAg->>Lq: liqoctl unpeer<br/>--remote-kubeconfig <path>
     Lq-->>CAg: ok (or "already unpeered")
     CAg->>CAg: delete kubeconfig Secret<br/>(lastChunk=true)
+    CAg->>Lo: delete ForeignCluster shell<br/>(lastChunk=true, liqoctl unpeer leaves it behind)
     CAg->>Bk: POST /api/v1/instructions/{id}/result<br/>(releasedChunks, tunnelDropped)
 
-    Note right of Bk: Reservation enters terminal phase<br/>handleTerminal emits<br/>ProviderInstruction{Cleanup}
+    Note right of Bk: Reservation enters terminal phase<br/>handleTerminal emits ProviderInstruction{Cleanup}<br/>plus un-owned consumer ReservationInstruction{Cleanup},<br/>GC-ed after DefaultTerminalReservationTTL (15m)
     PAg->>Bk: GET /api/v1/instructions (5 s poll)
     Bk-->>PAg: ProviderInstruction{Cleanup}
     PAg->>PAg: revoke peering-user<br/>ServiceAccount + bindings
@@ -40,4 +40,4 @@ sequenceDiagram
     Note right of Bk: Reservation phase<br/>Released<br/>(chunks return to pool)
 
     Note over Lo: Liqo tears down<br/>VirtualNode + tunnel
-    Note over GS: VirtualNodeStateReconciler<br/>no longer sees the CR;<br/>NodeGroupTargetSize drops
+    Note over GS: VirtualNodeStateReconciler<br/>no longer sees the CR,<br/>NodeGroupTargetSize drops

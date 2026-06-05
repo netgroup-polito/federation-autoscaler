@@ -334,7 +334,7 @@ address=localhost:50051
 
 **Peering mode:** On-demand — established only when the CA first requests scale-up on a given provider, torn down when the last chunk is released.
 
-> **Implemented in:** upstream Liqo (see `../liqo/`). Provider Agent shells out to `liqoctl generate peering-user` (`internal/agent/provider/instructions/generatekubeconfig.go`); Consumer Agent shells out to `liqoctl peer --gw-server-service-type NodePort` / `liqoctl unpeer` and creates `ResourceSlice` + (singleton) `NamespaceOffloading` named literally `offloading` via `unstructured.Unstructured` (`internal/agent/consumer/instructions/liqo.go`, `peer.go`, `unpeer.go`). `VirtualNode` is read by `internal/controller/autoscaling/virtualnodestate_controller.go`. `liqoctl` is pinned to v1.1.2 (`LIQOCTL_VERSION` in the `Makefile`), prefetched on the host into `bin/liqoctl-*/liqoctl`, and `COPY`-ed into the agent image at build time.
+> **Implemented in:** upstream Liqo (see `../liqo/`). Provider Agent shells out to `liqoctl generate peering-user` (`internal/agent/provider/instructions/generatekubeconfig.go`); Consumer Agent shells out to `liqoctl peer --gw-server-service-type NodePort` / `liqoctl unpeer` and creates the `ResourceSlice` via `unstructured.Unstructured` (`internal/agent/consumer/instructions/liqo.go`, `peer.go`); on `Unpeer` it deletes the `ResourceSlice` and, on `LastChunk`, the leftover `ForeignCluster` shell `liqoctl unpeer` leaves behind (`unpeer.go`). The singleton `NamespaceOffloading` named literally `offloading` is **operator-stamped** (the Ansible `fa_consumer` role / bootstrap) — the agent never creates or deletes it. The materialised `v1.Node` is read by `internal/controller/autoscaling/virtualnodestate_controller.go`. `liqoctl` is pinned to v1.1.2 (`LIQOCTL_VERSION` in the `Makefile`), prefetched on the host into `bin/liqoctl-*/liqoctl`, and `COPY`-ed into the agent image at build time.
 
 ---
 
@@ -380,7 +380,7 @@ Creating → Running → Deleting → (deleted)
 Creating → Failed → (cleaned up)
 ```
 
-> **Implemented in:** `api/autoscaling/v1alpha1/virtualnodestate_types.go` (CRD), `internal/controller/autoscaling/virtualnodestate_controller.go` (reconciler projecting Liqo `VirtualNode` + `v1.Node` allocatable onto status), `internal/agent/consumer/instructions/virtualnodestate.go` (Peer creates / Unpeer deletes the CR).
+> **Implemented in:** `api/autoscaling/v1alpha1/virtualnodestate_types.go` (CRD), `internal/controller/autoscaling/virtualnodestate_controller.go` (reconciler projecting the cluster-scoped `v1.Node`'s Ready / allocatable / `providerID` onto status — correlated by the node named after the provider's Liqo cluster ID, **not** the Liqo `VirtualNode` CR), `internal/agent/consumer/instructions/virtualnodestate.go` (Peer creates / Unpeer deletes the CR).
 
 ### 5.2 ClusterAdvertisement (Broker)
 
@@ -452,7 +452,7 @@ Peered → Unpeering → Released
 {Pending, GeneratingKubeconfig, KubeconfigReady, Peering} → Failed | Expired
 ```
 
-> **Implemented in:** `api/broker/v1alpha1/reservation_types.go` (CRD), `internal/controller/broker/reservation_controller.go` (phase machine + expiry guard + `checkProviderAvailable`), `internal/broker/api/reservation.go` (`POST /api/v1/reservations` synchronous decision engine + `DELETE` handler). v1 limitation: partial release deferred — see `internal/broker/api/reservation.go:458` (`LastChunk: true` always).
+> **Implemented in:** `api/broker/v1alpha1/reservation_types.go` (CRD, incl. `Status.TerminatedAt` — the terminal-GC clock), `internal/controller/broker/reservation_controller.go` (phase machine + expiry guard + `checkProviderAvailable` + terminal GC via `DefaultTerminalReservationTTL`), `internal/broker/api/reservation.go` (`POST /api/v1/reservations` synchronous decision engine + `DELETE` handler). v1 limitation: partial release deferred — the `LastChunk: true` hardcode lives in `reservation_controller.go`'s `handleUnpeering`.
 
 ### 5.4 ProviderInstruction (Provider Agent cluster)
 
@@ -1118,7 +1118,7 @@ Step 3: CA calls NodeGroupDeleteNodes(id="ng-provider-1-standard", nodes=[node-x
   Step 20: Deletes VirtualNodeState chunk-0; next NodeGroups() reflects the freed chunk in maxSize.
 ```
 
-> **Implemented in:** `internal/grpcserver/rpc_mutating.go` (`NodeGroupDeleteNodes`); `internal/broker/api/reservation.go` (`DELETE /api/v1/reservations/{id}` — v1 supports full release only, see `LastChunk: true` at `internal/controller/broker/reservation_controller.go:188`); `internal/controller/broker/reservation_controller.go` (`handleUnpeering` + `handleTerminal` emitting `ProviderInstruction{Cleanup}`); `internal/agent/consumer/instructions/unpeer.go` (delete VNS → delete ResourceSlice → `liqoctl unpeer`) and `internal/agent/provider/instructions/cleanup.go`.
+> **Implemented in:** `internal/grpcserver/rpc_mutating.go` (`NodeGroupDeleteNodes`); `internal/broker/api/reservation.go` (`DELETE /api/v1/reservations/{id}` — v1 supports full release only; the `LastChunk: true` hardcode lives in `reservation_controller.go`'s `handleUnpeering`); `internal/controller/broker/reservation_controller.go` (`handleUnpeering` + `handleTerminal`, emitting a `ProviderInstruction{Cleanup}` **and** an un-owned consumer `ReservationInstruction{Cleanup}`, then GC'ing the terminal Reservation after `DefaultTerminalReservationTTL`); `internal/agent/consumer/instructions/unpeer.go` (delete VNS → delete ResourceSlice → `liqoctl unpeer` → delete the leftover `ForeignCluster` shell on `LastChunk`) and `internal/agent/provider/instructions/cleanup.go`.
 
 > **Chunk-release invariant.** `ClusterAdvertisement.Status.ReservedChunks` is decremented by *exactly one* path per Reservation, gated by the `federation-autoscaler.io/chunks-released` annotation on the Reservation (see `api/broker/v1alpha1/common_types.go`, `IsChunksReleased` / `MarkChunksReleased` helpers). The API `DELETE /api/v1/reservations/{id}` handler is the normal release path (stamps the annotation after decrementing); the reservation reconciler's `handleTerminal` is the safety net that covers any non-Unpeering terminal phase (Failed / Expired / etc.) and only decrements when the annotation is absent. Without this idempotency marker the counter drifts — provider `AvailableChunks` gets stuck at 0 forever after any Reservation that died mid-flight without going through the DELETE path. Do not add a third release path.
 
@@ -1220,7 +1220,7 @@ Steps:
 | Enforced instructions older than 24 h | GC |
 | Terminal reservations older than 7 days | GC |
 
-> **Implemented in:** `internal/controller/broker/reservation_controller.go` (expiry guard + `checkProviderAvailable` watch off `ClusterAdvertisement`), `internal/controller/broker/clusteradvertisement_controller.go` (`StaleAfter` + `Available` flip), `internal/controller/autoscaling/instruction.go` (`DefaultEnforcedTTL=5m` instruction GC). The 7-day terminal-reservation GC is not yet wired — terminal Reservations persist until manually deleted.
+> **Implemented in:** `internal/controller/broker/reservation_controller.go` (expiry guard + `checkProviderAvailable` watch off `ClusterAdvertisement`), `internal/controller/broker/clusteradvertisement_controller.go` (`StaleAfter` + `Available` flip), `internal/controller/autoscaling/instruction.go` (`DefaultEnforcedTTL=5m` instruction GC). Terminal Reservations (`Released`/`Failed`/`Expired`) are garbage-collected by `reservation_controller.go`'s `handleTerminal` once `Status.TerminatedAt` is older than `DefaultTerminalReservationTTL` (15 min; the reconciler's `TerminalTTL` field overrides for tests).
 
 ### 9.4 Idempotency Contract
 

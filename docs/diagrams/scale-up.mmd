@@ -34,14 +34,14 @@ sequenceDiagram
     CAg->>CAg: persist kubeconfig Secret
     CAg->>Lq: liqoctl peer<br/>--remote-kubeconfig <path>
     Lq-->>CAg: ok
-    CAg->>Lo: create ResourceSlice<br/>+ NamespaceOffloading
+    CAg->>Lo: create ResourceSlice<br/>(NamespaceOffloading is operator-stamped,<br/>not per-reservation)
     Lo-->>CAg: ResourceSlice accepted
     Note over Lo: Liqo materialises<br/>VirtualNode + v1.Node
     CAg->>CAg: create VirtualNodeState CR
     CAg->>Bk: POST /api/v1/instructions/{id}/result<br/>(virtualNodeNames)
     Note right of Bk: Reservation phase<br/>Peered
 
-    Note over GS: VirtualNodeStateReconciler<br/>projects Liqo VN status<br/>onto VirtualNodeState
+    Note over GS: VirtualNodeStateReconciler<br/>projects the consumer v1.Node<br/>(Ready, allocatable, providerID)<br/>onto VirtualNodeState
     CA->>GS: NodeGroupNodes()
     GS->>CAg: GET /local/virtual-nodes
     CAg-->>GS: [{name, Phase=Running, allocatable}]

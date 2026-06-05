@@ -13,17 +13,20 @@ decision engine packaged in this repo.
 - **[Option A — Four hosts, real k3s, Ansible-driven](#3-option-a--four-host-real-cluster-install-ansible)** —
   the production-like path. Four Ubuntu VMs, single-node k3s on each,
   everything wired together by an Ansible playbook. ~45 minutes;
-  scale-down is fully automatic (Liqo offloading actually works on real
-  k3s). **Recommended for anything resembling a real demo or evaluation.**
+  scale-down is fully automatic — the consumer's `NamespaceOffloading`
+  lets Liqo run the offloaded Pods, so Cluster Autoscaler reclaims the
+  nodes on its own. **Recommended for anything resembling a real demo or
+  evaluation.**
 - **[Option B — Single Kind cluster, dev install](#4-option-b--single-cluster-dev-install)** —
   the broker / agent / gRPC server come up on one local Kind cluster.
   No peering, no scale-up; only useful for inspecting that the deploys
   render and the binaries start.
 - **[Option C — Four Kind clusters, full federation in one box](#5-option-c--four-cluster-kind-federation-install)** —
-  the e2e suite's topology. Scale-up works end-to-end, but scale-down
-  has to be triggered manually because Liqo's data-plane offloading on
-  Kind-on-shared-network sometimes traps Pods in `OffloadingBackOff`.
-  ~15 minutes once your laptop is set up.
+  the e2e suite's topology. Scale-up works end-to-end. The offloaded Pods
+  currently stay *Scheduled* (not *Running*) on the providers — **not** a
+  Kind/Liqo limitation, but because the e2e harness doesn't yet stamp a
+  `NamespaceOffloading` for the workload namespace (tracked for post-demo).
+  So use Option A for a live demo. ~15 minutes once your laptop is set up.
 
 For the deeper architectural background, see [`design.md`](./design.md).
 
@@ -88,23 +91,99 @@ Output: `federation-autoscaler/broker:latest`,
 
 ## 3. Option A — Four-host real-cluster install (Ansible)
 
-The production-like path: four Ubuntu VMs running single-node k3s each,
-bootstrapped + deployed by an Ansible playbook. This is what you want for
-a real demo or for evaluating federation-autoscaler on hardware you
-control. Scale-down is fully automatic because real Liqo on real k3s
-offloads Pods successfully (unlike the Kind option in §5).
+The production-like path: a set of Ubuntu VMs running single-node k3s
+each (one central, one or more consumers, one or more providers),
+bootstrapped + deployed by Ansible. This is what you want for a real demo
+or for evaluating federation-autoscaler on hardware you control.
+Scale-down is fully automatic: the `fa_consumer` role stamps a Liqo
+`NamespaceOffloading`, so the offloaded Pods actually run on the providers
+and Cluster Autoscaler reclaims the nodes once the workload is gone. (The
+§5 Kind path differs only because its harness skips that
+`NamespaceOffloading` step — not because of Kind.)
 
-The full walkthrough — hardware requirements, network ports, tooling
-install, inventory setup, the three playbooks — is documented as a
-standalone guide:
+### One command: `demo-up.sh`
+
+`deploy/ansible/scripts/demo-up.sh` wraps the entire bring-up into a single
+command, run **from your control host (a laptop or jump box)** — not on the
+VMs. Give it the VM IPs and it installs tooling, writes the inventory,
+distributes your SSH key, sanity-checks connectivity, and runs all four
+playbooks in order.
+
+**Before you run it, make sure:**
+
+- **Control host** is Ubuntu 22.04/24.04 with `sudo` and outbound HTTPS.
+  You do *not* need to pre-install `ansible`/`kubectl`/`kustomize`/`liqoctl`
+  — the script installs whatever's missing (pinned to the versions in §1).
+- **VMs** are all on the same private network with the required ports open
+  (SSH 22, k3s API 6443, broker NodePort 30443/TCP, Liqo gateway
+  30000–32767/UDP) and outbound HTTPS for image pulls. See
+  [the Ansible README → *Network requirements*](../deploy/ansible/README.md#network-requirements)
+  and *Hardware requirements* for sizing.
+- **SSH login** works to each VM as the chosen user (default `ubuntu`).
+  The script runs `ssh-copy-id` for you, so first-time password prompts
+  are expected; if you have no SSH key it generates one. Pass `--ssh-key`
+  to use a specific key, or `--skip-ssh-copy-id` once keys are in place.
+- **Passwordless sudo** is configured for that user on every VM. The script
+  *verifies* this and, if it's missing, prints the exact `sudoers.d`
+  command to run on the VMs — fix it there and re-run.
+- **Images** are published: the playbook pulls
+  `docker.io/kazem26/federation-autoscaler-{broker,agent,grpc-server}` at
+  the tag pinned in `deploy/ansible/group_vars/all.yaml` (`fa_tag`). The
+  default `--repo` is the public upstream; point `--repo` at your fork if
+  your fixes/tag live elsewhere.
+
+**Run it** (fetch the script standalone — it clones the rest itself):
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/netgroup-polito/federation-autoscaler/main/deploy/ansible/scripts/demo-up.sh -o demo-up.sh
+chmod +x demo-up.sh
+
+# 1 central + 1 consumer + 2 providers (the verified demo topology):
+./demo-up.sh --central 172.23.6.90 \
+             --consumers 172.23.6.91 \
+             --providers 172.23.6.92,172.23.6.93
+```
+
+(Already have the repo cloned? Just run
+`deploy/ansible/scripts/demo-up.sh …` — it `git pull`s in place.)
+
+Useful flags: `--user <ssh-user>` (default `ubuntu`), `--ssh-key <path>`,
+`--skip-ssh-copy-id`, `--repo <git-url>`, `--dir <clone-dir>`, `--help`.
+Consumers/providers accept comma-separated lists for N consumers / M
+providers; cluster IDs (`consumer-1…N`, `provider-1…M`) and non-overlapping
+pod/service CIDRs are assigned automatically.
+
+**What it does, in order:** install missing tools → clone the repo +
+generate `inventory.yaml` from your IPs → `ssh-copy-id` to every host →
+`ansible … -m ping` + passwordless-sudo check (aborts with guidance if
+either fails) → run `04-teardown → 01-bootstrap → 02-deploy → 03-verify`.
+
+**When it finishes** you'll have a per-cluster kubeconfig on the control
+host at `~/.kube/<cluster_id>.yaml` (e.g. `~/.kube/central.yaml`,
+`~/.kube/consumer-1.yaml`, `~/.kube/provider-1.yaml`) and the broker +
+agents + gRPC server + Cluster Autoscaler all running. The script prints
+the scale-up / scale-down commands to copy-paste next.
+
+### Or step by step
+
+If you'd rather drive each phase yourself (or need to customise the
+inventory, sizing, or ports), the full manual walkthrough — hardware,
+network, tooling, inventory, and the four playbooks individually — lives
+in the standalone guide:
 
 **→ [`../deploy/ansible/README.md`](../deploy/ansible/README.md)**
 
-Skim that, then jump back to [§6 Peer a first provider](#6-peer-a-first-provider)
-and [§7 Watch a scale-up](#7-watch-a-scale-up) to drive the demo flow —
-the `kubectl` commands there are kubeconfig-driven and work identically
-whether you're pointing at the Ansible-provisioned k3s clusters or the
-Kind clusters from §5.
+### Then drive the demo
+
+Either way, jump to [§6 Peer a first provider](#6-peer-a-first-provider)
+and [§7 Watch a scale-up](#7-watch-a-scale-up). The `kubectl` commands
+there are kubeconfig-driven and work identically against the
+Ansible-provisioned k3s clusters — just swap the Kind-style
+`KUBECONFIG=/tmp/<cluster>.kubeconfig` for the Ansible-style
+`--kubeconfig ~/.kube/<cluster_id>.yaml` (e.g. `~/.kube/consumer-1.yaml`).
+A ready-made scale-up workload ships at
+[`../deploy/ansible/samples/burst-workload.yaml`](../deploy/ansible/samples/burst-workload.yaml),
+and the live dashboard at `deploy/ansible/scripts/demo-watch.sh`.
 
 ---
 
@@ -162,10 +241,15 @@ provider cluster — see Option B.
 The full happy-path topology — central + consumer-1 + provider-1 +
 provider-2 — but all four clusters as Kind containers on one host
 sharing a docker network. This is what the e2e suite stands up. Useful
-for development iteration; less useful for a demo because Liqo's
-data-plane offloading on Kind-on-shared-network sometimes traps Pods in
-`OffloadingBackOff` and prevents automatic scale-down. For a real demo,
-use [Option A](#3-option-a--four-host-real-cluster-install-ansible).
+for development iteration; less useful for a live demo because the e2e
+harness doesn't yet stamp a `NamespaceOffloading` for the workload
+namespace, so the offloaded Pods stay *Scheduled* rather than *Running*
+and scale-down has to be triggered by hand. This is a harness gap, **not**
+a Kind or Liqo limitation — Liqo offloads Pods to *Running* on Kind fine
+when the namespace has a `NamespaceOffloading` (as Option A does, and as
+Liqo's own `offloading-with-policies` example demonstrates entirely on
+Kind). For a live demo, use
+[Option A](#3-option-a--four-host-real-cluster-install-ansible).
 
 The fastest path is to let the e2e suite do the standup for you:
 
@@ -328,13 +412,16 @@ You'll see each Pod's `NODE` column populate with the provider's name
 CA → broker → agent → Liqo produced a remote virtual node, and the
 scheduler bound the workload to it.
 
-**Note on `OffloadingBackOff`.** Whether the Pod then transitions to
-`Running` depends on Liqo's data-plane offloading actually pushing the
-shadow Pod across the WireGuard tunnel and starting it on the provider.
-On constrained Kind-on-shared-network setups this step sometimes hits
-`OffloadingBackOff` because of Liqo CNI/IPAM quirks — that's an upstream
-Liqo concern, separate from federation-autoscaler. The Pod being
-*scheduled onto the federation virtual node* is the strongest signal
+**Whether the Pod reaches `Running`** depends on Liqo reflecting the
+shadow Pod across the WireGuard tunnel and starting it on the provider —
+which requires the workload's namespace to carry a `NamespaceOffloading`.
+On **Option A** the `fa_consumer` role stamps it, so Pods reach `Running`
+on the providers (verified on the demo VMs). On **Option C** the e2e
+harness does **not** yet stamp it, so Pods stay *Scheduled* on the virtual
+node and never reflect — a known harness gap (tracked for post-demo),
+**not** a Kind or Liqo limitation (Liqo's own `offloading-with-policies`
+example runs offloaded Pods to `Running` entirely on Kind). On Option C,
+the Pod being *scheduled onto the federation virtual node* is the signal
 the federation-autoscaler chain is healthy end-to-end.
 
 ---
