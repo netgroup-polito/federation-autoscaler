@@ -128,7 +128,7 @@ type ProviderInstructionStatus struct {
 // +kubebuilder:printcolumn:name="Provider",type=string,JSONPath=`.spec.targetClusterId`
 // +kubebuilder:printcolumn:name="Reservation",type=string,JSONPath=`.spec.reservationId`
 // +kubebuilder:printcolumn:name="Enforced",type=boolean,JSONPath=`.status.enforced`
-// +kubebuilder:printcolumn:name="Expires",type=date,JSONPath=`.spec.expiresAt`
+// +kubebuilder:printcolumn:name="Expires",type=string,JSONPath=`.spec.expiresAt`
 // +kubebuilder:printcolumn:name="Age",type=date,JSONPath=`.metadata.creationTimestamp`
 
 // ProviderInstruction is a Broker-owned work item targeted at a specific

@@ -91,23 +91,26 @@ type ClusterAdvertisementStatus struct {
 	// are excluded from /nodegroups responses and from new reservation decisions.
 	Available bool `json:"available"`
 
+	// No omitempty on the chunk counters below: 0 is a meaningful value and
+	// must serialize, or the kubectl printcolumns render it as a blank cell.
+
 	// TotalChunks is the number of chunks computed from the latest advertisement
 	// using the chunk-config ConfigMap (see docs/design.md §6).
 	// +optional
 	// +kubebuilder:validation:Minimum=0
-	TotalChunks int32 `json:"totalChunks,omitempty"`
+	TotalChunks int32 `json:"totalChunks"`
 
 	// ReservedChunks is the number of chunks currently bound to active
 	// Reservations (those whose phase is not Released | Expired | Failed).
 	// +optional
 	// +kubebuilder:validation:Minimum=0
-	ReservedChunks int32 `json:"reservedChunks,omitempty"`
+	ReservedChunks int32 `json:"reservedChunks"`
 
 	// AvailableChunks is TotalChunks minus ReservedChunks. Consumers see this
 	// value as the maxSize of the corresponding node group.
 	// +optional
 	// +kubebuilder:validation:Minimum=0
-	AvailableChunks int32 `json:"availableChunks,omitempty"`
+	AvailableChunks int32 `json:"availableChunks"`
 
 	// Conditions reports the current state of the ClusterAdvertisement.
 	// Standard condition types:
