@@ -176,22 +176,25 @@ you which one. After this returns green, your federation is ready to demo.
 
 ## Step 5 — Run the demo
 
-Open four terminals. In each:
+Open the live dashboard — a tmux session showing the broker, the consumer
+(Cluster Autoscaler view + local view) and both providers side by side.
+Each pane prints the command it runs and what to expect as the demo
+progresses:
 
 ```bash
-# Terminal "central"
-alias k='kubectl --kubeconfig ~/.kube/central.yaml'
-# Terminal "consumer-1"
-alias k='kubectl --kubeconfig ~/.kube/consumer-1.yaml'
-# Terminal "provider-1"
-alias k='kubectl --kubeconfig ~/.kube/provider-1.yaml'
-# Terminal "provider-2"
-alias k='kubectl --kubeconfig ~/.kube/provider-2.yaml'
+scripts/demo-watch.sh           # tear the session down later with --kill
 ```
 
-The demo narration (workload submit + watches + scale-down) is identical
-to the Kind walkthrough in `docs/getting-started.md §6`. What to expect on
-these real k3s VMs:
+Then drive the scale-up / scale-down with the burst workload — the sole
+manual action in the demo (the sizing rationale is in the file's header
+comment):
+
+```bash
+kubectl --kubeconfig ~/.kube/consumer-1.yaml apply  -f samples/burst-workload.yaml   # scale UP
+kubectl --kubeconfig ~/.kube/consumer-1.yaml delete -f samples/burst-workload.yaml   # scale DOWN
+```
+
+What to expect on these real k3s VMs:
 
 - Pods reach `Running` on the providers: the `fa_consumer` role stamps a
   Liqo `NamespaceOffloading` for the `default` namespace, so Liqo reflects
@@ -286,3 +289,22 @@ it matches inventory.
 **Broker shows `tls: handshake error: bad certificate` from agents.** The
 CA-Secret mirror failed for that cluster. Re-run `02-deploy.yaml` — the
 `fa_pki_mirror` role is idempotent.
+
+**Broker pod CrashLoopBackOff with `unable to load server keypair`.**
+cert-manager hadn't issued the broker's server certificate yet. Usually
+self-heals within ~30 s; confirm with `kubectl --kubeconfig ~/.kube/central.yaml
+-n federation-autoscaler-system get certificate broker-server` (READY
+should be `True`) and check the broker Pod's next restart comes up clean.
+
+**Reservation stuck at `GeneratingKubeconfig`.** The chosen provider's
+agent isn't polling the broker. Check
+`kubectl --kubeconfig ~/.kube/provider-1.yaml -n federation-autoscaler-system
+logs deploy/agent --tail=100`; the common cause is `brokerUrl` in the
+`agent-config` ConfigMap not pointing at the central VM's NodePort
+(`https://<central-ip>:30443`). Re-run `02-deploy.yaml` — it re-patches the
+ConfigMap from the inventory.
+
+**Reservation reaches `Peering` then flips to `Failed`.** `liqoctl peer`
+failed on the consumer agent. Tail
+`kubectl --kubeconfig ~/.kube/consumer-1.yaml -n federation-autoscaler-system
+logs deploy/agent --tail=200` for the underlying stderr.
