@@ -44,7 +44,7 @@ federation-autoscaler/
 ├── cmd/            # broker, agent, grpc-server entrypoints
 ├── config/         # kustomize overlays (broker, agent/{base,consumer,provider}, grpc-server, default meta)
 ├── deploy/
-│   └── ansible/    # 4-host k3s demo install: playbooks, roles, demo-up.sh / demo-watch.sh, burst-workload sample
+│   └── ansible/    # 4-host k3s demo install: playbooks, roles, demo-up.sh, burst-workload sample
 ├── docs/           # design.md (as-built), diagrams/
 ├── hack/           # development scripts
 ├── internal/       # controllers, broker REST API, agent core, gRPC server
@@ -70,9 +70,9 @@ curl -fsSL https://raw.githubusercontent.com/netgroup-polito/federation-autoscal
 chmod +x demo-up.sh
 ./demo-up.sh --central <ip> --consumers <ip> --providers <ip>,<ip>
 
-# 2. Open the live tmux dashboard — broker, consumer and both providers
-#    side by side:
-~/federation-autoscaler/deploy/ansible/scripts/demo-watch.sh
+# 2. Watch the broker's state live in a browser — its read-only web dashboard
+#    (advertisements, reservations, instructions, chunk capacity, consumers):
+#    open http://<central-ip>:30444/
 
 # 3. Scale UP — apply the burst workload; the replicas that don't fit on the
 #    consumer's own node spill onto virtual nodes borrowed from the providers:

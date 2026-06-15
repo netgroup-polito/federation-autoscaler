@@ -35,6 +35,8 @@ import (
 	"net/http"
 	"sort"
 
+	corev1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
@@ -75,6 +77,13 @@ type CapacitySummary struct {
 	ProviderCount          int                          `json:"providerCount"`
 	AvailableProviderCount int                          `json:"availableProviderCount"`
 	ByChunkType            map[string]ChunkTypeCapacity `json:"byChunkType"`
+
+	// ChunkSizes is the canonical per-chunk shape the Broker's sizer assigns
+	// to each chunk type (one chunk's worth of cpu/memory/gpu), keyed by chunk
+	// type. Independent of what providers currently advertise — it is the
+	// federation's fixed chunk definition, so it always carries both
+	// "standard" and "gpu".
+	ChunkSizes map[string]corev1.ResourceList `json:"chunkSizes"`
 }
 
 // ChunkTypeCapacity is one row of CapacitySummary.ByChunkType.
@@ -146,6 +155,7 @@ func (s *Server) buildOverview(ctx context.Context) (Overview, error) {
 		Namespace:   s.namespace,
 		Capacity:    CapacitySummary{ByChunkType: map[string]ChunkTypeCapacity{}},
 	}
+	ov.Capacity.ChunkSizes = s.chunkSizes()
 
 	// Advertisements + capacity aggregates. The Status.{Total,Reserved,
 	// Available}Chunks counters are the authoritative values the
@@ -230,6 +240,34 @@ func (s *Server) buildOverview(ctx context.Context) (Overview, error) {
 	}
 
 	return ov, nil
+}
+
+// chunkSizes returns the canonical per-chunk shape the Broker's sizer assigns
+// to each chunk type, keyed by chunk type string. It asks the live sizer
+// (rather than re-hardcoding the figures) by classifying a reference
+// advertisement large enough to yield a chunk of each kind — Size always
+// returns the fixed PerChunk regardless of how many chunks fit. A non-GPU
+// reference yields the standard size; a GPU reference yields the gpu size.
+func (s *Server) chunkSizes() map[string]corev1.ResourceList {
+	out := map[string]corev1.ResourceList{}
+
+	standardRef := corev1.ResourceList{
+		corev1.ResourceCPU:    resource.MustParse("1000"),
+		corev1.ResourceMemory: resource.MustParse("1000Gi"),
+	}
+	gpuRef := corev1.ResourceList{
+		corev1.ResourceCPU:                    resource.MustParse("1000"),
+		corev1.ResourceMemory:                 resource.MustParse("1000Gi"),
+		corev1.ResourceName("nvidia.com/gpu"): resource.MustParse("1000"),
+	}
+
+	for _, r := range s.sizer.Size(standardRef) {
+		out[string(r.Type)] = r.PerChunk
+	}
+	for _, r := range s.sizer.Size(gpuRef) {
+		out[string(r.Type)] = r.PerChunk
+	}
+	return out
 }
 
 // dashboardReservationView projects a Reservation CR onto the dashboard view,

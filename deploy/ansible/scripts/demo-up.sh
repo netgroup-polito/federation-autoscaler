@@ -5,7 +5,7 @@
 # Does everything needed to stand up the demo from a bare Ubuntu control
 # host:
 #   1. Installs any missing control-host tools (ansible-core, kubectl,
-#      kustomize, liqoctl) — pinned to the versions the project expects.
+#      kustomize, liqoctl, helm) — pinned to the versions the project expects.
 #   2. Clones (or refreshes) the repo, then generates deploy/ansible/
 #      inventory.yaml from the IPs you pass in (1 central + N consumers +
 #      M providers, with auto-assigned cluster IDs and non-overlapping
@@ -17,10 +17,8 @@
 #   4. Pings every host with Ansible and verifies passwordless sudo; only
 #      if all pass does it run the playbooks in order: 04-teardown ->
 #      01-bootstrap -> 02-deploy -> 03-verify.
-#   5. Prints an idle-baseline status snapshot of every cluster (providers
-#      advertising, the consumer's local capacity + components + zero
-#      borrowed nodes, and the incoming workload's demand) so the whole
-#      "before scale-up" state is visible at a glance.
+#   5. Prints how to reach the two dashboards (broker + Liqo) and the
+#      one-line scale-up / scale-down commands to drive the demo.
 #
 # Usage:
 #   demo-up.sh --central <ip> --consumers <ip[,ip...]> --providers <ip[,ip...]>
@@ -139,6 +137,17 @@ if ! command -v liqoctl >/dev/null 2>&1; then
   rm -rf "$tmp"
 fi
 ok "liqoctl: $(liqoctl version --client 2>/dev/null | awk '/Client version/{print $3; exit}')"
+
+# helm is used by 02-deploy to install the Liqo dashboard on the consumer.
+if ! command -v helm >/dev/null 2>&1; then
+  warn "helm not found — installing latest Helm (get-helm-4)"
+  tmp="$(mktemp -d)"
+  curl -fsSL -o "$tmp/get-helm.sh" https://raw.githubusercontent.com/helm/helm/main/scripts/get-helm-4
+  chmod 700 "$tmp/get-helm.sh"
+  ( cd "$tmp" && ./get-helm.sh >/dev/null )
+  rm -rf "$tmp"
+fi
+ok "helm: $(helm version --short 2>/dev/null || echo installed)"
 
 # -----------------------------------------------------------------------------
 # 2. Clone / refresh the repo, then generate the inventory
@@ -285,128 +294,27 @@ run_play 02-deploy.yaml
 run_play 03-verify.yaml
 
 # -----------------------------------------------------------------------------
-# 5. Idle-baseline status snapshot (the "before scale-up" picture)
-# -----------------------------------------------------------------------------
-NS="federation-autoscaler-system"
-kc() { echo "$HOME/.kube/${1}.yaml"; }
-
-# banner <text> — a spaced, ruled cluster section header. Left-anchored title
-# + a fixed-width bottom rule, so multibyte chars in the title never skew it.
-banner() {
-  printf '\n\033[1;36m┏━ \033[0m\033[1m%s\033[0m\n' "$1"
-  printf   '\033[1;36m┗━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\033[0m\n'
-}
-
-# check <cluster> <title> <expect> <kubectl args...> — print the title, the exact
-# command that produced the result, what to expect, then the indented result
-# (or "(none)" when empty). set -e-safe via || true.
-check() {
-  local cluster="$1" title="$2" expect="$3"; shift 3
-  printf '\n  \033[1m▸ %s\033[0m\n' "$title"
-  printf '    \033[2m$ kubectl --kubeconfig ~/.kube/%s.yaml %s\033[0m\n' "$cluster" "$*"
-  printf '    \033[33mexpect:\033[0m %s\n' "$expect"
-  local out; out="$(kubectl --kubeconfig "$(kc "$cluster")" "$@" 2>/dev/null)" || true
-  if [[ -n "$out" ]]; then sed 's/^/        /' <<<"$out"; else echo "        (none)"; fi
-}
-
-# lcheck — same as check() but runs liqoctl instead of kubectl (e.g. liqoctl info).
-lcheck() {
-  local cluster="$1" title="$2" expect="$3"; shift 3
-  printf '\n  \033[1m▸ %s\033[0m\n' "$title"
-  printf '    \033[2m$ liqoctl --kubeconfig ~/.kube/%s.yaml %s\033[0m\n' "$cluster" "$*"
-  printf '    \033[33mexpect:\033[0m %s\n' "$expect"
-  local out; out="$(liqoctl --kubeconfig "$(kc "$cluster")" "$@" 2>/dev/null)" || true
-  if [[ -n "$out" ]]; then sed 's/^/        /' <<<"$out"; else echo "        (none)"; fi
-}
-
-echo
-log "Environment status — idle baseline (before scale-up)"
-
-banner "central (broker)  —  ${CENTRAL}"
-check central "Provider advertisements (chunk budget)" \
-  "one row per provider; READY=true, RESERVED empty/0, AVAILABLE=TOTAL — capacity offered, none lent yet" \
-  -n "$NS" get clusteradvertisements
-check central "Reservations (the phase machine)" \
-  "none — no scale-up has happened, so no chunk is reserved" \
-  -n "$NS" get reservations --no-headers
-
-i=0
-for ip in "${CONSUMER_IPS[@]}"; do
-  i=$((i + 1)); c="consumer-${i}"
-  banner "${c} (cluster-autoscaler)  —  ${ip}"
-  lcheck "$c" "Liqo peering status" \
-    "Liqo healthy; NO active peerings yet — a peering to a provider shows up here once scale-up borrows a chunk" \
-    info
-  check "$c" "Local node allocatable" \
-    "the workload runs HERE first; only the Pods that don't fit in the free CPU/MEM spill to the federation" \
-    get nodes -o custom-columns='NODE:.metadata.name,CPU:.status.allocatable.cpu,MEM:.status.allocatable.memory,PODS:.status.allocatable.pods'
-  check "$c" "Federation components" \
-    "agent, grpc-server, cluster-autoscaler all READY = WANT (1)" \
-    -n "$NS" get deploy agent grpc-server cluster-autoscaler -o custom-columns='DEPLOY:.metadata.name,READY:.status.readyReplicas,WANT:.spec.replicas'
-  check "$c" "Borrowed virtual nodes" \
-    "none yet — nothing is borrowed until we scale up" \
-    get nodes -l liqo.io/type=virtual-node --no-headers
-  check "$c" "NamespaceOffloading" \
-    "one named 'offloading' (strategy LocalAndRemote) — Pods run locally first, overflow offloads to providers" \
-    get namespaceoffloadings -A
-done
-
-j=0
-for ip in "${PROVIDER_IPS[@]}"; do
-  j=$((j + 1)); p="provider-${j}"
-  banner "${p}  —  ${ip}"
-  check "$p" "Provider agent" \
-    "READY = WANT (1) — it advertises this cluster's capacity to the broker every 30s" \
-    -n "$NS" get deploy agent -o custom-columns='DEPLOY:.metadata.name,READY:.status.readyReplicas,WANT:.spec.replicas'
-  check "$p" "Allocatable headroom to lend" \
-    "spare CPU/MEM the broker carves into chunks (2 CPU / 4Gi each) and lends on demand" \
-    get nodes -o custom-columns='NODE:.metadata.name,CPU:.status.allocatable.cpu,MEM:.status.allocatable.memory,PODS:.status.allocatable.pods'
-done
-
-banner "incoming workload  —  samples/burst-workload.yaml"
-printf '\n  \033[1m▸ Workload demand\033[0m\n'
-printf '    \033[2m$ awk (sum replicas x per-Pod cpu/memory requests)\033[0m\n'
-printf "    \033[33mexpect:\033[0m exceeds the consumer's free capacity, so the overflow Pods stay Pending\n"
-printf '            -> CA borrows a chunk from EACH provider (consumer + both providers all used)\n'
-awk '
-  /replicas:/ && reps=="" { for (k=1;k<=NF;k++) if ($k ~ /^[0-9]+$/) reps=$k }
-  /cpu:/      && cpu==""  { v=$2; gsub(/"/,"",v); cpu=v }
-  /memory:/   && mem==""  { v=$2; gsub(/"/,"",v); mem=v }
-  END {
-    if (reps=="" || cpu=="" || mem=="") { print "        (could not parse workload)"; exit }
-    if (cpu ~ /m$/) { c=cpu; sub(/m$/,"",c); cmv=c+0 } else { cmv=(cpu+0)*1000 }
-    if (mem ~ /Gi$/) { m=mem; sub(/Gi$/,"",m); mmv=(m+0)*1024 } else { m=mem; sub(/Mi$/,"",m); mmv=m+0 }
-    printf "        %s replicas x %s CPU / %s  =>  ~%.1f CPU / %.1fGi total demand\n", reps, cpu, mem, cmv*reps/1000, mmv*reps/1024
-  }
-' "$ANSIBLE_DIR/samples/burst-workload.yaml" 2>/dev/null || echo "        (workload sample not found)"
-
-# -----------------------------------------------------------------------------
 # Done
 # -----------------------------------------------------------------------------
 echo
 ok "Federation is up. Per-cluster kubeconfigs are under ~/.kube/<cluster_id>.yaml"
 cat <<EOF
 
-Next steps — drive the scale-up / scale-down demo:
+Next steps:
 
-  1) In a SECOND terminal, open the live dashboard and leave it running. It
-     watches all four clusters side by side — reservations, virtual nodes, and
-     the consumer's Pods going Pending -> Running (local vs borrowed):
-       $ANSIBLE_DIR/scripts/demo-watch.sh
+  Dashboards — open in a browser and leave running:
 
-     Or, for the broker's own view in a browser (read-only; advertisements,
-     reservations, the instruction phase machine, chunk capacity, consumers):
-       http://${CENTRAL}:30444/
+    • Broker  (read-only; advertisements, reservations, instructions, capacity):
+        http://${CENTRAL}:30444/
 
-  2) Back HERE, scale UP — apply the workload on the consumer:
-       kubectl --kubeconfig ~/.kube/consumer-1.yaml apply -f "$ANSIBLE_DIR/samples/burst-workload.yaml"
-     On the dashboard: ~3 Pods Run locally, the overflow pends, then lands on a
-     borrowed chunk from each provider (consumer + both providers all in use).
+    • Liqo    (consumer peerings, virtual nodes, offloaded pods):
+        add this line to your machine's hosts file (e.g. /etc/hosts), then browse:
+          ${CONSUMER_IPS[0]} liqo-dashboard.local
+        http://liqo-dashboard.local
 
-  3) Scale DOWN — delete the workload; Cluster Autoscaler reclaims the borrowed
-     nodes (give it ~1-2 min):
-       kubectl --kubeconfig ~/.kube/consumer-1.yaml delete -f "$ANSIBLE_DIR/samples/burst-workload.yaml"
+  Scale UP — apply the workload on the consumer:
+    kubectl --kubeconfig ~/.kube/consumer-1.yaml apply -f "$ANSIBLE_DIR/samples/burst-workload.yaml"
 
-  (The dashboard's consumer pane already shows the Pods live, so a separate
-   'kubectl get pods -o wide -w' isn't needed — it's the same view.)
+  Scale DOWN — delete it; Cluster Autoscaler reclaims the borrowed nodes:
+    kubectl --kubeconfig ~/.kube/consumer-1.yaml delete -f "$ANSIBLE_DIR/samples/burst-workload.yaml"
 EOF

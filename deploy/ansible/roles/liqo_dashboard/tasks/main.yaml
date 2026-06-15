@@ -1,0 +1,68 @@
+---
+# Installs the ArubaKube Liqo dashboard on a consumer cluster via Helm.
+#
+# Runs on the CONTROL host (delegate_to: localhost) against the consumer's
+# fetched kubeconfig — the same orchestration model as the fa_consumer role.
+# Requires `helm` and `git` on the control host (demo-up.sh installs both).
+#
+# Chart prerequisites are already satisfied by the bootstrap:
+#   - Liqo            — installed by the liqo_install role (01-bootstrap).
+#   - metrics-server  — k3s ships a working one by default (see the
+#                       liqo_dashboard_install_metrics_server default).
+#   - Ingress         — k3s ships Traefik as the default ingress controller,
+#                       so the chart's Ingress (host liqo-dashboard.local)
+#                       routes on the consumer node's port 80. Reach it by
+#                       pointing liqo-dashboard.local at the consumer IP in
+#                       your client's hosts file.
+
+- name: Apply upstream metrics-server (off by default — k3s bundles one)
+  delegate_to: localhost
+  when: liqo_dashboard_install_metrics_server | bool
+  ansible.builtin.shell:
+    cmd: >
+      kubectl --kubeconfig {{ cluster_kubeconfig }} apply -f
+      https://github.com/kubernetes-sigs/metrics-server/releases/latest/download/components.yaml
+  changed_when: true
+
+- name: Clone/update the ArubaKube liqo-dashboard chart on the control host
+  delegate_to: localhost
+  ansible.builtin.git:
+    repo: "{{ liqo_dashboard_repo }}"
+    dest: "{{ liqo_dashboard_dir }}"
+    version: main
+    depth: 1
+    force: true
+
+- name: Install/upgrade the liqo-dashboard Helm release on {{ cluster_id }}
+  delegate_to: localhost
+  ansible.builtin.shell:
+    cmd: |
+      helm --kubeconfig {{ cluster_kubeconfig }} upgrade --install \
+        {{ liqo_dashboard_release }} \
+        --namespace {{ liqo_dashboard_namespace }} --create-namespace \
+        {{ liqo_dashboard_dir }}/deployments/liqo-dashboard \
+        --set image.tag={{ liqo_dashboard_image_tag }} \
+        --wait --timeout 5m
+  changed_when: true
+
+# The upstream chart's ClusterRole misses a few resources the backend reads,
+# so the UI 403s on them. Append the missing rules. Idempotent: each rule is
+# added only when absent, so re-running (and helm re-applying the chart RBAC)
+# never stacks duplicates. RBAC changes take effect live — no pod restart.
+- name: Grant the liqo-dashboard ClusterRole the extra read permissions it needs
+  delegate_to: localhost
+  ansible.builtin.shell:
+    cmd: |
+      set -eu
+      CR='{{ liqo_dashboard_clusterrole }}'
+      KC='{{ cluster_kubeconfig }}'
+      get()   { kubectl --kubeconfig "$KC" get clusterrole "$CR" -o jsonpath="$1" 2>/dev/null; }
+      patch() { kubectl --kubeconfig "$KC" patch clusterrole "$CR" --type=json -p="$1"; }
+
+      get '{.rules[*].resources}' | grep -qw configmaps \
+        || patch '[{"op":"add","path":"/rules/-","value":{"apiGroups":[""],"resources":["configmaps"],"verbs":["get","list","watch"]}}]'
+      get '{.rules[*].resources}' | grep -qw deployments \
+        || patch '[{"op":"add","path":"/rules/-","value":{"apiGroups":["apps"],"resources":["deployments"],"verbs":["get","list"]}}]'
+      get '{.rules[*].apiGroups}' | grep -q 'ipam.liqo.io' \
+        || patch '[{"op":"add","path":"/rules/-","value":{"apiGroups":["ipam.liqo.io"],"resources":["networks"],"verbs":["get","list"]}}]'
+  changed_when: true

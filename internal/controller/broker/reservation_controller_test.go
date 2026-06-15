@@ -405,6 +405,40 @@ var _ = Describe("Reservation Controller", func() {
 		Expect(list.Items).To(BeEmpty())
 	})
 
+	It("backfills a nil ExpiresAt from creationTimestamp + timeout so a reservation always has a deadline (lost create-time stamp)", func() {
+		// Precondition: the BeforeEach created the reservation without an
+		// ExpiresAt — exactly the state left behind when the API handler's
+		// best-effort status stamp loses its race with the finalizer write.
+		before := &brokerv1alpha1.Reservation{}
+		Expect(k8sClient.Get(ctx, key, before)).To(Succeed())
+		Expect(before.Status.ExpiresAt).To(BeNil())
+
+		By("reconciling with an explicit, non-default 3h timeout")
+		r := &ReservationReconciler{
+			Client: k8sClient, Scheme: k8sClient.Scheme(), ReservationTimeout: 3 * time.Hour,
+		}
+		_, err := r.Reconcile(ctx, reconcile.Request{NamespacedName: key})
+		Expect(err).NotTo(HaveOccurred())
+
+		updated := &brokerv1alpha1.Reservation{}
+		Expect(k8sClient.Get(ctx, key, updated)).To(Succeed())
+		Expect(updated.Status.CreatedAt).NotTo(BeNil())
+		Expect(updated.Status.ExpiresAt).NotTo(BeNil())
+
+		// ExpiresAt == creationTimestamp + the CONFIGURED timeout (proves the
+		// 3h value is used, not the 24h default), so it can actually expire.
+		want := updated.CreationTimestamp.Add(3 * time.Hour)
+		Expect(updated.Status.ExpiresAt.Time).To(BeTemporally("~", want, 2*time.Second))
+
+		By("a second reconcile leaves the stamped deadline unchanged (idempotent)")
+		stamped := *updated.Status.ExpiresAt
+		_, err = r.Reconcile(ctx, reconcile.Request{NamespacedName: key})
+		Expect(err).NotTo(HaveOccurred())
+		again := &brokerv1alpha1.Reservation{}
+		Expect(k8sClient.Get(ctx, key, again)).To(Succeed())
+		Expect(again.Status.ExpiresAt.Time).To(BeTemporally("==", stamped.Time))
+	})
+
 	It("hard delete (kubectl delete reservation) credits reserved chunks back via the finalizer", func() {
 		By("seeding the provider's ReservedChunks budget")
 		cadv := &brokerv1alpha1.ClusterAdvertisement{}

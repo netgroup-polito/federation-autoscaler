@@ -32,6 +32,7 @@ import (
 
 	autoscalingv1alpha1 "github.com/netgroup-polito/federation-autoscaler/api/autoscaling/v1alpha1"
 	brokerv1alpha1 "github.com/netgroup-polito/federation-autoscaler/api/broker/v1alpha1"
+	"github.com/netgroup-polito/federation-autoscaler/internal/broker/chunk"
 )
 
 const dashboardTestNS = "federation-autoscaler-system"
@@ -53,6 +54,7 @@ func newDashboardTestServer(t *testing.T, objs ...client.Object) *Server {
 		log:       logr.Discard(),
 		client:    c,
 		namespace: dashboardTestNS,
+		sizer:     chunk.NewDefaultSizer(),
 		consumers: NewConsumerRegistry(),
 	}
 }
@@ -159,6 +161,17 @@ func TestDashboardBuildOverview(t *testing.T) {
 	}
 	if gpu := ov.Capacity.ByChunkType["gpu"]; gpu.TotalChunks != 2 || gpu.AvailableChunks != 2 {
 		t.Errorf("gpu chunk capacity = %+v, want total=2 available=2", gpu)
+	}
+
+	// Canonical per-chunk sizes are surfaced for both types (from the sizer).
+	std := ov.Capacity.ChunkSizes["standard"]
+	if std.Cpu().Value() != 2 || std.Memory().Value() != 4*1024*1024*1024 {
+		t.Errorf("standard chunk size = %v, want cpu=2 / memory=4Gi", std)
+	}
+	gpu := ov.Capacity.ChunkSizes["gpu"]
+	gpuQty := gpu["nvidia.com/gpu"]
+	if gpu.Cpu().Value() != 4 || gpu.Memory().Value() != 8*1024*1024*1024 || gpuQty.Value() != 1 {
+		t.Errorf("gpu chunk size = %v, want cpu=4 / memory=8Gi / gpu=1", gpu)
 	}
 
 	// Advertisements: both present, sorted by ClusterID.

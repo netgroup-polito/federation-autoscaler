@@ -114,8 +114,9 @@ func main() {
 		os.Exit(1)
 	}
 	if err := (&brokercontroller.ReservationReconciler{
-		Client: mgr.GetClient(),
-		Scheme: mgr.GetScheme(),
+		Client:             mgr.GetClient(),
+		Scheme:             mgr.GetScheme(),
+		ReservationTimeout: reservationTimeout,
 	}).SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "unable to create controller", "controller", "Reservation")
 		os.Exit(1)

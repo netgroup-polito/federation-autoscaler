@@ -74,6 +74,14 @@ type ReservationReconciler struct {
 	// it. Zero falls back to DefaultTerminalReservationTTL. Exposed mainly
 	// as a test hook.
 	TerminalTTL time.Duration
+
+	// ReservationTimeout is how long after creation a Reservation may run
+	// before the reconciler moves it to Expired. The API create handler
+	// stamps Status.ExpiresAt, but only best-effort — that write can lose a
+	// race with the finalizer Update in Reconcile, leaving ExpiresAt nil and
+	// the reservation immortal. The reconciler uses this value to backfill a
+	// missing ExpiresAt. Zero falls back to DefaultReservationTimeout.
+	ReservationTimeout time.Duration
 }
 
 // DefaultTerminalReservationTTL is how long a terminal Reservation lingers
@@ -91,6 +99,18 @@ func (r *ReservationReconciler) terminalTTL() time.Duration {
 		return r.TerminalTTL
 	}
 	return DefaultTerminalReservationTTL
+}
+
+// DefaultReservationTimeout mirrors the API server's default
+// (--reservation-timeout). Used only as a fallback when ReservationTimeout
+// is unset (e.g. in tests); cmd/broker wires the real flag value in.
+const DefaultReservationTimeout = 24 * time.Hour
+
+func (r *ReservationReconciler) reservationTimeout() time.Duration {
+	if r.ReservationTimeout > 0 {
+		return r.ReservationTimeout
+	}
+	return DefaultReservationTimeout
 }
 
 // +kubebuilder:rbac:groups=broker.federation-autoscaler.io,resources=reservations,verbs=get;list;watch;create;update;patch;delete
@@ -131,6 +151,15 @@ func (r *ReservationReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 		if err := r.Update(ctx, &resv); err != nil {
 			return ctrl.Result{}, fmt.Errorf("add finalizer: %w", err)
 		}
+	}
+
+	// Backfill lifecycle timestamps if the API handler's best-effort status
+	// stamp lost its race with the finalizer Update above (a swallowed 409).
+	// Without this a Reservation can run with a nil ExpiresAt and never
+	// auto-expire (checkExpired no-ops on nil). Idempotent: writes only when
+	// ExpiresAt is unset, and updates resv in place so the guards below see it.
+	if err := r.ensureExpiry(ctx, &resv); err != nil {
+		return ctrl.Result{}, fmt.Errorf("backfill reservation expiry: %w", err)
 	}
 
 	// Expiry guard: if a non-terminal reservation has blown past its
@@ -744,6 +773,34 @@ func (r *ReservationReconciler) advancePhase(
 	patched.Status.Message = message
 	patched.Status.ObservedGeneration = resv.Generation
 	return r.Status().Update(ctx, patched)
+}
+
+// ensureExpiry guarantees a Reservation has Status.ExpiresAt (and CreatedAt)
+// set. The API create handler stamps both, but only best-effort — if that
+// Status().Update lost a race with the finalizer write in Reconcile, ExpiresAt
+// stays nil and the reservation would never time out (checkExpired no-ops on
+// nil). This backfills it deterministically from the object's creationTimestamp
+// plus the configured timeout. Idempotent: a no-op once ExpiresAt is set. It
+// mutates resv in place (and Status().Update refreshes its resourceVersion) so
+// the rest of the reconcile pass proceeds with the populated deadline.
+func (r *ReservationReconciler) ensureExpiry(
+	ctx context.Context, resv *brokerv1alpha1.Reservation,
+) error {
+	if resv.Status.ExpiresAt != nil {
+		return nil
+	}
+	createdAt := resv.Status.CreatedAt
+	if createdAt == nil {
+		ct := resv.CreationTimestamp
+		createdAt = &ct
+	}
+	expires := metav1.NewTime(createdAt.Add(r.reservationTimeout()))
+	resv.Status.CreatedAt = createdAt
+	resv.Status.ExpiresAt = &expires
+	if resv.Status.ObservedGeneration == 0 {
+		resv.Status.ObservedGeneration = resv.Generation
+	}
+	return r.Status().Update(ctx, resv)
 }
 
 // checkProviderAvailable fails a Reservation whose provider's

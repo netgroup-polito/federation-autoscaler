@@ -4,8 +4,8 @@
 
  Single self-contained page (no build step, no external assets, no dependencies)
  embedded into the broker binary via //go:embed. It polls GET /api/v1/overview
- every couple of seconds and renders the Broker's own state — the same
- information the demo-watch.sh "central" tmux pane shows, in a browser.
+ every couple of seconds and renders the Broker's own state — advertisements,
+ reservations, the instruction phase machine, chunk capacity, and consumers.
 
  Security note: this page is served on a plain-HTTP, unauthenticated listener.
  It is read-only and renders every cell via textContent (never innerHTML) so
@@ -134,7 +134,7 @@
     <div class="table-wrap"><table>
       <thead><tr>
         <th>Provider</th><th>Type</th><th>Total</th><th>Reserved</th><th>Available</th>
-        <th>Ready</th><th>Last seen</th><th>Price</th><th>Topology</th>
+        <th>Ready</th><th>Last seen</th><th>Alloc. CPU</th><th>Alloc. Mem</th>
       </tr></thead>
       <tbody id="advBody"></tbody>
     </table></div>
@@ -145,7 +145,7 @@
     <div class="table-wrap"><table>
       <thead><tr>
         <th>Reservation</th><th>Phase</th><th>Consumer</th><th>Provider</th>
-        <th>Chunks</th><th>Type</th><th>Virtual nodes</th>
+        <th>Chunks</th><th>Type</th>
         <th>Created</th><th>Expires</th><th>Terminated</th><th>Message</th>
       </tr></thead>
       <tbody id="resvBody"></tbody>
@@ -214,6 +214,16 @@
       if (isNaN(d.getTime())) return "—";
       return d.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit" });
     }
+    // fmtChunkSize formats a resource list (one chunk's worth) like "2 CPU · 4Gi".
+    function fmtChunkSize(rl) {
+      if (!rl) return "—";
+      const parts = [];
+      if (rl.cpu) parts.push(rl.cpu + " CPU");
+      if (rl.memory) parts.push(rl.memory);
+      const gpu = rl["nvidia.com/gpu"];
+      if (gpu && gpu !== "0") parts.push(gpu + " GPU");
+      return parts.length ? parts.join(" · ") : "—";
+    }
     function setEmpty(tbody, cols, text) {
       const tr = document.createElement("tr");
       const cell = document.createElement("td");
@@ -269,6 +279,26 @@
         card.append(l, row);
         cards.appendChild(card);
       }
+
+      // Chunk size — the federation's fixed per-chunk shape per type. Sits to
+      // the right of the "By chunk type" card. Always shown (both standard and
+      // gpu), independent of what providers currently advertise.
+      const sizes = c.chunkSizes || {};
+      const sizeKeys = Object.keys(sizes).sort();
+      if (sizeKeys.length) {
+        const card = document.createElement("div"); card.className = "card";
+        const l = document.createElement("div"); l.className = "label"; l.textContent = "Chunk size";
+        const row = document.createElement("div"); row.className = "chunktypes"; row.style.marginTop = "6px";
+        for (const k of sizeKeys) {
+          const ct = document.createElement("div"); ct.className = "ct";
+          const b = document.createElement("b"); b.textContent = k + ": ";
+          ct.appendChild(b);
+          ct.appendChild(document.createTextNode(fmtChunkSize(sizes[k])));
+          row.appendChild(ct);
+        }
+        card.append(l, row);
+        cards.appendChild(card);
+      }
     }
 
     function renderAdvertisements(list) {
@@ -287,9 +317,9 @@
         tr.appendChild(td(a.availableChunks ?? 0));
         tr.appendChild(a.available ? pill("ready", "green") : pill("stale", "amber"));
         tr.appendChild(td(fmtTime(a.lastSeen)));
-        tr.appendChild(td(a.price));
-        const topo = a.topology ? [a.topology.region, a.topology.zone].filter(Boolean).join("/") : "";
-        tr.appendChild(td(topo));
+        // Allocatable CPU / memory the provider advertised (.spec.resources.allocatable).
+        tr.appendChild(td(a.resources ? a.resources.cpu : undefined, { mono: true }));
+        tr.appendChild(td(a.resources ? a.resources.memory : undefined, { mono: true }));
         tbody.appendChild(tr);
       }
     }
@@ -297,7 +327,7 @@
     function renderReservations(list) {
       const tbody = $("resvBody"); tbody.replaceChildren();
       $("resvCount").textContent = list.length;
-      if (!list.length) { setEmpty(tbody, 11, "No reservations."); return; }
+      if (!list.length) { setEmpty(tbody, 10, "No reservations."); return; }
       for (const r of list) {
         const tr = document.createElement("tr");
         tr.appendChild(td(r.reservationId, { mono: true }));
@@ -306,7 +336,6 @@
         tr.appendChild(td(clusterShort(r.providerClusterId), { mono: true }));
         tr.appendChild(td(r.chunkCount ?? 0));
         tr.appendChild(td(r.chunkType));
-        tr.appendChild(td((r.virtualNodeNames || []).join(", "), { mono: true }));
         tr.appendChild(td(fmtTime(r.createdAt)));
         tr.appendChild(td(fmtTime(r.expiresAt)));
         tr.appendChild(td(fmtTime(r.terminatedAt)));

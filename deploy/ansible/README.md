@@ -50,6 +50,7 @@ all work). Open the following ports between them:
 | 6443                | TCP      | k3s apiserver (used by `kubectl`)     |
 | 30443               | TCP      | Broker NodePort (agents → broker)     |
 | 30444               | TCP      | Broker dashboard NodePort (browser)   |
+| 80                  | TCP      | Liqo dashboard Ingress (consumer)     |
 | 30000–32767         | UDP      | Liqo WireGuard gateway                |
 
 Outbound HTTPS from every VM is required during the bootstrap (k3s installer,
@@ -177,20 +178,17 @@ you which one. After this returns green, your federation is ready to demo.
 
 ## Step 5 — Run the demo
 
-Open the live dashboard — a tmux session showing the broker, the consumer
-(Cluster Autoscaler view + local view) and both providers side by side.
-Each pane prints the command it runs and what to expect as the demo
-progresses:
+Watch the broker's state live in a browser: it serves a read-only web dashboard
+(advertisements, reservations, the instruction phase machine, chunk capacity,
+registered consumers) at `http://<central-ip>:30444/`. It refreshes every couple
+of seconds and needs no login — keep it on a trusted network, as it is
+unauthenticated.
 
-```bash
-scripts/demo-watch.sh           # tear the session down later with --kill
-```
-
-Prefer a browser? The broker also serves a read-only web dashboard of its own
-state (advertisements, reservations, the instruction phase machine, chunk
-capacity, registered consumers) at `http://<central-ip>:30444/`. It refreshes
-every couple of seconds and needs no login — keep it on a trusted network, as
-it is unauthenticated.
+The consumer cluster also runs the [Liqo dashboard](https://github.com/ArubaKube/liqo-dashboard)
+(peerings, virtual nodes, offloaded pods), installed by `02-deploy` with image
+tag `main`. It is served via the cluster's Traefik Ingress on host
+`liqo-dashboard.local`; add `<consumer-ip> liqo-dashboard.local` to your
+machine's hosts file, then open `http://liqo-dashboard.local`.
 
 Then drive the scale-up / scale-down with the burst workload — the sole
 manual action in the demo (the sizing rationale is in the file's header

@@ -1,0 +1,31 @@
+---
+# Defaults for the liqo_dashboard role — installs the ArubaKube Liqo dashboard
+# (a read-only web UI for Liqo peerings / virtual nodes / offloaded pods) on a
+# consumer cluster via Helm. See https://github.com/ArubaKube/liqo-dashboard.
+
+# Upstream chart repo, cloned on the CONTROL host (helm runs there with
+# delegate_to: localhost against the consumer's fetched kubeconfig).
+liqo_dashboard_repo: "https://github.com/ArubaKube/liqo-dashboard.git"
+liqo_dashboard_dir: "{{ lookup('env', 'HOME') }}/liqo-dashboard"
+
+# Helm release name + namespace.
+liqo_dashboard_release: liqo-dashboard
+liqo_dashboard_namespace: liqo-dashboard
+
+# The ClusterRole helm creates for the dashboard backend, named <release>-<chart>.
+# The upstream chart under-scopes it, so once the release is installed the role
+# grants the few extra read permissions the backend needs (configmaps,
+# apps/deployments, ipam.liqo.io/networks).
+liqo_dashboard_clusterrole: "{{ liqo_dashboard_release }}-liqo-dashboard"
+
+# Container image tag for BOTH frontend and backend. The chart's per-component
+# image.<frontend|backend>.tag are unset, so they fall back to image.tag — one
+# override flips both. The chart default is v0.1.0; we run main.
+liqo_dashboard_image_tag: main
+
+# k3s already ships a working metrics-server (no --disable in k3s_install), so
+# the chart's metrics prerequisite is satisfied out of the box. Leave this off.
+# Set true to additionally apply the upstream components.yaml — note it lacks
+# --kubelet-insecure-tls and typically will NOT scrape on k3s, and it fights
+# k3s's addon manager, so only enable it on a cluster without a metrics-server.
+liqo_dashboard_install_metrics_server: false

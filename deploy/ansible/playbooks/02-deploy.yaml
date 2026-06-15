@@ -68,3 +68,10 @@
   become: false
   roles:
     - cluster_autoscaler
+
+- name: Deploy the Liqo dashboard on consumers (Helm; image tag main)
+  hosts: consumers
+  gather_facts: false
+  become: false
+  roles:
+    - liqo_dashboard
