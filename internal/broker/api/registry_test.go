@@ -20,6 +20,8 @@ import (
 	"sync"
 	"testing"
 	"time"
+
+	autoscalingv1alpha1 "github.com/netgroup-polito/federation-autoscaler/api/autoscaling/v1alpha1"
 )
 
 // TestConsumerRegistry exercises Touch/Lookup, the overwrite semantics, and
@@ -33,7 +35,7 @@ func TestConsumerRegistry(t *testing.T) {
 	}
 
 	before := time.Now()
-	r.Touch(consumerCluster, "liqo-a-1")
+	r.Touch(consumerCluster, "liqo-a-1", autoscalingv1alpha1.PlacementPolicy{})
 
 	got, ok := r.Lookup(consumerCluster)
 	if !ok {
@@ -45,12 +47,19 @@ func TestConsumerRegistry(t *testing.T) {
 	if got.LastSeen.Before(before) {
 		t.Errorf("LastSeen %v should be >= before %v", got.LastSeen, before)
 	}
+	if got.Placement.Type != "" {
+		t.Errorf("default Placement.Type should be empty; got %q", got.Placement.Type)
+	}
 
-	// Overwrite semantics: same clusterID with new liqo id wins.
-	r.Touch(consumerCluster, "liqo-a-2")
+	// Overwrite semantics: same clusterID with new liqo id + a price policy wins.
+	r.Touch(consumerCluster, "liqo-a-2",
+		autoscalingv1alpha1.PlacementPolicy{Type: autoscalingv1alpha1.PlacementStrategyPrice})
 	got, _ = r.Lookup(consumerCluster)
 	if got.LiqoClusterID != "liqo-a-2" {
 		t.Errorf("Touch must overwrite; got %q", got.LiqoClusterID)
+	}
+	if got.Placement.Type != autoscalingv1alpha1.PlacementStrategyPrice {
+		t.Errorf("Touch must store the placement policy; got %q", got.Placement.Type)
 	}
 
 	// Concurrent stress: many writers + readers, no panic / race / corruption.
@@ -60,7 +69,7 @@ func TestConsumerRegistry(t *testing.T) {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			r.Touch("consumer-b", "liqo-b")
+			r.Touch("consumer-b", "liqo-b", autoscalingv1alpha1.PlacementPolicy{})
 			_, _ = r.Lookup(consumerCluster)
 		}()
 	}
@@ -82,9 +91,9 @@ func TestConsumerRegistrySnapshot(t *testing.T) {
 	}
 
 	// Insert out of order; Snapshot must return them sorted.
-	r.Touch("consumer-c", "liqo-c")
-	r.Touch(consumerCluster, "liqo-a")
-	r.Touch("consumer-b", "liqo-b")
+	r.Touch("consumer-c", "liqo-c", autoscalingv1alpha1.PlacementPolicy{})
+	r.Touch(consumerCluster, "liqo-a", autoscalingv1alpha1.PlacementPolicy{})
+	r.Touch("consumer-b", "liqo-b", autoscalingv1alpha1.PlacementPolicy{})
 
 	got := r.Snapshot()
 	if len(got) != 3 {
@@ -106,7 +115,7 @@ func TestConsumerRegistrySnapshot(t *testing.T) {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			r.Touch("consumer-x", "liqo-x")
+			r.Touch("consumer-x", "liqo-x", autoscalingv1alpha1.PlacementPolicy{})
 			_ = r.Snapshot()
 		}()
 	}

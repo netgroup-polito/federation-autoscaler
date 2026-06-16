@@ -77,6 +77,11 @@ type Options struct {
 	// (resolved via $PATH).
 	LiqoctlPath string
 
+	// PriceFile is an optional path to this provider's per-resource unit-price
+	// file, re-read on every advertisement cycle (see advertise.Options).
+	// Empty ⇒ the provider advertises no price.
+	PriceFile string
+
 	// Logger is the structured logger every provider goroutine logs
 	// through. Defaults to controller-runtime's logger named "provider".
 	Logger logr.Logger
@@ -133,6 +138,7 @@ func Run(ctx context.Context, opts Options) error {
 		LocalClient:   opts.LocalClient,
 		ClusterID:     opts.ClusterID,
 		LiqoClusterID: opts.LiqoClusterID,
+		PriceFile:     opts.PriceFile,
 		Logger:        logger.WithName("advertise"),
 		// The probe's poll-staleness gate is a "broker reachability"
 		// signal in practice, so a successful advertisement also

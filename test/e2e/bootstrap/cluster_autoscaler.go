@@ -44,10 +44,14 @@ const ClusterAutoscalerImage = "registry.k8s.io/autoscaling/cluster-autoscaler:v
 //     files mounted from the cert-manager-produced Secret
 //   - Deployment running ClusterAutoscalerImage with the right args
 //
-// The expander is `price` because federation-autoscaler's PricingNodePrice
-// surfaces the broker-advertised cost — pinning the expander here is what
-// makes the federation node group win over any local node group with a
-// "free" placeholder price.
+// The expander is `least-waste` — a neutral, NON-price expander. Price-based
+// provider selection is the BROKER's job: it masks GET /api/v1/nodegroups per
+// consumer that opts in via a ConsumerPolicy{placement.type: Price}, exposing
+// only the cheapest priced provider with capacity. CA therefore stays
+// price-agnostic (a `price` expander here would price-select for EVERY
+// consumer, defeating the per-consumer opt-in). externalgrpc only exposes
+// federation node groups, so any expander scales a federation group; the
+// broker's masking is what makes the cheapest provider win.
 const caManifestTemplate = `---
 apiVersion: v1
 kind: ServiceAccount
@@ -132,7 +136,7 @@ spec:
         - --v=4
         - --cloud-provider=externalgrpc
         - --cloud-config=/etc/cluster-autoscaler/config/cloud-config.yaml
-        - --expander=price
+        - --expander=least-waste
         - --scale-down-enabled=false
         - --skip-nodes-with-local-storage=false
         - --skip-nodes-with-system-pods=false

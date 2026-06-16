@@ -1,0 +1,22 @@
+# Per-provider unit prices, mounted into the provider agent and re-read on every
+# advertisement cycle (so prices can change without a pod restart).
+#
+# `prices.yaml` is a YAML/JSON map of resource-name → price-per-unit-per-hour:
+#   cpu            → price per core-hour
+#   memory         → price per GiB-hour
+#   nvidia.com/gpu → price per GPU-hour
+# The Broker multiplies these by the (Broker-owned) chunk size to get a
+# comparable per-chunk cost. The provider prices its own resources, NOT chunks,
+# because chunk size is decided by the Broker.
+#
+# Ships EMPTY by default so the base behaviour is unchanged: an empty file ⇒ the
+# provider advertises no price ⇒ the Broker treats it as today. The fa_provider
+# Ansible role overwrites prices.yaml per provider; operators applying the raw
+# overlay can edit it here or `kubectl patch configmap agent-prices`.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: agent-prices
+  namespace: federation-autoscaler-system
+data:
+  prices.yaml: ""

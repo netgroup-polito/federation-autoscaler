@@ -76,7 +76,7 @@ func TestRenderClusterAutoscalerManifest(t *testing.T) {
 	mustContain := []string{
 		ClusterAutoscalerImage,
 		"--cloud-provider=externalgrpc",
-		"--expander=price",
+		"--expander=least-waste",
 		"grpc-server.federation-autoscaler-system.svc.cluster.local:9443",
 		"secretName: cluster-autoscaler-client-cert",
 		"name: cluster-autoscaler-cloud-config",

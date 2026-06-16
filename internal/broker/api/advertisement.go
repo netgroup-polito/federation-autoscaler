@@ -163,8 +163,8 @@ func (s *Server) upsertClusterAdvertisement(
 			Resources: brokerv1alpha1.AdvertisedResources{
 				Allocatable: req.Resources,
 			},
-			Topology: req.Topology,
-			Price:    req.Price,
+			Topology:   req.Topology,
+			UnitPrices: req.UnitPrices,
 		}
 		return nil
 	})
@@ -258,7 +258,7 @@ func advertisementSnapshotFromCR(cadv *brokerv1alpha1.ClusterAdvertisement) Adve
 		LiqoClusterID:   cadv.Spec.LiqoClusterID,
 		Resources:       cadv.Spec.Resources.Allocatable,
 		Topology:        cadv.Spec.Topology,
-		Price:           cadv.Spec.Price,
+		UnitPrices:      cadv.Spec.UnitPrices,
 		ChunkCount:      cadv.Status.TotalChunks,
 		ReservedChunks:  cadv.Status.ReservedChunks,
 		AvailableChunks: cadv.Status.AvailableChunks,

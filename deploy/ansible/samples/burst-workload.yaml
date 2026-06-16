@@ -7,8 +7,10 @@
 # LocalAndRemote, so the scheduler fills the consumer's OWN node first; the
 # replicas that don't fit locally stay Pending. Cluster Autoscaler (running
 # --cloud-provider=externalgrpc against the federation gRPC server) sees the
-# Pending Pods, the price expander picks the federation node group, a
-# Reservation is created per borrowed chunk, Liqo virtual nodes materialise,
+# Pending Pods and scales a federation node group (which provider is the
+# Broker's call: a price-preferring ConsumerPolicy makes it expose only the
+# cheapest provider), a Reservation is created per borrowed chunk, Liqo virtual
+# nodes materialise,
 # and the Pending Pods schedule onto them. Deleting the Deployment removes the
 # Pods → the virtual nodes go unneeded → CA calls NodeGroupDeleteNodes → the
 # Reservations are released → scale-down.

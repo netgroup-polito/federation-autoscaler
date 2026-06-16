@@ -116,10 +116,12 @@ func (in *ClusterAdvertisementSpec) DeepCopyInto(out *ClusterAdvertisementSpec) 
 		*out = new(Topology)
 		**out = **in
 	}
-	if in.Price != nil {
-		in, out := &in.Price, &out.Price
-		x := (*in).DeepCopy()
-		*out = &x
+	if in.UnitPrices != nil {
+		in, out := &in.UnitPrices, &out.UnitPrices
+		*out = make(v1.ResourceList, len(*in))
+		for key, val := range *in {
+			(*out)[key] = val.DeepCopy()
+		}
 	}
 }
 

@@ -22,6 +22,8 @@ import (
 	"net/http"
 
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+
+	autoscalingv1alpha1 "github.com/netgroup-polito/federation-autoscaler/api/autoscaling/v1alpha1"
 )
 
 // -----------------------------------------------------------------------------
@@ -59,7 +61,11 @@ func (s *Server) handleHeartbeat(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	s.consumers.Touch(req.ClusterID, req.LiqoClusterID)
+	var placement autoscalingv1alpha1.PlacementPolicy
+	if req.Placement != nil {
+		placement = *req.Placement
+	}
+	s.consumers.Touch(req.ClusterID, req.LiqoClusterID, placement)
 
 	writeJSON(w, http.StatusOK, HeartbeatResponse{AckAt: metav1.Now()})
 }

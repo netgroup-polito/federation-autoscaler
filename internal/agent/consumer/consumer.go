@@ -171,6 +171,8 @@ func Run(ctx context.Context, opts Options) error {
 		Client:        opts.Client,
 		ClusterID:     opts.ClusterID,
 		LiqoClusterID: opts.LiqoClusterID,
+		LocalClient:   opts.LocalClient,
+		Namespace:     namespace,
 		Logger:        logger.WithName("heartbeat"),
 		// Same semantics as the provider's advertisement publisher:
 		// any successful broker contact refreshes the readiness gate.

@@ -23,6 +23,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
+	autoscalingv1alpha1 "github.com/netgroup-polito/federation-autoscaler/api/autoscaling/v1alpha1"
 	brokerv1alpha1 "github.com/netgroup-polito/federation-autoscaler/api/broker/v1alpha1"
 )
 
@@ -30,17 +31,21 @@ import (
 // 7.3.4 — GET /api/v1/nodegroups   (Consumer Agent → Broker)
 // -----------------------------------------------------------------------------
 //
-// Step 5a deliberately keeps this endpoint dumb: it lists every
-// ClusterAdvertisement in the namespace, drops those whose status.available
-// is false, and returns one NodeGroupView per advertisement (each CR carries
-// exactly one ChunkType so the "(provider × chunkType)" pair is implicit).
-// No scoring, ranking, filtering by chunk type, or caller-side selection is
-// performed — the consumer agent / gRPC server / Cluster Autoscaler stay in
-// charge of choosing where to schedule.
+// The endpoint lists every Available ClusterAdvertisement and returns one
+// NodeGroupView per advertisement (each CR carries exactly one ChunkType so the
+// "(provider × chunkType)" pair is implicit). By default it stays dumb — no
+// scoring or selection — and lets the Cluster Autoscaler choose where to
+// schedule.
 //
-// Sort order is stable: (clusterId ASC, chunkType ASC). CA's expander is the
-// real decision maker; the broker's order only affects tie-breaks and log
-// readability.
+// The ONE exception is price preference: when the calling consumer has a
+// ConsumerPolicy with placement type "Price" (pushed on its heartbeat), the
+// Broker masks the view so the consumer can only grow the cheapest priced
+// provider with capacity (per chunk type). The CA itself never sees price — it
+// just grows the one pool the Broker left head-room on (see applyPricePreference
+// for the exact, strictly-additive rules). Views are per-consumer because each
+// consumer's Agent authenticates with its own mTLS identity.
+//
+// Sort order is stable: (clusterId ASC, chunkType ASC).
 
 func (s *Server) handleNodeGroupsList(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
@@ -57,13 +62,29 @@ func (s *Server) handleNodeGroupsList(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	views := make([]NodeGroupView, 0, len(list.Items))
+	// Project every Available advertisement, computing its per-chunk cost once
+	// so both the view's Cost field and the price-preference masking reuse it.
+	avail := make([]*brokerv1alpha1.ClusterAdvertisement, 0, len(list.Items))
 	for i := range list.Items {
-		cadv := &list.Items[i]
-		if !cadv.Status.Available {
-			continue
+		if list.Items[i].Status.Available {
+			avail = append(avail, &list.Items[i])
 		}
-		views = append(views, s.nodeGroupViewFromAdvertisement(cadv))
+	}
+	views := make([]NodeGroupView, len(avail))
+	costs := make([]float64, len(avail))
+	priced := make([]bool, len(avail))
+	for i, cadv := range avail {
+		cost, ok := s.perChunkCost(cadv)
+		costs[i], priced[i] = cost, ok
+		views[i] = s.nodeGroupViewFromAdvertisement(cadv, cost, ok)
+	}
+
+	// Per-consumer price preference: narrow to the cheapest priced provider
+	// with capacity within each chunk type. No policy (or no priced provider
+	// with capacity) ⇒ no masking ⇒ today's behaviour.
+	if entry, ok := s.consumers.Lookup(ClusterIDFromContext(ctx)); ok &&
+		entry.Placement.Type == autoscalingv1alpha1.PlacementStrategyPrice {
+		applyPricePreference(views, costs, priced)
 	}
 
 	sort.SliceStable(views, func(i, j int) bool {
@@ -81,6 +102,51 @@ func (s *Server) handleNodeGroupsList(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+// applyPricePreference masks the node-group view for a price-preferring
+// consumer (cheapest-first greedy). Within each chunk type it keeps head-room
+// only on the cheapest *priced* provider that still has capacity, and removes
+// head-room from every other provider in that type (MaxSize = CurrentReserved)
+// so the Cluster Autoscaler can only grow the cheapest one. When the cheapest
+// fills up it loses its capacity and the next /nodegroups call promotes the
+// next-cheapest.
+//
+// The rules are strictly additive — the function only ever *removes* growable
+// options, never adds a choice the Broker didn't already expose:
+//   - A chunk type with no priced provider that has capacity is left untouched
+//     (today's behaviour). This covers the "policy set but no prices" case and
+//     the unpriced tail of "prices partially set".
+//   - Unpriced (or partially-priced) providers are never the winner, so they
+//     are reachable only once every priced provider of that type is exhausted —
+//     i.e. last resort.
+//
+// views[i]/costs[i]/priced[i] describe the same advertisement.
+func applyPricePreference(views []NodeGroupView, costs []float64, priced []bool) {
+	byType := map[brokerv1alpha1.ChunkType][]int{}
+	for i := range views {
+		byType[views[i].Type] = append(byType[views[i].Type], i)
+	}
+	for _, idxs := range byType {
+		winner := -1
+		for _, i := range idxs {
+			if !priced[i] || views[i].MaxSize-views[i].CurrentReserved <= 0 {
+				continue // unpriced, or no capacity to grow
+			}
+			if winner == -1 || costs[i] < costs[winner] ||
+				(costs[i] == costs[winner] && views[i].ProviderClusterID < views[winner].ProviderClusterID) {
+				winner = i
+			}
+		}
+		if winner == -1 {
+			continue // no priced provider with capacity → leave the type as-is
+		}
+		for _, i := range idxs {
+			if i != winner {
+				views[i].MaxSize = views[i].CurrentReserved // remove head-room
+			}
+		}
+	}
+}
+
 // nodeGroupViewFromAdvertisement projects one ClusterAdvertisement onto the
 // wire shape consumed by the Consumer Agent (and ultimately by the Cluster
 // Autoscaler via the gRPC server).
@@ -92,8 +158,12 @@ func (s *Server) handleNodeGroupsList(w http.ResponseWriter, r *http.Request) {
 //
 // ChunkResources is recovered by re-running the configured sizer over the
 // advertisement so callers see the same per-chunk shape that downstream
-// node templates will report.
-func (s *Server) nodeGroupViewFromAdvertisement(cadv *brokerv1alpha1.ClusterAdvertisement) NodeGroupView {
+// node templates will report. Cost is the Broker-computed per-chunk cost
+// (nil when the provider is unpriced), kept for the dashboard and the gRPC
+// server's PricingNodePrice back-compat.
+func (s *Server) nodeGroupViewFromAdvertisement(
+	cadv *brokerv1alpha1.ClusterAdvertisement, cost float64, priced bool,
+) NodeGroupView {
 	return NodeGroupView{
 		ID:                    nodeGroupID(cadv.Spec.ClusterID, cadv.Spec.ClusterType),
 		ProviderClusterID:     cadv.Spec.ClusterID,
@@ -103,7 +173,7 @@ func (s *Server) nodeGroupViewFromAdvertisement(cadv *brokerv1alpha1.ClusterAdve
 		MaxSize:               cadv.Status.TotalChunks,
 		CurrentReserved:       cadv.Status.ReservedChunks,
 		ChunkResources:        s.perChunkResources(cadv),
-		Cost:                  cadv.Spec.Price,
+		Cost:                  costQuantity(cost, priced),
 		Topology:              cadv.Spec.Topology,
 		// LiqoLabels / LiqoTaints aren't on ClusterAdvertisementSpec yet
 		// (designed but pending). When they land, populate Labels /

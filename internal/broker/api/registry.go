@@ -20,6 +20,8 @@ import (
 	"sort"
 	"sync"
 	"time"
+
+	autoscalingv1alpha1 "github.com/netgroup-polito/federation-autoscaler/api/autoscaling/v1alpha1"
 )
 
 // ConsumerEntry is one row of ConsumerRegistry, captured the last time the
@@ -28,6 +30,12 @@ type ConsumerEntry struct {
 	ClusterID     string
 	LiqoClusterID string
 	LastSeen      time.Time
+
+	// Placement is the consumer's most recently heartbeated placement policy.
+	// The zero value (empty Type) means the Broker default — no price
+	// preference. Stored by value: PlacementPolicy has no reference fields, so
+	// Snapshot copies stay safe to hand to the read-only dashboard.
+	Placement autoscalingv1alpha1.PlacementPolicy
 }
 
 // ConsumerRegistry holds the in-memory mapping ClusterID → LiqoClusterID
@@ -50,16 +58,17 @@ func NewConsumerRegistry() *ConsumerRegistry {
 	return &ConsumerRegistry{entries: make(map[string]ConsumerEntry)}
 }
 
-// Touch records (or refreshes) one consumer's identity. Safe for concurrent
-// use; later calls overwrite earlier ones, which is fine because the most
-// recent heartbeat is by definition the most accurate.
-func (r *ConsumerRegistry) Touch(clusterID, liqoClusterID string) {
+// Touch records (or refreshes) one consumer's identity and placement policy.
+// Safe for concurrent use; later calls overwrite earlier ones, which is fine
+// because the most recent heartbeat is by definition the most accurate.
+func (r *ConsumerRegistry) Touch(clusterID, liqoClusterID string, placement autoscalingv1alpha1.PlacementPolicy) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	r.entries[clusterID] = ConsumerEntry{
 		ClusterID:     clusterID,
 		LiqoClusterID: liqoClusterID,
 		LastSeen:      time.Now(),
+		Placement:     placement,
 	}
 }
 

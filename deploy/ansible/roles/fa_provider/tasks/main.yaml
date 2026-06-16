@@ -32,3 +32,22 @@
         patch configmap agent-config --type merge -p \
         '{"data":{"brokerUrl":"https://{{ broker_address }}:{{ broker_node_port }}","clusterId":"{{ cluster_id }}","liqoClusterId":"{{ cluster_id }}"}}'
   changed_when: true
+
+# Per-provider unit prices for price-based placement. Define `fa_provider_prices`
+# in inventory (per host) as a map of resource → price-per-unit-per-hour, e.g.
+#   fa_provider_prices: {cpu: "0.03", memory: "0.004"}
+# Give the demo's two providers DISTINCT values so the cheapest wins visibly.
+# Stored as JSON in prices.yaml (the agent parses YAML or JSON). When the var is
+# unset the empty ConfigMap from the overlay stands and the provider advertises
+# no price — fully backwards-compatible.
+- name: Set this provider's unit prices (price-based placement)
+  delegate_to: localhost
+  when: fa_provider_prices is defined and (fa_provider_prices | length) > 0
+  ansible.builtin.shell:
+    cmd: |
+      kubectl --kubeconfig {{ cluster_kubeconfig }} -n {{ fa_namespace }} \
+        create configmap agent-prices \
+        --from-literal=prices.yaml='{{ fa_provider_prices | to_json }}' \
+        --dry-run=client -o yaml | \
+        kubectl --kubeconfig {{ cluster_kubeconfig }} apply -f -
+  changed_when: true

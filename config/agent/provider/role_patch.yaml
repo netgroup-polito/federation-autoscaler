@@ -1,4 +1,26 @@
-# Append --role=provider to the agent container's args list.
+# Provider-role overlay patch for the agent container.
+#
+# 1. Append --role=provider.
+# 2. Append --price-file pointing at the mounted prices ConfigMap, and mount it.
+#    The agent re-reads this file every advertisement cycle so an operator can
+#    reprice without a restart. The ConfigMap is optional and ships empty, so a
+#    provider with no prices set behaves exactly as before (advertises no price).
 - op: add
   path: /spec/template/spec/containers/0/args/-
   value: --role=provider
+- op: add
+  path: /spec/template/spec/containers/0/args/-
+  value: --price-file=/etc/federation-autoscaler/prices/prices.yaml
+- op: add
+  path: /spec/template/spec/containers/0/volumeMounts/-
+  value:
+    name: prices
+    mountPath: /etc/federation-autoscaler/prices
+    readOnly: true
+- op: add
+  path: /spec/template/spec/volumes/-
+  value:
+    name: prices
+    configMap:
+      name: agent-prices
+      optional: true

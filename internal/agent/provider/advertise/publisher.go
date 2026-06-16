@@ -31,11 +31,15 @@ package advertise
 import (
 	"context"
 	"errors"
+	"os"
+	"strings"
 	"time"
 
 	"github.com/go-logr/logr"
+	corev1 "k8s.io/api/core/v1"
 	ctrlclient "sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/log"
+	"sigs.k8s.io/yaml"
 
 	agentclient "github.com/netgroup-polito/federation-autoscaler/internal/agent/client"
 	"github.com/netgroup-polito/federation-autoscaler/internal/agent/provider/snapshot"
@@ -60,6 +64,13 @@ type Options struct {
 	ClusterID     string
 	LiqoClusterID string
 
+	// PriceFile is an optional path to a YAML/JSON file holding this
+	// provider's per-resource unit prices (e.g. {"cpu":"0.03","memory":"4Mi"
+	// …}; keys are resource names, values are price-per-unit-per-hour). It is
+	// re-read on every publish cycle so an operator can reprice without a
+	// restart. Empty/missing/unparseable ⇒ the provider advertises no price.
+	PriceFile string
+
 	// Interval overrides DefaultInterval. Mainly useful in tests.
 	Interval time.Duration
 
@@ -83,6 +94,7 @@ type Publisher struct {
 	localClient   ctrlclient.Client
 	clusterID     string
 	liqoClusterID string
+	priceFile     string
 	interval      time.Duration
 	log           logr.Logger
 	onResult      func(success bool)
@@ -114,6 +126,7 @@ func New(opts Options) (*Publisher, error) {
 		localClient:   opts.LocalClient,
 		clusterID:     opts.ClusterID,
 		liqoClusterID: opts.LiqoClusterID,
+		priceFile:     opts.PriceFile,
 		interval:      interval,
 		log:           logger,
 		onResult:      opts.OnPublishResult,
@@ -160,6 +173,7 @@ func (p *Publisher) publishOnce(ctx context.Context) {
 		ClusterID:     p.clusterID,
 		LiqoClusterID: p.liqoClusterID,
 		Resources:     snap.Allocatable,
+		UnitPrices:    p.loadUnitPrices(),
 	}
 
 	resp, err := p.client.PostAdvertisement(ctx, req)
@@ -175,7 +189,39 @@ func (p *Publisher) publishOnce(ctx context.Context) {
 	p.log.V(1).Info("advertisement published",
 		"chunkCount", resp.ChunkCount,
 		"countedNodes", snap.CountedNodes,
+		"pricedResources", len(req.UnitPrices),
 		"piggybackedInstructions", len(resp.Instructions))
+}
+
+// loadUnitPrices reads and parses the per-resource unit-price file (if
+// configured). It is intentionally best-effort: a missing, empty, or
+// unparseable file yields nil, so the provider simply advertises no price
+// rather than failing the publish cycle. Re-reading here (not at construction)
+// is what makes live repricing work — kubelet refreshes the projected
+// ConfigMap file and the next cycle picks it up.
+func (p *Publisher) loadUnitPrices() corev1.ResourceList {
+	if p.priceFile == "" {
+		return nil
+	}
+	data, err := os.ReadFile(p.priceFile)
+	if err != nil {
+		p.log.V(1).Info("price file unreadable; advertising no price",
+			"path", p.priceFile, "err", err.Error())
+		return nil
+	}
+	if strings.TrimSpace(string(data)) == "" {
+		return nil
+	}
+	var prices corev1.ResourceList
+	if err := yaml.Unmarshal(data, &prices); err != nil {
+		p.log.V(1).Info("price file unparseable; advertising no price",
+			"path", p.priceFile, "err", err.Error())
+		return nil
+	}
+	if len(prices) == 0 {
+		return nil
+	}
+	return prices
 }
 
 func (p *Publisher) notifyResult(success bool) {

@@ -82,7 +82,12 @@ spec:
         - --v=4
         - --cloud-provider=externalgrpc
         - --cloud-config=/etc/cluster-autoscaler/config/cloud-config.yaml
-        - --expander=price
+        # least-waste = a neutral, NON-price expander. Price-based provider
+        # selection is the Broker's job (it masks /api/v1/nodegroups per
+        # consumer that opts in via a ConsumerPolicy), so CA stays
+        # price-agnostic. A `price` expander here would price-select for every
+        # consumer regardless of policy, defeating the per-consumer opt-in.
+        - --expander=least-waste
         - --scale-down-enabled=true
         - --scale-down-unneeded-time={{ scale_down_unneeded_time }}
         # The "delay-after-*" knobs default to 10 min upstream — too long

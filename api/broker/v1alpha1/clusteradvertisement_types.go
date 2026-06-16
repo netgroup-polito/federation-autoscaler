@@ -18,7 +18,6 @@ package v1alpha1
 
 import (
 	corev1 "k8s.io/api/core/v1"
-	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
@@ -66,11 +65,18 @@ type ClusterAdvertisementSpec struct {
 	// +optional
 	Topology *Topology `json:"topology,omitempty"`
 
-	// Price is the cost per chunk-hour advertised by the provider. Surfaced to
-	// the Cluster Autoscaler via the gRPC server's PricingNodePrice method to
-	// enable CA's price Expander. Non-negative.
+	// UnitPrices is the provider's per-resource unit price (optional). Keys are
+	// Kubernetes resource names; values are the price per resource unit per hour:
+	//   cpu            → price per core-hour
+	//   memory         → price per GiB-hour
+	//   nvidia.com/gpu → price per GPU-hour
+	// The Broker converts these into a per-chunk cost (chunk size is Broker-owned,
+	// so providers price their own resources rather than chunks) and uses it for
+	// price-based placement when a consumer opts in via a ConsumerPolicy. Omitted
+	// means the provider is unpriced; price-preferring consumers reach unpriced
+	// providers only as a last resort. Each value must be non-negative.
 	// +optional
-	Price *resource.Quantity `json:"price,omitempty"`
+	UnitPrices corev1.ResourceList `json:"unitPrices,omitempty"`
 }
 
 // ClusterAdvertisementStatus is the Broker's observed view of the advertisement.

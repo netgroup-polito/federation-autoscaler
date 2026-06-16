@@ -65,7 +65,7 @@ This proposal defines a complete architecture that achieves this by combining **
 - Modifying the Cluster Autoscaler source code
 - Supporting a cluster that is simultaneously a consumer and a provider
 - Real-time sub-second autoscaling (target: 15-30 second scale-up latency)
-- Cost optimization engine (placeholder for future work; the decision engine interface is defined but the scoring algorithm is pluggable)
+- Multi-factor placement scoring (latency, carbon, multi-criteria weighting). v1 implements **price-based** placement only: providers advertise per-resource unit prices and the Broker picks the cheapest provider for consumers that opt in via a `ConsumerPolicy` (see §4.1, §5.6). Richer scoring remains future work; the selection point (per-consumer node-group masking) is where it would plug in.
 - Broker-initiated (push) delivery of any kind — explicitly out of scope
 
 ---
@@ -121,7 +121,8 @@ Each provider cluster runs:
 | Advertisement ingestion | Accepts `POST /api/v1/advertisements` (every 30 s) from provider agents; stores `ClusterAdvertisement` CRDs |
 | Consumer registration (implicit) | Learns about consumers via `POST /api/v1/reservations` and `POST /api/v1/heartbeat`; identity comes from the mTLS client certificate CN |
 | Chunk calculation | Divides each provider's total resources into equal-sized chunks using the `chunk-config` ConfigMap |
-| Decision making | On `POST /api/v1/reservations`, runs the decision engine **synchronously** inline and returns the chosen provider + reservation ID in the response body |
+| Provider selection | The provider for a given scale-up is chosen at `GET /api/v1/nodegroups` time, not at reservation time: by default the Broker exposes **all** available providers and the consumer's Cluster Autoscaler grows one (CA's expander is neutral/non-price). For a consumer that opts in via a `ConsumerPolicy{placement.type: Price}`, the Broker **masks** its node-group view to expose only the cheapest priced provider with capacity (cheapest-first greedy), so the Broker is the de-facto chooser while CA stays price-agnostic. See "Price-based placement" below and §5.6. |
+| Reservation commit | `POST /api/v1/reservations` names a specific provider (the one CA grew); the Broker validates its live capacity **synchronously** and returns the reservation record inline |
 | Reservation state machine | Manages `Reservation` CRD phases (`Pending` → `GeneratingKubeconfig` → `KubeconfigReady` → `Peering` → `Peered` → `Unpeering` → `Released` \| `Expired` \| `Failed`) |
 | Instruction generation | On phase transitions, creates `ProviderInstruction` (for provider agents) and `ReservationInstruction` (for consumer agents) records, filtered per cluster on subsequent `GET /api/v1/instructions` polls |
 | Instruction piggyback | The response of `POST /api/v1/advertisements` inlines any pending `ProviderInstruction` records for the calling provider, so typical-case instruction latency is bounded by the 30 s advertisement cadence rather than the 5 s poll — but the 5 s poll guarantees an upper bound |
@@ -129,9 +130,20 @@ Each provider cluster runs:
 | Rate limiting | Per-cluster token bucket on `GET /api/v1/instructions` — 10 rps burst, 5 rps sustained. Overflow returns `429 TooManyRequests`; the agent's existing exponential backoff absorbs it. |
 | Health monitoring | Tracks `lastSeen` on every cluster from advertisements (providers) and heartbeats (consumers). Declares a cluster `Unavailable` after 30 s with no update. |
 | Reconcile on drift | On startup and on leader change, issues `ProviderInstruction/ReservationInstruction {Kind: Reconcile}` to every active cluster; agents reply with a full state snapshot via `POST /instructions/{id}/result` and the Broker adopts it. |
-| Price/priority reporting | Returns per-provider cost values that the agent relays to the gRPC server and ultimately exposes via the CA's `PricingNodePrice` method (enabling the `price` Expander) |
+| Price-based placement | Providers advertise **per-resource unit prices** (`unitPrices`: price per core-hour / GiB-hour / GPU-hour). The Broker multiplies them by the (Broker-owned) chunk size to get a comparable **per-chunk cost**, used both to rank providers for the per-consumer node-group masking above and as the `cost` it surfaces (relayed to the gRPC server's `PricingNodePrice` for the dashboard / an optional CA price expander). Providers that advertise no price — or only some of a chunk's resources — are treated as a last resort. |
 
-> **Implemented in:** `cmd/broker/`, `internal/broker/api/` (REST surface + middleware + mTLS), `internal/broker/chunk/` (chunk sizing), `internal/controller/broker/` (`clusteradvertisement_controller.go`, `reservation_controller.go`), `internal/controller/autoscaling/` (`providerinstruction_controller.go`, `reservationinstruction_controller.go`, `instruction.go`), `internal/manager/`. Deployed via `config/broker/`.
+**Price-based placement (the strictly-additive contract).** Per-consumer node-group masking only ever *narrows* what the Broker already exposed; it never invents a choice CA didn't have:
+
+| `ConsumerPolicy` | Provider prices | Node-group view returned | Effective chooser |
+|---|---|---|---|
+| none | none | all providers (unchanged) | CA (neutral expander) |
+| none | full/partial | all providers (prices stored + shown, but inert for placement) | CA (neutral expander) |
+| `type: Price` | none | all providers (no priced provider to prefer → no narrowing) | CA (neutral expander) |
+| `type: Price` | full/partial | only the cheapest **priced** provider with capacity per chunk type; the rest masked (`maxSize = currentReserved`); unpriced last | **Broker** |
+
+A consumer pushes its `ConsumerPolicy` on every heartbeat (§7.3.3); the Broker stores it per-consumer in the in-memory registry (keyed by the mTLS CN). When the cheapest provider fills up it loses its head-room and the next `/nodegroups` call promotes the next-cheapest (cheapest-first greedy, may span a couple of CA scan intervals).
+
+> **Implemented in:** `cmd/broker/`, `internal/broker/api/` (REST surface + middleware + mTLS; `pricing.go` per-chunk cost, `nodegroups.go` per-consumer masking, `registry.go` per-consumer policy), `internal/broker/chunk/` (chunk sizing), `internal/controller/broker/` (`clusteradvertisement_controller.go`, `reservation_controller.go`), `internal/controller/autoscaling/` (`providerinstruction_controller.go`, `reservationinstruction_controller.go`, `instruction.go`), `internal/manager/`. Deployed via `config/broker/`.
 
 ---
 
@@ -153,7 +165,7 @@ Each provider cluster runs:
 | Build node templates | Constructs fake `v1.Node` objects with chunk-sized resources, Liqo labels, and Liqo taints for CA simulation |
 | Handle IncreaseSize | Issues `POST /local/reservations`; Consumer Agent returns `202 Accepted` immediately with a `reservationId`. gRPC server then polls `GET /local/reservations/{id}` every 500 ms until `Peered` or CA's deadline. Creates `VirtualNodeState` CRD entries with status `Creating`. |
 | Handle DeleteNodes | Issues `DELETE /local/reservations/{id}?chunks=M`; Consumer Agent returns `202`. Marks `VirtualNodeState` entries as `Deleting`. |
-| Report pricing | Returns Consumer-Agent-provided (ultimately Broker-provided) cost values via `PricingNodePrice` to enable the `price` Expander strategy |
+| Report pricing | Surfaces the Broker-computed per-chunk cost (relayed by the Consumer Agent) via `PricingNodePrice`. This is informational / for the Broker dashboard — price-based provider selection is done by the **Broker** (per-consumer node-group masking), so the demo runs CA on a neutral expander and does **not** rely on the `price` Expander |
 | Cache responses | Caches last known node-group list to serve stale data if the Consumer Agent is temporarily unreachable |
 
 **gRPC Method Implementation Map:**
@@ -168,12 +180,12 @@ Each provider cluster runs:
 | `NodeGroupDecreaseTargetSize` | Cancels pending (not-yet-peered) reservations via the Consumer Agent's delete endpoint |
 | `NodeGroupNodes` | Lists `VirtualNodeState` CRDs for this group, maps status to `InstanceState` (Creating/Running/Deleting) |
 | `NodeGroupTemplateNodeInfo` | If `currentSize >= 1`: reads the actual virtual node's spec. If `currentSize == 0`: constructs a fake node using the Consumer-Agent-provided chunk size, Liqo labels, and Liqo taint |
-| `PricingNodePrice` | Returns the Consumer-Agent-relayed (Broker-authoritative) cost value for this provider |
+| `PricingNodePrice` | Returns the Broker-computed per-chunk cost (from the provider's `unitPrices` × chunk size), relayed by the Consumer Agent, scaled by the requested time window. 0 when the provider is unpriced. Informational — CA's expander is neutral, so this does not drive selection |
 | `GPULabel` | Returns `"nvidia.com/gpu"` (standard GPU label) |
 | `GetAvailableGPUTypes` | Returns GPU types from the Consumer Agent's cached node-group list |
 | `Refresh` | Issues `GET /local/nodegroups`; refreshes `VirtualNodeState` statuses via `GET /local/reservations/{id}` for non-terminal reservations |
 | `Cleanup` | No-op or cleanup local caches |
-| `PricingPodPrice` | Returns `Unimplemented` (code 12) |
+| `PricingPodPrice` | Returns a constant `0` — the Broker prices chunks, not pods, and CA's price expander (unused here) treats any constant uniformly |
 | `NodeGroupGetOptions` | Returns custom `MaxNodeProvisionDuration` (15 minutes — covers the full `liqoctl peer` handshake including WireGuard tunnel setup and Liqo Identity exchange, which routinely takes 3–5 min on constrained hosts) |
 
 **Node Template Construction (for `NodeGroupTemplateNodeInfo` when `currentSize == 0`):**
@@ -283,6 +295,7 @@ Advertisement doubles as heartbeat — providers never call `/api/v1/heartbeat`.
 |---|---|
 | Collect metrics | Reads local node resources (allocatable − used), GPU availability, topology labels (zone/region) |
 | Advertise capacity | Every 30 s `POST /api/v1/advertisements` — also acts as heartbeat; response carries piggybacked `ProviderInstruction`s |
+| Advertise prices (optional) | Reads its per-resource `unitPrices` from a mounted file (`--price-file`) on **every** advertisement cycle, so an operator can reprice without a restart, and includes them in the POST. A missing/empty/unparseable file ⇒ no price advertised (the provider is simply not eligible for price-preferring consumers) |
 | Execute `GenerateKubeconfig` | On receipt of a `ProviderInstruction{Kind: GenerateKubeconfig}` (via poll or piggyback): runs `liqoctl generate peering-user --consumer-cluster-id <id>`; POSTs the resulting kubeconfig as payload of `POST /api/v1/instructions/{id}/result`. **Per-consumer singleton invariant** — `liqoctl generate peering-user` produces one `liqo-peer-user-<consumer>` identity per consumer, not per Reservation; if N Reservations from the same consumer hit the same provider, only the first GK call succeeds and the others return `CSR already exists`. Failed GKs are propagated up; the broker-side fix (v2: de-duplicate GK across (consumer, provider) pairs and reuse the cached kubeconfig) is tracked separately. Handler intentionally does **not** self-heal by re-running `liqoctl delete peering-user` — every regeneration mints a fresh random CN that invalidates any kubeconfig the broker has already captured for the surviving Reservation. |
 | Execute `Cleanup` | On `ProviderInstruction{Kind: Cleanup}`: tears down provider-side artefacts (peering-user kubeconfig, associated state); reports result |
 | Execute `Reconcile` | On `ProviderInstruction{Kind: Reconcile}`: gathers current live advertisement state and active-reservation state; returns it in `POST /instructions/{id}/result` |
@@ -290,7 +303,7 @@ Advertisement doubles as heartbeat — providers never call `/api/v1/heartbeat`.
 
 > **Shared code, separate binaries.** Both agents share the outbound mTLS client, the exponential-backoff retrier, the idempotency cache, and the CRD clients. Role is selected at startup by a CLI flag (`--role=consumer|provider`) that wires in the role-specific instruction executors and the role-specific polling / advertisement loop.
 
-> **Implemented in:** `cmd/agent/`, `internal/agent/provider/` (orchestration), `internal/agent/provider/snapshot/` (allocatable + topology), `internal/agent/provider/advertise/` (30 s POST), `internal/agent/provider/instructions/` (GenerateKubeconfig via `liqoctl generate peering-user` + Cleanup + Reconcile), `internal/agent/client/`, `internal/agent/poller/`, `internal/agent/health/`. Deployed via `config/agent/provider/` (Deployment `--role=provider`). `liqoctl` is bundled in the agent image — the **host** prefetches `bin/liqoctl-<version>-<os>-<arch>/liqoctl` via the `Makefile`'s `LIQOCTL_BIN` target and the `Dockerfile` `COPY`s it from the build context (not `curl`-ed from inside the build, because some hosts blackhole the docker daemon's egress to `github.com/releases`). Bump `LIQOCTL_VERSION` in the `Makefile` in lock-step with the Liqo CRDs the consumer / provider instruction handlers create.
+> **Implemented in:** `cmd/agent/`, `internal/agent/provider/` (orchestration), `internal/agent/provider/snapshot/` (allocatable + topology), `internal/agent/provider/advertise/` (30 s POST + per-cycle `--price-file` read in `publisher.go`), `internal/agent/provider/instructions/` (GenerateKubeconfig via `liqoctl generate peering-user` + Cleanup + Reconcile), `internal/agent/client/`, `internal/agent/poller/`, `internal/agent/health/`. Deployed via `config/agent/provider/` (Deployment `--role=provider`). `liqoctl` is bundled in the agent image — the **host** prefetches `bin/liqoctl-<version>-<os>-<arch>/liqoctl` via the `Makefile`'s `LIQOCTL_BIN` target and the `Dockerfile` `COPY`s it from the build context (not `curl`-ed from inside the build, because some hosts blackhole the docker daemon's egress to `github.com/releases`). Bump `LIQOCTL_VERSION` in the `Makefile` in lock-step with the Liqo CRDs the consumer / provider instruction handlers create.
 
 ---
 
@@ -302,12 +315,14 @@ Advertisement doubles as heartbeat — providers never call `/api/v1/heartbeat`.
 ```
 --cloud-provider=externalgrpc
 --cloud-config=/etc/autoscaler/cloud-config
---expander=price
+--expander=least-waste                 # neutral / NON-price (see note)
 --scale-down-enabled=true
 --scale-down-unneeded-time=5m
 --max-node-provision-time=5m
 --scan-interval=10s
 ```
+
+**Expander is deliberately NOT `price`.** Price-based provider selection is the Broker's job: it masks `GET /api/v1/nodegroups` per consumer that opts in via a `ConsumerPolicy` (§4.1, §5.6), so CA only ever sees the provider(s) the Broker wants it to grow. A `price` expander here would make CA price-select for **every** consumer using `PricingNodePrice`, regardless of policy — defeating the per-consumer opt-in. CA therefore stays completely price-agnostic; `least-waste` (or any non-price expander) is fine because, under masking, only the chosen provider has head-room anyway.
 
 **Cloud config file:**
 ```
@@ -404,7 +419,12 @@ spec:
   topology:
     zone:   "eu-west-1a"
     region: "eu-west-1"
-  price: 1.0                          # $/chunk-hour, advertised by provider, enforced by Broker
+  unitPrices:                         # optional, per-resource price-per-unit-per-hour
+    cpu:            "0.03"             #   per core-hour
+    memory:        "0.004"            #   per GiB-hour
+    nvidia.com/gpu: "1.50"            #   per GPU-hour
+                                      # Broker derives a per-chunk cost = unitPrices × chunk size.
+                                      # Omitted ⇒ unpriced (last resort for price-preferring consumers).
 status:
   lastSeen:        "2026-04-08T10:30:00Z"
   available:       true               # false if heartbeat timeout exceeded
@@ -503,6 +523,25 @@ status:
 ```
 
 > **Implemented in:** `api/autoscaling/v1alpha1/reservationinstruction_types.go` (CRD), `internal/controller/autoscaling/reservationinstruction_controller.go` (delivery + enforcement), `internal/controller/autoscaling/instruction.go`. Kubeconfig payload is loaded fresh per poll by `internal/broker/api/instructions.go` (never written to status).
+
+### 5.6 ConsumerPolicy (Consumer Cluster, operator-stamped)
+
+A consumer-cluster-local declaration of how the Broker should place this consumer's borrowed capacity. It lives **only on the consumer cluster** and the Broker never reads it directly — the Consumer Agent reads it on every heartbeat and pushes its spec to the Broker (preserving the agent-initiated, no-Broker-dial-in model). Operator-stamped (manually or by the `fa_consumer` Ansible role) and editable at any time; the agent re-reads it each heartbeat so a change takes effect within ~15 s without a restart. The type is deliberately extensible (a discriminated union) — `Price` is the only strategy in v1.
+
+```yaml
+apiVersion: autoscaling.federation-autoscaler.io/v1alpha1
+kind: ConsumerPolicy
+metadata:
+  name: default
+  namespace: federation-autoscaler-system
+spec:
+  placement:
+    type: Price        # "" (or no ConsumerPolicy) = Broker default, no price preference
+```
+
+When `placement.type: Price`, the Broker narrows this consumer's `GET /api/v1/nodegroups` view to the cheapest priced provider with capacity (§4.1, "Price-based placement"). No `ConsumerPolicy` — or a chunk type with no priced provider — leaves the view unchanged, so the feature is strictly additive.
+
+> **Implemented in:** `api/autoscaling/v1alpha1/consumerpolicy_types.go` (CRD + `PlacementPolicy`). Consumer Agent reads it each heartbeat in `internal/agent/consumer/heartbeat/heartbeat.go` (`currentPlacement`) and sends it on `HeartbeatRequest.Placement`; the Broker stores it per-consumer in `internal/broker/api/registry.go` and consumes it in `internal/broker/api/nodegroups.go`. RBAC: read-only in `config/agent/base/clusterrole.yaml`.
 
 ---
 
@@ -622,7 +661,7 @@ Content-Type: application/json
 
 Defined by upstream `externalgrpc.proto`. The gRPC server implements all 15 methods listed in § 4.2 with no non-upstream extensions.
 
-The vendored proto is pinned to **cluster-autoscaler v1.32.0**. The proto's message shapes changed between unreleased master and tagged 1.32.x releases (notably: `NodeGroupTemplateNodeInfoResponse.nodeInfo` is a structured `v1.Node` on v1.32+ but was `bytes nodeBytes` on master; `PricingNodePriceRequest.{StartTime,EndTime}` are `*metav1.Time` on v1.32+ but `timestamppb.Timestamp` on master). Bump the vendored proto only in lock-step with the CA image tag deployed in `config/cluster-autoscaler/`; running mismatched versions surfaces as a `nil pointer` in CA when it tries to read `NodeInfo` against the wrong wire layout.
+The vendored proto is pinned to **cluster-autoscaler v1.32.0**. The proto's message shapes changed between unreleased master and tagged 1.32.x releases (notably: `NodeGroupTemplateNodeInfoResponse.nodeInfo` is a structured `v1.Node` on v1.32+ but was `bytes nodeBytes` on master; `PricingNodePriceRequest.{StartTime,EndTime}` are `*metav1.Time` on v1.32+ but `timestamppb.Timestamp` on master). Bump the vendored proto only in lock-step with the CA image tag deployed by `test/e2e/bootstrap/cluster_autoscaler.go` (`ClusterAutoscalerImage`, e2e) / `deploy/ansible/roles/cluster_autoscaler/` (`cluster_autoscaler_image`, demo); running mismatched versions surfaces as a `nil pointer` in CA when it tries to read `NodeInfo` against the wrong wire layout.
 
 > **Implemented in:** `internal/grpcserver/protos/` (vendored proto bindings — `externalgrpc.pb.go`, `externalgrpc_grpc.pb.go` — pinned to v1.32.0); `internal/grpcserver/server.go` builds the gRPC server with mTLS, and the 14 implemented RPCs land in `rpc_readonly.go`, `rpc_mutating.go`, `rpc_lifecycle.go`. `NodeGroupGetOptions` is the only Unimplemented RPC (per proto contract).
 
@@ -747,7 +786,7 @@ Body:
   "liqoClusterId": "liqo-provider-1-xxxx",
   "resources":     {"cpu": "8", "memory": "16Gi", "nvidia.com/gpu": "0"},
   "topology":      {"zone": "eu-west-1a", "region": "eu-west-1"},
-  "price":         1.0,
+  "unitPrices":    {"cpu": "0.03", "memory": "0.004", "nvidia.com/gpu": "1.50"},
   "liqoLabels":    {"liqo.io/type": "virtual-node"},
   "liqoTaints":    [{"key": "virtual-node.liqo.io/not-allowed", "effect": "NoExecute"}]
 }
@@ -766,15 +805,20 @@ Response 200:
 Returns the Broker's current view of this provider's advertisement, including `Reserved` chunks. Used by the agent to preserve the Broker-managed `Reserved` field across advertisement re-submissions (same protocol as upstream `k8s-resource-brokering`).
 
 #### 7.3.3 `POST /api/v1/heartbeat`   *(consumer, every 15 s)*
+The body also carries the consumer's current placement policy, read fresh from its `ConsumerPolicy` CRD each beat (§5.6). `placement` is omitted when the consumer has no `ConsumerPolicy`, which the Broker treats as its default (no price preference).
 ```
 POST /api/v1/heartbeat
-Body: {"clusterId": "consumer-1", "liqoClusterId": "liqo-consumer-1-xxxx"}
+Body: {
+  "clusterId":     "consumer-1",
+  "liqoClusterId": "liqo-consumer-1-xxxx",
+  "placement":     {"type": "Price"}        // optional; omitted = Broker default
+}
 
 Response 200: {"ackAt": "2026-04-08T10:30:00Z"}
 ```
 
 #### 7.3.4 `GET /api/v1/nodegroups`   *(consumer)*
-Returns every node group visible to this consumer. Same schema as § 7.2.2.
+Returns the node groups visible to **this** consumer. Same schema as § 7.2.2, but the view is per-consumer: if the caller's last-heartbeated `ConsumerPolicy` is `type: Price`, the Broker masks the list to the cheapest priced provider with capacity per chunk type (others get `maxSize = currentReserved`, i.e. no head-room). With no policy — or no priced provider with capacity — the full list is returned unchanged (§4.1, "Price-based placement").
 
 #### 7.3.5 `POST /api/v1/reservations`   *(consumer — synchronous decision)*
 Broker runs the decision engine inline and returns the reservation record immediately. At this point `phase` is `Pending` or `GeneratingKubeconfig`; the peering step is handled asynchronously via polling (§ 7.3.6).
@@ -977,7 +1021,7 @@ Provider Agent                        Broker
      │                                   │
      │ POST /api/v1/advertisements       │
      │ { resources, liqoClusterId,       │
-     │   topology, price }               │
+     │   topology, unitPrices }          │
      │──── mTLS ───────────────────────>│
      │                                   │── Calculate chunks
      │                                   │── Upsert ClusterAdvertisement
@@ -994,6 +1038,7 @@ CONSUMER CLUSTER                      CENTRAL CLUSTER
 Consumer Agent                        Broker
      │                                   │
      │ POST /api/v1/heartbeat (15 s)     │── Update lastSeen, create ConsumerRecord on first call
+     │ { liqoClusterId, placement }      │── store placement policy (from ConsumerPolicy CRD)
      │──── mTLS ───────────────────────>│
      │                                   │
      │ GET /api/v1/instructions (5 s)    │── returns [] until something is pending
@@ -1002,7 +1047,7 @@ Consumer Agent                        Broker
 
 The Broker never needs to dial either cluster.
 
-> **Implemented in:** Provider Agent — `internal/agent/provider/advertise/publisher.go` (30 s POST loop) + `internal/agent/provider/snapshot/snapshot.go` (allocatable + topology); Consumer Agent — `internal/agent/consumer/heartbeat/heartbeat.go` (15 s POST loop); Broker side — `internal/broker/api/advertisement.go`, `internal/broker/api/heartbeat.go`, `internal/broker/api/registry.go` (in-memory `ConsumerRegistry`).
+> **Implemented in:** Provider Agent — `internal/agent/provider/advertise/publisher.go` (30 s POST loop) + `internal/agent/provider/snapshot/snapshot.go` (allocatable + topology); Consumer Agent — `internal/agent/consumer/heartbeat/heartbeat.go` (15 s POST loop; also reads the `ConsumerPolicy` CRD each beat and sends it as `placement`); Broker side — `internal/broker/api/advertisement.go`, `internal/broker/api/heartbeat.go`, `internal/broker/api/registry.go` (in-memory `ConsumerRegistry`, now also storing each consumer's placement policy).
 
 ### 8.2 Scale-Up Flow (Complete)
 
@@ -1013,11 +1058,19 @@ The Broker never needs to dial either cluster.
 ```
 Step 1: CA detects unschedulable pods.
 Step 2: CA calls Refresh() → gRPC server → Agent's /local/nodegroups (served from cache).
-Step 3: CA calls NodeGroups() → [ng-provider-1-standard(min=0,max=3), ng-provider-2-gpu(min=0,max=2)].
+        ↳ The Broker built this list FOR THIS CONSUMER. If the consumer's
+          ConsumerPolicy is type:Price, the Broker already masked it to the
+          cheapest priced provider with capacity (others have max==reserved,
+          i.e. no head-room) — so provider selection has happened HERE, before
+          CA decides anything.
+Step 3: CA calls NodeGroups() → e.g. [ng-provider-1-standard(min=0,max=3), ng-provider-2-gpu(min=0,max=2)].
 Step 4: CA calls NodeGroupTemplateNodeInfo() → chunk-sized fake Node per group.
 Step 5: CA simulates: "can my pending pods fit on a node from group X?"
 Step 6: CA estimator: "how many nodes from group X do I need?"
-Step 7: CA price Expander: picks the cheapest valid option.
+Step 7: CA's expander (neutral, e.g. least-waste — NOT price) picks among the
+        groups with head-room. Under price masking only the cheapest provider
+        has any, so the Broker — not CA — has effectively chosen it. CA never
+        sees price.
 Step 8: CA calls NodeGroupIncreaseSize(id="ng-provider-1-standard", delta=2).
 
 → gRPC Server:
@@ -1320,7 +1373,8 @@ No inbound port is required on any agent cluster. Consumer and provider clusters
 **Modify (additive only, `v1alpha1` stays):**
 
 *Broker:*
-- `ClusterAdvertisement` — add `liqoClusterId`, `topology`, `clusterType`, `price`, chunk status (`totalChunks`, `reservedChunks`, `availableChunks`)
+- `ClusterAdvertisement` — add `liqoClusterId`, `topology`, `clusterType`, `unitPrices` (per-resource price-per-unit-per-hour), chunk status (`totalChunks`, `reservedChunks`, `availableChunks`)
+- New `ConsumerPolicy` CRD (consumer cluster, `autoscaling.federation-autoscaler.io`) — the consumer's placement policy (`placement.type: Price`), pushed to the Broker on the heartbeat (§5.6)
 - `Reservation` — add `consumerLiqoClusterId`, `providerLiqoClusterId`, `chunkCount`, `chunkType`, `virtualNodeNames`; extend phase enum with `GeneratingKubeconfig | KubeconfigReady | Peering | Peered | Unpeering | Released`
 - `ProviderInstruction` — add `kind` (`GenerateKubeconfig | Cleanup | Reconcile`), `consumerLiqoClusterId`, `chunkCount`, `lastChunk`
 - `ReservationInstruction` — add `kind` (`Peer | Unpeer | Cleanup | Reconcile`), `providerLiqoClusterId`, `resourceSliceNames`, `chunkCount`, `lastChunk`, in-response kubeconfig field (not stored in status)
@@ -1329,7 +1383,7 @@ No inbound port is required on any agent cluster. Consumer and provider clusters
 - Add `POST /api/v1/instructions/{id}/result` endpoint
 - Add `POST /api/v1/heartbeat` endpoint (Consumer Agent only)
 - Add rate-limiting middleware (10/5 rps per cluster on `/instructions`, 2 rps on `/reservations`)
-- Extend decision engine to consider per-consumer priority and chunk availability
+- Add per-consumer, price-based provider selection: compute a per-chunk cost from each provider's `unitPrices`, and mask `GET /api/v1/nodegroups` to the cheapest priced provider with capacity for consumers whose pushed `ConsumerPolicy` is `type: Price`
 
 *Consumer Agent (new binary, shared-code base):*
 - Add `/local/*` HTTP listener (ClusterIP) consumed by the gRPC server
@@ -1352,7 +1406,7 @@ No inbound port is required on any agent cluster. Consumer and provider clusters
 **Remove:**
 - Any Broker-initiated outbound client (if present) — not used
 - Any polling-result cleanup path that used 202-followed-by-callback — replaced by in-line `GET /instructions` + `POST /result`
-- Cost-optimisation placeholder (replaced by chunk-based cost/priority scoring)
+- The cost-optimisation *placeholder* — replaced by a working price-based placement path (per-resource `unitPrices` → per-chunk cost → per-consumer node-group masking gated by `ConsumerPolicy`)
 
 ### 11.2 From Multi-Cluster-Autoscaler (gRPC Server)
 
@@ -1388,4 +1442,4 @@ This architecture achieves multi-provider cluster autoscaling on top of an **unm
 1. **Agent-only outbound communication with the Broker.** Every cross-cluster byte is the response body of a request that a **Consumer Agent** or a **Provider Agent** initiated. Consumer and provider clusters can therefore sit behind NAT or firewalls and still participate, as long as they can reach the Broker's URL.
 2. **Agent-centric design with two specialized roles.** On the consumer cluster the gRPC server talks only to its co-located **Consumer Agent** over an in-cluster REST API; the Consumer Agent is the consumer's single point of contact with the Broker and the sole executor of `liqoctl peer` / `liqoctl unpeer`. On the provider cluster the **Provider Agent** is the only component talking to the Broker and the sole executor of `liqoctl generate peering-user`. The two agents share a common codebase — outbound mTLS client, retrier, idempotency cache — but run as two distinct binaries / Deployments, selected at startup via `--role=consumer|provider`.
 
-The Broker runs a `k8s-resource-brokering`-aligned REST API: Provider Agents `POST /advertisements` every 30 s (response piggybacks pending instructions), Consumer Agents `POST /reservations` synchronously (decision is returned inline) and `POST /heartbeat` every 15 s, and both agents `GET /instructions` every 5 s to pick up any pending work. Results (including the peering kubeconfig, which is inlined in `/instructions` responses but never stored in CRD status) flow back through `POST /instructions/{id}/result`. Chunking divides each provider's capacity into fixed units that become Liqo `ResourceSlice`s and ultimately virtual nodes that CA sees as ordinary pool members. The price Expander lets CA respect Broker-assigned priorities. All cross-cluster traffic is mTLS, and every reservation-scoped call carries an idempotency key so that retries never cause double-execution.
+The Broker runs a `k8s-resource-brokering`-aligned REST API: Provider Agents `POST /advertisements` every 30 s (response piggybacks pending instructions), Consumer Agents `POST /reservations` synchronously (decision is returned inline) and `POST /heartbeat` every 15 s, and both agents `GET /instructions` every 5 s to pick up any pending work. Results (including the peering kubeconfig, which is inlined in `/instructions` responses but never stored in CRD status) flow back through `POST /instructions/{id}/result`. Chunking divides each provider's capacity into fixed units that become Liqo `ResourceSlice`s and ultimately virtual nodes that CA sees as ordinary pool members. Provider selection is the **Broker's** job, not CA's: providers advertise per-resource `unitPrices`, and for any consumer that opts in via a `ConsumerPolicy{placement.type: Price}` the Broker masks that consumer's node-group view to the cheapest priced provider with capacity (cheapest-first greedy) — so CA runs a neutral, price-agnostic expander while the Broker makes the cost decision. All cross-cluster traffic is mTLS, and every reservation-scoped call carries an idempotency key so that retries never cause double-execution.

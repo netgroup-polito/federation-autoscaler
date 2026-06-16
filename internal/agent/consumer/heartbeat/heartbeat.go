@@ -33,8 +33,10 @@ import (
 	"time"
 
 	"github.com/go-logr/logr"
+	ctrlclient "sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
+	autoscalingv1alpha1 "github.com/netgroup-polito/federation-autoscaler/api/autoscaling/v1alpha1"
 	agentclient "github.com/netgroup-polito/federation-autoscaler/internal/agent/client"
 	brokerapi "github.com/netgroup-polito/federation-autoscaler/internal/broker/api"
 )
@@ -53,6 +55,16 @@ type Options struct {
 	// HeartbeatRequest. Both required.
 	ClusterID     string
 	LiqoClusterID string
+
+	// LocalClient reads the consumer-cluster ConsumerPolicy CRD on every
+	// heartbeat so a price-preference change propagates to the Broker without
+	// a restart. Optional: nil ⇒ the heartbeat carries no policy and the
+	// Broker keeps its default (no price preference).
+	LocalClient ctrlclient.Client
+
+	// Namespace is where the ConsumerPolicy is read from. Used only when
+	// LocalClient is set.
+	Namespace string
 
 	// Interval overrides DefaultInterval. Mainly useful in tests.
 	Interval time.Duration
@@ -76,6 +88,8 @@ type Heartbeater struct {
 	client        *agentclient.Client
 	clusterID     string
 	liqoClusterID string
+	localClient   ctrlclient.Client
+	namespace     string
 	interval      time.Duration
 	log           logr.Logger
 	onResult      func(success bool)
@@ -104,6 +118,8 @@ func New(opts Options) (*Heartbeater, error) {
 		client:        opts.Client,
 		clusterID:     opts.ClusterID,
 		liqoClusterID: opts.LiqoClusterID,
+		localClient:   opts.LocalClient,
+		namespace:     opts.Namespace,
 		interval:      interval,
 		log:           logger,
 		onResult:      opts.OnHeartbeatResult,
@@ -141,6 +157,7 @@ func (h *Heartbeater) beatOnce(ctx context.Context) {
 	req := &brokerapi.HeartbeatRequest{
 		ClusterID:     h.clusterID,
 		LiqoClusterID: h.liqoClusterID,
+		Placement:     h.currentPlacement(ctx),
 	}
 	if _, err := h.client.PostHeartbeat(ctx, req); err != nil {
 		if ctx.Err() == nil {
@@ -150,6 +167,41 @@ func (h *Heartbeater) beatOnce(ctx context.Context) {
 		return
 	}
 	h.notifyResult(true)
+}
+
+// currentPlacement reads the consumer-cluster ConsumerPolicy and returns its
+// placement policy to push to the Broker. Best-effort by design: a read error,
+// or no ConsumerPolicy present, returns nil so the Broker falls back to its
+// default (no price preference). Reading here (not at construction) is what
+// makes a policy edit take effect within one heartbeat interval, no restart.
+func (h *Heartbeater) currentPlacement(ctx context.Context) *autoscalingv1alpha1.PlacementPolicy {
+	if h.localClient == nil {
+		return nil
+	}
+	var list autoscalingv1alpha1.ConsumerPolicyList
+	if err := h.localClient.List(ctx, &list, ctrlclient.InNamespace(h.namespace)); err != nil {
+		if ctx.Err() == nil {
+			h.log.V(1).Info("read ConsumerPolicy failed; sending no policy", "err", err.Error())
+		}
+		return nil
+	}
+	if len(list.Items) == 0 {
+		return nil
+	}
+	// Deterministic pick if more than one exists (a misconfiguration): lowest
+	// name wins, logged so the operator can spot it.
+	chosen := &list.Items[0]
+	for i := range list.Items {
+		if list.Items[i].Name < chosen.Name {
+			chosen = &list.Items[i]
+		}
+	}
+	if len(list.Items) > 1 {
+		h.log.V(1).Info("multiple ConsumerPolicy objects; using lowest name",
+			"chosen", chosen.Name, "count", len(list.Items))
+	}
+	placement := chosen.Spec.Placement
+	return &placement
 }
 
 func (h *Heartbeater) notifyResult(success bool) {

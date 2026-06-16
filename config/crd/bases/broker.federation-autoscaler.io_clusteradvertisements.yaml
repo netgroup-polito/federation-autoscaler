@@ -82,16 +82,6 @@ spec:
                   Agents use this value when executing liqoctl peer.
                 minLength: 1
                 type: string
-              price:
-                anyOf:
-                - type: integer
-                - type: string
-                description: |-
-                  Price is the cost per chunk-hour advertised by the provider. Surfaced to
-                  the Cluster Autoscaler via the gRPC server's PricingNodePrice method to
-                  enable CA's price Expander. Non-negative.
-                pattern: ^(\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))(([KMGTPE]i)|[numkMGTPE]|([eE](\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))))?$
-                x-kubernetes-int-or-string: true
               resources:
                 description: Resources is the currently allocatable capacity donated
                   by the provider.
@@ -126,6 +116,25 @@ spec:
                       Zone is an availability-zone identifier.
                       Mirrors the value of the topology.kubernetes.io/zone node label.
                     type: string
+                type: object
+              unitPrices:
+                additionalProperties:
+                  anyOf:
+                  - type: integer
+                  - type: string
+                  pattern: ^(\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))(([KMGTPE]i)|[numkMGTPE]|([eE](\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))))?$
+                  x-kubernetes-int-or-string: true
+                description: |-
+                  UnitPrices is the provider's per-resource unit price (optional). Keys are
+                  Kubernetes resource names; values are the price per resource unit per hour:
+                    cpu            → price per core-hour
+                    memory         → price per GiB-hour
+                    nvidia.com/gpu → price per GPU-hour
+                  The Broker converts these into a per-chunk cost (chunk size is Broker-owned,
+                  so providers price their own resources rather than chunks) and uses it for
+                  price-based placement when a consumer opts in via a ConsumerPolicy. Omitted
+                  means the provider is unpriced; price-preferring consumers reach unpriced
+                  providers only as a last resort. Each value must be non-negative.
                 type: object
             required:
             - clusterId

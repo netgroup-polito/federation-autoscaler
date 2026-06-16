@@ -181,6 +181,17 @@ rules:
   - get
   - patch
   - update
+# ConsumerPolicy is read each heartbeat by the consumer agent to learn this
+# consumer's placement policy (e.g. prefer the cheapest providers) and push it
+# to the Broker. Read-only — operators stamp it, the agent never writes it.
+- apiGroups:
+  - autoscaling.federation-autoscaler.io
+  resources:
+  - consumerpolicies
+  verbs:
+  - get
+  - list
+  - watch
 # --- Liqo CRs (consumer role) -------------------------------------------
 # `liqoctl unpeer` starts with a "bidirectional peering check" that LISTS
 # foreignclusters.core.liqo.io at cluster scope; without this the Unpeer

@@ -88,6 +88,7 @@ func main() {
 		localAPIAddr    string
 		healthProbeAddr string
 		namespace       string
+		priceFile       string
 	)
 
 	flag.StringVar(&role, "role", "",
@@ -114,6 +115,10 @@ func main() {
 		"(consumer role only) Namespace where the agent creates VirtualNodeState, "+
 			"Liqo ResourceSlice, and kubeconfig Secret resources. Defaults to "+
 			"$POD_NAMESPACE (downward API) or "+defaultNamespace+".")
+	flag.StringVar(&priceFile, "price-file", "",
+		"(provider role only) Path to a YAML/JSON file of per-resource unit prices "+
+			"(e.g. {\"cpu\":\"0.03\",\"memory\":\"4Mi\"}). Re-read every advertisement "+
+			"cycle so prices can change without a restart. Empty ⇒ advertise no price.")
 
 	opts := zap.Options{Development: true}
 	opts.BindFlags(flag.CommandLine)
@@ -219,6 +224,7 @@ func main() {
 			LocalClient:   localClient,
 			ClusterID:     clusterID,
 			LiqoClusterID: liqoClusterID,
+			PriceFile:     priceFile,
 			Logger:        ctrl.Log.WithName("provider"),
 			Probe:         probe,
 		}); err != nil {

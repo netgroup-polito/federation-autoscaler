@@ -113,9 +113,16 @@ type AdvertisementRequest struct {
 	// and surfaced as Liqo virtual-node labels.
 	Topology *brokerv1alpha1.Topology `json:"topology,omitempty"`
 
-	// Price is the cost per chunk-hour. Float-or-string form is supported by
-	// resource.Quantity's UnmarshalJSON.
-	Price *resource.Quantity `json:"price,omitempty"`
+	// UnitPrices is the provider's per-resource unit price (optional). Keys are
+	// Kubernetes resource names; values are the price per resource unit per hour:
+	//   cpu            → price per core-hour
+	//   memory         → price per GiB-hour
+	//   nvidia.com/gpu → price per GPU-hour
+	// The Broker converts these into a per-chunk cost (chunk size is Broker-owned,
+	// so providers price their own resources rather than chunks). Omitted/empty
+	// means the provider is unpriced; for price-preferring consumers the Broker
+	// treats unpriced providers as a last resort. Each value must be non-negative.
+	UnitPrices corev1.ResourceList `json:"unitPrices,omitempty"`
 
 	// LiqoLabels are stamped on the virtual nodes Liqo creates on each
 	// peering consumer, e.g. liqo.io/type=virtual-node.
@@ -164,7 +171,7 @@ type AdvertisementSnapshot struct {
 	LiqoClusterID   string                   `json:"liqoClusterId"`
 	Resources       corev1.ResourceList      `json:"resources"`
 	Topology        *brokerv1alpha1.Topology `json:"topology,omitempty"`
-	Price           *resource.Quantity       `json:"price,omitempty"`
+	UnitPrices      corev1.ResourceList      `json:"unitPrices,omitempty"`
 	LiqoLabels      map[string]string        `json:"liqoLabels,omitempty"`
 	LiqoTaints      []corev1.Taint           `json:"liqoTaints,omitempty"`
 	ChunkCount      int32                    `json:"chunkCount"`
@@ -181,6 +188,12 @@ type AdvertisementSnapshot struct {
 type HeartbeatRequest struct {
 	ClusterID     string `json:"clusterId"`
 	LiqoClusterID string `json:"liqoClusterId"`
+
+	// Placement is the consumer's current placement policy, read by the Consumer
+	// Agent from its ConsumerPolicy CRD and pushed every heartbeat so the Broker
+	// can apply per-consumer, price-based node-group masking. Nil means the
+	// Broker default (no price preference).
+	Placement *autoscalingv1alpha1.PlacementPolicy `json:"placement,omitempty"`
 }
 
 type HeartbeatResponse struct {
