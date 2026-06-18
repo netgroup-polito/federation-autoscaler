@@ -136,9 +136,12 @@ type DashboardInstructionView struct {
 // ConsumerView is one row of the in-memory consumer registry: a cluster that
 // has heartbeated since this Broker pod started.
 type ConsumerView struct {
-	ClusterID     string      `json:"clusterId"`
-	LiqoClusterID string      `json:"liqoClusterId"`
-	LastSeen      metav1.Time `json:"lastSeen"`
+	ClusterID     string `json:"clusterId"`
+	LiqoClusterID string `json:"liqoClusterId"`
+	// Placement is the consumer's pushed placement-policy type (e.g. "Price").
+	// Empty means no preference (Broker default).
+	Placement string      `json:"placement,omitempty"`
+	LastSeen  metav1.Time `json:"lastSeen"`
 }
 
 // -----------------------------------------------------------------------------
@@ -168,7 +171,11 @@ func (s *Server) buildOverview(ctx context.Context) (Overview, error) {
 	ov.Advertisements = make([]AdvertisementSnapshot, 0, len(cadvs.Items))
 	for i := range cadvs.Items {
 		cadv := &cadvs.Items[i]
-		ov.Advertisements = append(ov.Advertisements, advertisementSnapshotFromCR(cadv))
+		snap := advertisementSnapshotFromCR(cadv)
+		if cost, ok := s.perChunkCost(cadv); ok {
+			snap.CostPerChunk = &cost
+		}
+		ov.Advertisements = append(ov.Advertisements, snap)
 
 		ov.Capacity.ProviderCount++
 		if cadv.Status.Available {
@@ -235,6 +242,7 @@ func (s *Server) buildOverview(ctx context.Context) (Overview, error) {
 		ov.Consumers = append(ov.Consumers, ConsumerView{
 			ClusterID:     e.ClusterID,
 			LiqoClusterID: e.LiqoClusterID,
+			Placement:     string(e.Placement.Type),
 			LastSeen:      metav1.NewTime(e.LastSeen),
 		})
 	}

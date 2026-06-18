@@ -17,6 +17,7 @@ limitations under the License.
 package api
 
 import (
+	"context"
 	"encoding/json"
 	"math"
 	"net/http"
@@ -239,4 +240,27 @@ func TestNodeGroupsPricePreference(t *testing.T) {
 			t.Errorf("next-cheapest must be promoted to growable; got %+v", hr)
 		}
 	})
+}
+
+// TestDashboardOverview_PricingFields asserts the dashboard projection surfaces
+// the two things the demo shows: each provider's per-chunk cost and each
+// consumer's placement policy.
+func TestDashboardOverview_PricingFields(t *testing.T) {
+	s := newDashboardTestServer(t, stdAdv("p-cheap", 0, cpuMemPrices("0.01")))
+	withPricePolicy(s) // records consumerCluster with type=Price
+
+	ov, err := s.buildOverview(context.Background())
+	if err != nil {
+		t.Fatalf("buildOverview: %v", err)
+	}
+
+	if len(ov.Advertisements) != 1 || ov.Advertisements[0].CostPerChunk == nil {
+		t.Fatalf("priced provider must surface costPerChunk; got %+v", ov.Advertisements)
+	}
+	if got, want := *ov.Advertisements[0].CostPerChunk, 2*0.01+4*0.001; math.Abs(got-want) > 1e-9 {
+		t.Errorf("costPerChunk = %v, want %v", got, want)
+	}
+	if len(ov.Consumers) != 1 || ov.Consumers[0].Placement != string(autoscalingv1alpha1.PlacementStrategyPrice) {
+		t.Errorf("consumer Placement must be Price on the dashboard; got %+v", ov.Consumers)
+	}
 }

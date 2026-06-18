@@ -167,18 +167,22 @@ type AdvertisementResponse struct {
 // Provider Agent can preserve the Broker-managed Reserved field across
 // re-submissions (same convention as upstream k8s-resource-brokering).
 type AdvertisementSnapshot struct {
-	ClusterID       string                   `json:"clusterId"`
-	LiqoClusterID   string                   `json:"liqoClusterId"`
-	Resources       corev1.ResourceList      `json:"resources"`
-	Topology        *brokerv1alpha1.Topology `json:"topology,omitempty"`
-	UnitPrices      corev1.ResourceList      `json:"unitPrices,omitempty"`
-	LiqoLabels      map[string]string        `json:"liqoLabels,omitempty"`
-	LiqoTaints      []corev1.Taint           `json:"liqoTaints,omitempty"`
-	ChunkCount      int32                    `json:"chunkCount"`
-	ReservedChunks  int32                    `json:"reservedChunks"`
-	AvailableChunks int32                    `json:"availableChunks"`
-	LastSeen        metav1.Time              `json:"lastSeen"`
-	Available       bool                     `json:"available"`
+	ClusterID     string                   `json:"clusterId"`
+	LiqoClusterID string                   `json:"liqoClusterId"`
+	Resources     corev1.ResourceList      `json:"resources"`
+	Topology      *brokerv1alpha1.Topology `json:"topology,omitempty"`
+	UnitPrices    corev1.ResourceList      `json:"unitPrices,omitempty"`
+	// CostPerChunk is the Broker-computed per-chunk cost (unitPrices × chunk
+	// size). Populated only on the dashboard projection; nil when the provider
+	// is unpriced. Not set on the agent-facing GET /advertisements path.
+	CostPerChunk    *float64          `json:"costPerChunk,omitempty"`
+	LiqoLabels      map[string]string `json:"liqoLabels,omitempty"`
+	LiqoTaints      []corev1.Taint    `json:"liqoTaints,omitempty"`
+	ChunkCount      int32             `json:"chunkCount"`
+	ReservedChunks  int32             `json:"reservedChunks"`
+	AvailableChunks int32             `json:"availableChunks"`
+	LastSeen        metav1.Time       `json:"lastSeen"`
+	Available       bool              `json:"available"`
 }
 
 // -----------------------------------------------------------------------------

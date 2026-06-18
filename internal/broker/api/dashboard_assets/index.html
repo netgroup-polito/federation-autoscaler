@@ -134,6 +134,7 @@
     <div class="table-wrap"><table>
       <thead><tr>
         <th>Provider</th><th>Type</th><th>Total</th><th>Reserved</th><th>Available</th>
+        <th>Cost/chunk</th>
         <th>Ready</th><th>Last seen</th><th>Alloc. CPU</th><th>Alloc. Mem</th>
       </tr></thead>
       <tbody id="advBody"></tbody>
@@ -177,7 +178,7 @@
   <section>
     <h2>Registered Consumers <span class="count" id="consCount">0</span></h2>
     <div class="table-wrap"><table>
-      <thead><tr><th>Consumer cluster</th><th>Liqo cluster ID</th><th>Last heartbeat</th></tr></thead>
+      <thead><tr><th>Consumer cluster</th><th>Liqo cluster ID</th><th>Policy</th><th>Last heartbeat</th></tr></thead>
       <tbody id="consBody"></tbody>
     </table></div>
   </section>
@@ -304,7 +305,7 @@
     function renderAdvertisements(list) {
       const tbody = $("advBody"); tbody.replaceChildren();
       $("advCount").textContent = list.length;
-      if (!list.length) { setEmpty(tbody, 9, "No providers advertising."); return; }
+      if (!list.length) { setEmpty(tbody, 10, "No providers advertising."); return; }
       for (const a of list) {
         const tr = document.createElement("tr");
         tr.appendChild(td(clusterShort(a.clusterId), { mono: true }));
@@ -315,6 +316,9 @@
         tr.appendChild(td(a.chunkCount ?? 0));
         tr.appendChild(td(a.reservedChunks ?? 0));
         tr.appendChild(td(a.availableChunks ?? 0));
+        // Broker-computed per-chunk cost (unitPrices × chunk size); "—" when the
+        // provider advertises no price.
+        tr.appendChild(td(a.costPerChunk != null ? a.costPerChunk.toFixed(3) : "—", { mono: true }));
         tr.appendChild(a.available ? pill("ready", "green") : pill("stale", "amber"));
         tr.appendChild(td(fmtTime(a.lastSeen)));
         // Allocatable CPU / memory the provider advertised (.spec.resources.allocatable).
@@ -373,11 +377,14 @@
     function renderConsumers(list) {
       const tbody = $("consBody"); tbody.replaceChildren();
       $("consCount").textContent = list.length;
-      if (!list.length) { setEmpty(tbody, 3, "No consumers have heartbeated yet."); return; }
+      if (!list.length) { setEmpty(tbody, 4, "No consumers have heartbeated yet."); return; }
       for (const c of list) {
         const tr = document.createElement("tr");
         tr.appendChild(td(clusterShort(c.clusterId), { mono: true }));
         tr.appendChild(td(clusterShort(c.liqoClusterId), { mono: true }));
+        // Placement policy the consumer pushed on its heartbeat ("Price" =
+        // price-preferring; blank = no preference / Broker default).
+        tr.appendChild(c.placement ? pill(c.placement, "blue") : td("—"));
         tr.appendChild(td(fmtTime(c.lastSeen)));
         tbody.appendChild(tr);
       }

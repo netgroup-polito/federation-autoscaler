@@ -60,12 +60,15 @@
 # /nodegroups call from this consumer, narrows to the cheapest priced provider
 # with capacity (cheapest-first greedy) instead of exposing all providers. The
 # agent re-reads this CRD every heartbeat, so editing it reprioritises live.
-# Set `fa_consumer_placement_type` to "" (or fa_consumer_price_policy=false) to
-# keep the default behaviour (no price preference).
+#
+# OFF by default: the ConsumerPolicy is operator-stamped (the agent only reads
+# it), so the demo leaves it to you to `kubectl apply` on the consumer — that is
+# the manual opt-in. Set `fa_consumer_price_policy=true` to have this role stamp
+# it for you (optionally with a non-default `fa_consumer_placement_type`).
 - name: Stamp the consumer's ConsumerPolicy (price-preferring placement)
   delegate_to: localhost
   when:
-    - fa_consumer_price_policy | default(true) | bool
+    - fa_consumer_price_policy | default(false) | bool
     - (fa_consumer_placement_type | default('Price')) | length > 0
   ansible.builtin.shell:
     cmd: |
