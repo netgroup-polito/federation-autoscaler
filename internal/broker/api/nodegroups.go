@@ -17,6 +17,7 @@ limitations under the License.
 package api
 
 import (
+	"context"
 	"net/http"
 	"sort"
 
@@ -82,9 +83,21 @@ func (s *Server) handleNodeGroupsList(w http.ResponseWriter, r *http.Request) {
 	// Per-consumer price preference: narrow to the cheapest priced provider
 	// with capacity within each chunk type. No policy (or no priced provider
 	// with capacity) ⇒ no masking ⇒ today's behaviour.
-	if entry, ok := s.consumers.Lookup(ClusterIDFromContext(ctx)); ok &&
+	consumerID := ClusterIDFromContext(ctx)
+	if entry, ok := s.consumers.Lookup(consumerID); ok &&
 		entry.Placement.Type == autoscalingv1alpha1.PlacementStrategyPrice {
-		applyPricePreference(views, costs, priced)
+		// In-flight reservations gate the "spill to the next-cheapest" step so we
+		// don't prematurely expose a dearer provider while the chosen one's chunk
+		// is still peering (CA would grab it and then have to unpeer it).
+		inflight, err := s.inFlightByProvider(ctx, consumerID)
+		if err != nil {
+			s.log.Error(err, "list Reservations for placement gate failed", "requestId", requestID)
+			writeError(w, http.StatusInternalServerError, ErrorResponse{
+				Code: ErrCodeInternalError, Message: "reservation list failed", RequestID: requestID,
+			})
+			return
+		}
+		applyPricePreference(views, costs, priced, inflight)
 	}
 
 	sort.SliceStable(views, func(i, j int) bool {
@@ -103,47 +116,115 @@ func (s *Server) handleNodeGroupsList(w http.ResponseWriter, r *http.Request) {
 }
 
 // applyPricePreference masks the node-group view for a price-preferring
-// consumer (cheapest-first greedy). Within each chunk type it keeps head-room
-// only on the cheapest *priced* provider that still has capacity, and removes
-// head-room from every other provider in that type (MaxSize = CurrentReserved)
-// so the Cluster Autoscaler can only grow the cheapest one. When the cheapest
-// fills up it loses its capacity and the next /nodegroups call promotes the
-// next-cheapest.
+// consumer (cheapest-first greedy). Within each chunk type it walks the priced
+// providers cheapest-first and exposes exactly one — the cheapest that still has
+// head-room — masking every other provider (MaxSize = CurrentReserved) so the
+// Cluster Autoscaler can only grow that one.
+//
+// The "spill to the next-cheapest" only happens once the cheaper provider is
+// genuinely exhausted: full AND fully settled. While the cheapest provider is
+// full but a reservation of ours is still mid-peering (in flight), the masking
+// holds CA by exposing NOTHING growable in that type — CA waits for the chunk's
+// virtual node to materialise instead of prematurely peering a dearer provider
+// it would then have to unpeer once the cheaper node absorbs the pods. The
+// in-flight gate is policy-agnostic: any placement policy that narrows a
+// consumer to a preferred provider inherits the same no-premature-spill rule.
 //
 // The rules are strictly additive — the function only ever *removes* growable
 // options, never adds a choice the Broker didn't already expose:
-//   - A chunk type with no priced provider that has capacity is left untouched
-//     (today's behaviour). This covers the "policy set but no prices" case and
-//     the unpriced tail of "prices partially set".
-//   - Unpriced (or partially-priced) providers are never the winner, so they
-//     are reachable only once every priced provider of that type is exhausted —
-//     i.e. last resort.
+//   - A chunk type with no priced provider that has capacity or is settling is
+//     left untouched (today's behaviour: the "policy set but no prices" case and
+//     the unpriced tail of "prices partially set").
+//   - Unpriced (or partially-priced) providers are never the winner, so they are
+//     reachable only once every priced provider of that type is exhausted.
 //
-// views[i]/costs[i]/priced[i] describe the same advertisement.
-func applyPricePreference(views []NodeGroupView, costs []float64, priced []bool) {
+// views[i]/costs[i]/priced[i] describe the same advertisement; inflight[provider]
+// is true when this consumer has a not-yet-Peered reservation on that provider.
+func applyPricePreference(views []NodeGroupView, costs []float64, priced []bool, inflight map[string]bool) {
 	byType := map[brokerv1alpha1.ChunkType][]int{}
 	for i := range views {
 		byType[views[i].Type] = append(byType[views[i].Type], i)
 	}
 	for _, idxs := range byType {
-		winner := -1
+		// Priced providers in this type, cheapest first (name break ties).
+		order := make([]int, 0, len(idxs))
 		for _, i := range idxs {
-			if !priced[i] || views[i].MaxSize-views[i].CurrentReserved <= 0 {
-				continue // unpriced, or no capacity to grow
-			}
-			if winner == -1 || costs[i] < costs[winner] ||
-				(costs[i] == costs[winner] && views[i].ProviderClusterID < views[winner].ProviderClusterID) {
-				winner = i
+			if priced[i] {
+				order = append(order, i)
 			}
 		}
-		if winner == -1 {
-			continue // no priced provider with capacity → leave the type as-is
-		}
-		for _, i := range idxs {
-			if i != winner {
-				views[i].MaxSize = views[i].CurrentReserved // remove head-room
+		sort.SliceStable(order, func(a, b int) bool {
+			ia, ib := order[a], order[b]
+			if costs[ia] != costs[ib] {
+				return costs[ia] < costs[ib]
 			}
+			return views[ia].ProviderClusterID < views[ib].ProviderClusterID
+		})
+
+		chosen, blockAll := -1, false
+		for _, i := range order {
+			if views[i].MaxSize-views[i].CurrentReserved > 0 {
+				chosen = i // cheapest priced provider with head-room → grow this one
+				break
+			}
+			if inflight[views[i].ProviderClusterID] {
+				blockAll = true // it's full but still peering → hold CA, don't spill yet
+				break
+			}
+			// exhausted (full AND settled) → try the next-cheapest priced provider
 		}
+
+		switch {
+		case blockAll:
+			for _, i := range idxs {
+				views[i].MaxSize = views[i].CurrentReserved
+			}
+		case chosen != -1:
+			for _, i := range idxs {
+				if i != chosen {
+					views[i].MaxSize = views[i].CurrentReserved
+				}
+			}
+		default:
+			// No priced provider has capacity or is settling → leave the type
+			// as-is (unpriced providers remain reachable as a last resort).
+		}
+	}
+}
+
+// inFlightByProvider reports, per provider, whether THIS consumer has a
+// reservation still being provisioned — created/peering but whose Liqo virtual
+// node has not materialised yet (not Peered, not terminal). The placement
+// masking uses it to keep the consumer on its chosen provider while that
+// provider's chunk finishes peering, rather than spilling onto a dearer one.
+func (s *Server) inFlightByProvider(ctx context.Context, consumerID string) (map[string]bool, error) {
+	var list brokerv1alpha1.ReservationList
+	if err := s.client.List(ctx, &list, client.InNamespace(s.namespace)); err != nil {
+		return nil, err
+	}
+	out := map[string]bool{}
+	for i := range list.Items {
+		r := &list.Items[i]
+		if r.Spec.ConsumerClusterID == consumerID && reservationInFlight(r.Status.Phase) {
+			out[r.Spec.ProviderClusterID] = true
+		}
+	}
+	return out, nil
+}
+
+// reservationInFlight is true while a Reservation's chunk is being provisioned —
+// before its virtual node is ready (Peered) and before any terminal phase.
+// Peered / Unpeering / Released / Failed / Expired are NOT in flight.
+func reservationInFlight(p brokerv1alpha1.ReservationPhase) bool {
+	switch p {
+	case "",
+		brokerv1alpha1.ReservationPhasePending,
+		brokerv1alpha1.ReservationPhaseGeneratingKubeconfig,
+		brokerv1alpha1.ReservationPhaseKubeconfigReady,
+		brokerv1alpha1.ReservationPhasePeering:
+		return true
+	default:
+		return false
 	}
 }
 

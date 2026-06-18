@@ -240,6 +240,35 @@ func TestNodeGroupsPricePreference(t *testing.T) {
 			t.Errorf("next-cheapest must be promoted to growable; got %+v", hr)
 		}
 	})
+
+	t.Run("case 4 in-flight: cheapest full but still peering → hold CA, do NOT spill", func(t *testing.T) {
+		// The cheapest provider is full because its one chunk is reserved, but
+		// that reservation is still peering (node not ready). The broker must
+		// keep CA waiting — neither provider growable — instead of exposing the
+		// dearer one (which CA would peer and then have to unpeer).
+		peering := &brokerv1alpha1.Reservation{
+			ObjectMeta: metav1.ObjectMeta{Name: "r-inflight", Namespace: dashboardTestNS},
+			Spec: brokerv1alpha1.ReservationSpec{
+				ConsumerClusterID: consumerCluster,
+				ProviderClusterID: "p-cheap",
+				ChunkCount:        1,
+				ChunkType:         brokerv1alpha1.ChunkTypeStandard,
+			},
+			Status: brokerv1alpha1.ReservationStatus{Phase: brokerv1alpha1.ReservationPhasePeering},
+		}
+		s := newDashboardTestServer(t,
+			stdAdv("p-cheap", 3, cheapPrices), // full (reserved == total)
+			stdAdv("p-dear", 0, dearPrices),   // has capacity
+			peering)
+		withPricePolicy(s)
+		hr := headroomByProvider(callNodeGroups(t, s))
+		if hr["p-cheap"] != 0 {
+			t.Errorf("full cheapest must have no head-room; got %+v", hr)
+		}
+		if hr["p-dear"] != 0 {
+			t.Errorf("dearer provider must NOT be promoted while cheapest is mid-peering; got %+v", hr)
+		}
+	})
 }
 
 // TestDashboardOverview_PricingFields asserts the dashboard projection surfaces
