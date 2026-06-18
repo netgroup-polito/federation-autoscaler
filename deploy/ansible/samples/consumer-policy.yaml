@@ -1,0 +1,23 @@
+# ConsumerPolicy — opt THIS consumer into broker-driven, price-based provider
+# selection. Apply on the CONSUMER cluster:
+#
+#   kubectl --kubeconfig ~/.kube/consumer-1.yaml apply -f samples/consumer-policy.yaml
+#
+# With placement.type: Price the BROKER (not the Cluster Autoscaler) chooses the
+# provider: on every GET /api/v1/nodegroups from this consumer it exposes only
+# the CHEAPEST priced provider that still has capacity (cheapest-first greedy)
+# and masks the rest. CA stays price-agnostic. The Consumer Agent re-reads this
+# CR on every 15 s heartbeat, so editing the type — or deleting the object —
+# reprioritises live (delete it to fall back to the default, no-preference demo).
+#
+# Requires each provider to advertise unitPrices (see provider-1-prices.yaml /
+# provider-2-prices.yaml). With no provider prices set, this policy is a no-op
+# and selection stays with CA's neutral expander.
+apiVersion: autoscaling.federation-autoscaler.io/v1alpha1
+kind: ConsumerPolicy
+metadata:
+  name: default
+  namespace: federation-autoscaler-system
+spec:
+  placement:
+    type: Price

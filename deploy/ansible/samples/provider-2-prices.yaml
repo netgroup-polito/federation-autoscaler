@@ -1,0 +1,20 @@
+# Per-resource unit prices for PROVIDER-2 — the CHEAPER provider in the price
+# demo. Apply on provider-2's cluster:
+#
+#   kubectl --kubeconfig ~/.kube/provider-2.yaml apply -f samples/provider-2-prices.yaml
+#
+# Same mechanism as provider-1-prices.yaml (overwrites the `agent-prices`
+# ConfigMap; re-read every 30 s). Per-chunk cost (chunk = 2 vCPU / 4 GiB):
+#   2 * 0.031 + 4 * 0.004 = 0.078 / chunk-hour
+# Lower than provider-1's 0.116, so a price-preferring consumer (see
+# consumer-policy.yaml) is placed HERE first. Swap the two providers' numbers
+# and the next scale-up flips to provider-1 — no redeploy, CA untouched.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: agent-prices
+  namespace: federation-autoscaler-system
+data:
+  prices.yaml: |
+    cpu: "0.031"
+    memory: "0.004"

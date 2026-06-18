@@ -1,0 +1,54 @@
+# Price-policy demo workload — drives a scale-up that the BROKER places on the
+# CHEAPEST provider. Use it for Scenario B (after applying consumer-policy.yaml
+# on the consumer and provider-{1,2}-prices.yaml on the providers).
+#
+#   kubectl --kubeconfig ~/.kube/consumer-1.yaml apply  -f samples/price-workload.yaml   # scale UP
+#   kubectl --kubeconfig ~/.kube/consumer-1.yaml delete -f samples/price-workload.yaml   # scale DOWN
+#
+# Same shape as burst-workload.yaml but sized to ONE chunk of overflow so the
+# price decision is unambiguous: each Pod requests 1 CPU / 1Gi; the consumer
+# node has ~3.7 CPU free, so ~3 Pods run LOCALLY and the other ~2 spill = exactly
+# one chunk (a chunk is 2 CPU / 4Gi = 2 Pods, and each provider lends 1 chunk).
+# With a price-preferring ConsumerPolicy the Broker exposes only the cheapest
+# priced provider, so the 2 overflow Pods land entirely on PROVIDER-2 (the
+# cheaper one) and provider-1 stays at reserved=0.
+#
+# (burst-workload.yaml uses 7 replicas to overflow TWO chunks and fill BOTH
+# providers — use that one for the no-policy Scenario A.)
+#
+# Namespace: `default`, where the fa_consumer role stamps the Liqo
+# NamespaceOffloading. Re-tune `replicas` if your consumer's free capacity
+# differs — you want roughly 2 Pods to spill (one chunk).
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: federation-price-demo
+  namespace: default
+  labels:
+    app: federation-price-demo
+spec:
+  replicas: 5
+  selector:
+    matchLabels:
+      app: federation-price-demo
+  template:
+    metadata:
+      labels:
+        app: federation-price-demo
+    spec:
+      # Tolerate the Liqo virtual-node taint so Pending Pods may schedule onto
+      # the borrowed chunk once it appears (same rationale as burst-workload.yaml).
+      tolerations:
+        - key: virtual-node.liqo.io/not-allowed
+          operator: Exists
+          effect: NoExecute
+      containers:
+        - name: pause
+          image: registry.k8s.io/pause:3.9
+          resources:
+            requests:
+              cpu: "1"
+              memory: "1Gi"
+            limits:
+              cpu: "1"
+              memory: "1Gi"

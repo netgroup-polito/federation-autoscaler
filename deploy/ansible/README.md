@@ -30,13 +30,22 @@ binaries, and on providers the shadow workload + WireGuard gateway.
 | ------------ | ---- | ----- | -------- | ------------------------------------------------------------------------------------------------------- |
 | `central`    | 2    | 2 GB  | 20 GB    | Broker is tiny, but k3s + cert-manager + Liqo control plane still need this floor.                      |
 | `consumer-1` | 2    | 4 GB  | 20 GB    | Agent + gRPC server + Cluster Autoscaler + Liqo control plane + WireGuard client + workload Pods.       |
-| `provider-1` | 4    | 8 GB  | 30 GB    | Liqo gateway server + the offloaded shadow workload. 4/8 advertises 2× "standard" chunks (2 vCPU / 4 GB each), which is what the demo workload consumes. |
-| `provider-2` | 4    | 8 GB  | 30 GB    | Same — second provider on standby so the broker has a placement choice.                                 |
+| `provider-1` | 4    | 8 GB  | 30 GB    | Liqo gateway server + the offloaded shadow workload. At 4 vCPU / 8 GB it advertises **one** "standard" chunk (2 vCPU / 4 GiB) — memory-bound: ~7.75 GiB allocatable ÷ 4 GiB rounds down to 1. |
+| `provider-2` | 4    | 8 GB  | 30 GB    | Same — the second provider gives the broker a placement choice (and is the cheaper one in the price scenario).                                 |
 
 **OS**: Ubuntu 22.04 or 24.04, x86_64.
 
 If you'd rather have homogeneous boxes, 4 vCPU / 8 GB / 30 GB on **all four**
 is fine and removes the asymmetric-sizing worry.
+
+**Tested configuration** (what the demo — including the price-policy scenario —
+was validated on): all four VMs **Ubuntu Server 24.04**, x86_64;
+`central` and `consumer-1` at **4 vCPU / 4 GB RAM / 20 GB disk**, `provider-1`
+and `provider-2` at **4 vCPU / 8 GB RAM / 30 GB disk**. At that provider size
+each advertises exactly **one** standard chunk, which is why the 7-replica
+`burst-workload` (two chunks of overflow) fills both providers while the
+5-replica `price-workload` (one chunk) lands entirely on the single cheapest
+provider.
 
 ## Network requirements
 
@@ -188,8 +197,9 @@ you which one. After this returns green, your federation is ready to demo.
 
 Watch the broker's state live in a browser: it serves a read-only web dashboard
 (advertisements, reservations, the instruction phase machine, chunk capacity,
-registered consumers) at `http://<central-ip>:30444/`. It refreshes every couple
-of seconds and needs no login — keep it on a trusted network, as it is
+registered consumers — plus each provider's **Cost/chunk** and each consumer's
+**Policy**) at `http://<central-ip>:30444/`. It refreshes every couple of
+seconds and needs no login — keep it on a trusted network, as it is
 unauthenticated.
 
 The consumer cluster also runs the [Liqo dashboard](https://github.com/ArubaKube/liqo-dashboard)
@@ -198,9 +208,17 @@ tag `main`. It is served via the cluster's Traefik Ingress on host
 `liqo-dashboard.local`; add `<consumer-ip> liqo-dashboard.local` to your
 machine's hosts file, then open `http://liqo-dashboard.local`.
 
-Then drive the scale-up / scale-down with the burst workload — the sole
-manual action in the demo (the sizing rationale is in the file's header
-comment):
+There are two scenarios, both driven by a single workload Deployment — the only
+manual action. Run **A** first; **B** layers broker-driven, price-based
+placement on top with two extra opt-in steps.
+
+### Scenario A — No policy (default placement)
+
+Out-of-the-box behaviour: no `ConsumerPolicy`, no provider prices. The broker
+hands the Cluster Autoscaler **every** available provider, and CA picks which to
+grow with its neutral `least-waste` expander — price plays no part. The
+7-replica burst workload overflows ~4 Pods = two chunks, so it fills **both**
+providers (one chunk each).
 
 ```bash
 kubectl --kubeconfig ~/.kube/consumer-1.yaml apply  -f samples/burst-workload.yaml   # scale UP
@@ -220,6 +238,55 @@ What to expect on these real k3s VMs:
   `group_vars/consumers.yaml`), and Cluster Autoscaler fires
   `NodeGroupDeleteNodes` on its own. No manual `kubectl delete reservation`
   needed.
+
+**Proves:** the end-to-end borrow → peer → schedule → release loop across
+multiple providers.
+
+### Scenario B — Price-based placement (the broker picks the cheapest)
+
+Here the **broker** chooses the provider — the cheapest one — and CA never sees
+a price. Two manual opt-in steps, then a workload sized to a single chunk so the
+choice is unambiguous. (If Scenario A is still up, scale it down first.)
+
+1. Declare the consumer's policy (price-preferring) on the consumer:
+   ```bash
+   kubectl --kubeconfig ~/.kube/consumer-1.yaml apply -f samples/consumer-policy.yaml
+   ```
+   Within ~15 s (next heartbeat) the dashboard's `consumer-1` row flips to
+   `Policy: Price`.
+
+2. Set each provider's prices — provider-2 cheaper than provider-1:
+   ```bash
+   kubectl --kubeconfig ~/.kube/provider-1.yaml apply -f samples/provider-1-prices.yaml
+   kubectl --kubeconfig ~/.kube/provider-2.yaml apply -f samples/provider-2-prices.yaml
+   ```
+   Within ~30 s (next advertisement) the dashboard shows `Cost/chunk` ≈ **0.116**
+   for provider-1 and **0.078** for provider-2.
+
+3. Drive the scale-up with the 5-replica price workload (one chunk of overflow):
+   ```bash
+   kubectl --kubeconfig ~/.kube/consumer-1.yaml apply  -f samples/price-workload.yaml   # scale UP
+   kubectl --kubeconfig ~/.kube/consumer-1.yaml delete -f samples/price-workload.yaml   # scale DOWN
+   ```
+
+What to expect: the overflow Pods run on **provider-2 only** (the cheaper one);
+provider-1 stays at `reserved=0`. Confirm on the dashboard's Reservations table,
+or:
+
+```bash
+kubectl --kubeconfig ~/.kube/central.yaml -n federation-autoscaler-system \
+  get reservation -o custom-columns=PROVIDER:.spec.providerClusterId,PHASE:.status.phase
+```
+
+Flip it live: make provider-2 the *dearer* one (swap the two files' numbers and
+re-apply) and the next scale-up switches to provider-1 — no redeploy, CA
+untouched. Scale-down is automatic, exactly as in Scenario A.
+
+**Proves:** the broker — not CA — selects the provider purely on advertised
+price; the consumer opts in per-policy; prices change live.
+
+> Return to Scenario A by removing the policy:
+> `kubectl --kubeconfig ~/.kube/consumer-1.yaml delete -f samples/consumer-policy.yaml`
 
 ## Teardown
 

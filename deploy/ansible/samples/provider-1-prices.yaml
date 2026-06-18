@@ -1,0 +1,23 @@
+# Per-resource unit prices for PROVIDER-1 — the more EXPENSIVE provider in the
+# price demo. Apply on provider-1's cluster:
+#
+#   kubectl --kubeconfig ~/.kube/provider-1.yaml apply -f samples/provider-1-prices.yaml
+#
+# This overwrites the `agent-prices` ConfigMap that the provider overlay ships
+# empty. The provider agent re-reads it on every 30 s advertisement, so prices
+# change live with no restart. Values are price-per-unit-per-HOUR (the currency
+# is yours to define — they only need to be comparable across providers):
+#   cpu    -> per vCPU-hour
+#   memory -> per GiB-hour
+# The Broker multiplies them by the chunk size (2 vCPU / 4 GiB) to get a
+# comparable per-chunk cost, shown as "Cost/chunk" on the broker dashboard:
+#   2 * 0.046 + 4 * 0.006 = 0.116 / chunk-hour   (vs provider-2's 0.078)
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: agent-prices
+  namespace: federation-autoscaler-system
+data:
+  prices.yaml: |
+    cpu: "0.046"
+    memory: "0.006"
