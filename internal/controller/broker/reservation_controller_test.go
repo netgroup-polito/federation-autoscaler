@@ -606,6 +606,58 @@ var _ = Describe("Reservation Controller", func() {
 			}, &corev1.Secret{}))
 		}).Should(BeTrue())
 	})
+
+	// A release that follows a prior (consumer, provider) cycle must RE-RUN the
+	// provider Cleanup even though a same-named, already-Enforced instruction
+	// from that prior cycle still lingers (before the DefaultEnforcedTTL GC
+	// reclaims it). Without the re-arm, ensureSharedInstruction no-ops on
+	// AlreadyExists, the peering-user is never deleted, and the next
+	// GenerateKubeconfig fails with "CSR already exists".
+	It("re-arms a stale, already-enforced provider Cleanup on release instead of suppressing it", func() {
+		cleanupName := providerInstructionCleanupName("consumer-test", providerName)
+
+		By("seeding the shared staging Secret — a peering-user exists for this (consumer, provider)")
+		Expect(k8sClient.Create(ctx, &corev1.Secret{
+			ObjectMeta: metav1.ObjectMeta{
+				Name: kubeconfigSecretName("consumer-test", providerName), Namespace: "default",
+			},
+			Data: map[string][]byte{"kubeconfig": []byte("dummy")},
+		})).To(Succeed())
+
+		By("pre-creating an already-ENFORCED provider Cleanup from a previous cycle (TTL GC hasn't run)")
+		stale := &autoscalingv1alpha1.ProviderInstruction{
+			ObjectMeta: metav1.ObjectMeta{Name: cleanupName, Namespace: "default"},
+			Spec: autoscalingv1alpha1.ProviderInstructionSpec{
+				ReservationID:     "old-reservation",
+				Kind:              autoscalingv1alpha1.ProviderInstructionCleanup,
+				TargetClusterID:   providerName,
+				ConsumerClusterID: "consumer-test",
+			},
+		}
+		Expect(k8sClient.Create(ctx, stale)).To(Succeed())
+		now := metav1.Now()
+		stale.Status.Enforced = true
+		stale.Status.LastUpdateTime = &now
+		Expect(k8sClient.Status().Update(ctx, stale)).To(Succeed())
+
+		By("releasing the (last) reservation for this pair")
+		setPhase(ctx, key, brokerv1alpha1.ReservationPhaseReleased)
+		reconcileOnce()
+
+		By("the shared Cleanup was re-armed: Enforced reset and re-bound to this reservation")
+		got := &autoscalingv1alpha1.ProviderInstruction{}
+		Expect(k8sClient.Get(ctx,
+			types.NamespacedName{Name: cleanupName, Namespace: "default"}, got)).To(Succeed())
+		Expect(got.Status.Enforced).To(BeFalse())
+		Expect(got.Spec.ReservationID).To(Equal(resName))
+
+		By("the staging Secret was removed (broker no longer believes a peering-user exists)")
+		Eventually(func() bool {
+			return apierrors.IsNotFound(k8sClient.Get(ctx, types.NamespacedName{
+				Name: kubeconfigSecretName("consumer-test", providerName), Namespace: "default",
+			}, &corev1.Secret{}))
+		}).Should(BeTrue())
+	})
 })
 
 // newReservation builds a Pending-ready Reservation for a (consumer,

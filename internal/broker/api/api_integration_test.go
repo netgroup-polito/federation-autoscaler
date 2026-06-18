@@ -36,6 +36,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 
+	autoscalingv1alpha1 "github.com/netgroup-polito/federation-autoscaler/api/autoscaling/v1alpha1"
 	brokerv1alpha1 "github.com/netgroup-polito/federation-autoscaler/api/broker/v1alpha1"
 )
 
@@ -207,6 +208,61 @@ var _ = Describe("Broker REST API", func() {
 				Expect(ng.MinSize).To(Equal(int32(0)))
 				Expect(ng.Type).To(Equal(brokerv1alpha1.ChunkTypeStandard))
 			}
+		})
+	})
+
+	Describe("POST /api/v1/instructions/{id}/result — failed GenerateKubeconfig", func() {
+		It("fails the waiting Reservation instead of leaving it stuck in GeneratingKubeconfig", func() {
+			const resID = "res-gk-fail"
+
+			By("a Reservation parked in GeneratingKubeconfig")
+			resv := &brokerv1alpha1.Reservation{
+				ObjectMeta: metav1.ObjectMeta{Name: resID, Namespace: testNamespace},
+				Spec: brokerv1alpha1.ReservationSpec{
+					ConsumerClusterID:     consumerCluster,
+					ConsumerLiqoClusterID: "liqo-" + consumerCluster,
+					ProviderClusterID:     providerCluster,
+					ProviderLiqoClusterID: "liqo-" + providerCluster,
+					ChunkCount:            1,
+					ChunkType:             brokerv1alpha1.ChunkTypeStandard,
+					Resources: corev1.ResourceList{
+						corev1.ResourceCPU:    resource.MustParse("2"),
+						corev1.ResourceMemory: resource.MustParse("4Gi"),
+					},
+				},
+			}
+			Expect(k8sClient.Create(suiteCtx, resv)).To(Succeed())
+			resv.Status.Phase = brokerv1alpha1.ReservationPhaseGeneratingKubeconfig
+			Expect(k8sClient.Status().Update(suiteCtx, resv)).To(Succeed())
+
+			By("a GenerateKubeconfig instruction targeting the provider")
+			gk := &autoscalingv1alpha1.ProviderInstruction{
+				ObjectMeta: metav1.ObjectMeta{Name: "gk-" + resID, Namespace: testNamespace},
+				Spec: autoscalingv1alpha1.ProviderInstructionSpec{
+					ReservationID:     resID,
+					Kind:              autoscalingv1alpha1.ProviderInstructionGenerateKubeconfig,
+					TargetClusterID:   providerCluster,
+					ConsumerClusterID: consumerCluster,
+				},
+			}
+			Expect(k8sClient.Create(suiteCtx, gk)).To(Succeed())
+
+			By("the provider reports a FAILED result (peering-user already exists)")
+			authClusterID = providerCluster
+			resp := doJSON(http.MethodPost, "/api/v1/instructions/gk-"+resID+"/result",
+				InstructionResultRequest{
+					Status: ResultStatusFailed,
+					Error:  &ErrorEnvelope{Code: ErrCodeUpstreamError, Message: "CSR already exists"},
+				})
+			Expect(resp.Status).To(Equal(http.StatusOK), resp.Describe())
+
+			By("the Reservation is now Failed, not hung")
+			Eventually(func() brokerv1alpha1.ReservationPhase {
+				got := &brokerv1alpha1.Reservation{}
+				_ = k8sClient.Get(suiteCtx,
+					types.NamespacedName{Name: resID, Namespace: testNamespace}, got)
+				return got.Status.Phase
+			}).Should(Equal(brokerv1alpha1.ReservationPhaseFailed))
 		})
 	})
 

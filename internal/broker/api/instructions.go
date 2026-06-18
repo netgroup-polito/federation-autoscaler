@@ -367,6 +367,28 @@ func (s *Server) applyProviderResult(
 		return
 	}
 
+	// A failed GenerateKubeconfig must FAIL the waiting Reservation, not merely
+	// enforce the instruction: otherwise it sits in GeneratingKubeconfig
+	// indefinitely (the staging kubeconfig Secret never materialises), holding
+	// its chunk until the 24h reservation timeout. Marking it Failed lets the
+	// terminal GC free the chunk and the Cluster Autoscaler retry — by which
+	// point the provider Cleanup has re-run and torn down the half-created
+	// peering-user. Mirrors the consumer-side Peer/Unpeer failure handling.
+	// Best-effort: a failed status write is retried on the instruction-expiry
+	// tick, and the result itself is already accepted.
+	if req.Status == ResultStatusFailed &&
+		pi.Spec.Kind == autoscalingv1alpha1.ProviderInstructionGenerateKubeconfig {
+		msg := "GenerateKubeconfig failed on the provider"
+		if req.Error != nil && req.Error.Message != "" {
+			msg = req.Error.Message
+		}
+		if err := s.advanceReservationPhase(ctx, pi.Spec.ReservationID, "",
+			brokerv1alpha1.ReservationPhaseFailed, msg); err != nil {
+			s.log.Info("could not fail reservation after GenerateKubeconfig failure",
+				"reservationId", pi.Spec.ReservationID, "err", err.Error(), "requestId", requestID)
+		}
+	}
+
 	writeJSON(w, http.StatusOK, InstructionResultResponse{Accepted: true})
 }
 

@@ -671,17 +671,56 @@ func (r *ReservationReconciler) ensureInstruction(
 // and provider Cleanup, which are shared across Reservations and so must
 // not be garbage-collected when any single Reservation is deleted. Their
 // lifecycle is the shared-bookkeeping DefaultEnforcedTTL GC, not owner
-// references. Idempotent on AlreadyExists.
+// references.
+//
+// On AlreadyExists it RE-ARMS a stale, already-Enforced shared
+// ProviderInstruction. These instructions are keyed by (consumer, provider),
+// so a copy from a PREVIOUS cycle whose result was already enforced — but
+// which the DefaultEnforcedTTL GC has not yet reclaimed — would otherwise
+// silently suppress this fresh run: Create returns AlreadyExists and the
+// provider never re-executes. That is exactly what leaked a peering-user
+// across a release→re-acquire (the provider Cleanup never re-ran) and then
+// hung the next GenerateKubeconfig on "CSR already exists". Re-arming resets
+// Enforced so the agent re-delivers and re-executes. A not-yet-enforced copy
+// is a genuine in-flight sibling — left untouched to avoid double execution.
+// ReservationInstructions are per-reservation (unique names) and never
+// collide, so they fall through with the original idempotent-on-AlreadyExists
+// behaviour.
 func (r *ReservationReconciler) ensureSharedInstruction(
 	ctx context.Context, instruction client.Object,
 ) error {
-	if err := r.Create(ctx, instruction); err != nil {
-		if apierrors.IsAlreadyExists(err) {
-			return nil
-		}
+	err := r.Create(ctx, instruction)
+	if err == nil {
+		return nil
+	}
+	if !apierrors.IsAlreadyExists(err) {
 		return err
 	}
-	return nil
+	pi, ok := instruction.(*autoscalingv1alpha1.ProviderInstruction)
+	if !ok {
+		return nil
+	}
+	var existing autoscalingv1alpha1.ProviderInstruction
+	if err := r.Get(ctx, client.ObjectKeyFromObject(pi), &existing); err != nil {
+		// Reclaimed between Create and Get: bubble up so the reconcile
+		// requeues and re-creates it.
+		return err
+	}
+	if !existing.Status.Enforced {
+		return nil
+	}
+	existing.Spec = pi.Spec
+	if err := r.Update(ctx, &existing); err != nil {
+		return err
+	}
+	now := metav1.Now()
+	existing.Status.Enforced = false
+	existing.Status.Attempts = 0
+	existing.Status.IssuedAt = &now
+	existing.Status.LastUpdateTime = &now
+	existing.Status.LastDeliveredAt = nil
+	existing.Status.Message = "re-armed for a new (consumer, provider) cycle"
+	return r.Status().Update(ctx, &existing)
 }
 
 // kubeconfigSecretExists reports whether the shared (consumer, provider)
