@@ -77,6 +77,16 @@ type ClusterAdvertisementSpec struct {
 	// providers only as a last resort. Each value must be non-negative.
 	// +optional
 	UnitPrices corev1.ResourceList `json:"unitPrices,omitempty"`
+
+	// CapacityScalePercent records, per resource, the percentage of allocatable
+	// the provider's admin chose to advertise when it is below 100% — the
+	// Provider Agent has already scaled Resources.Allocatable down accordingly.
+	// Keys are Kubernetes resource names; values are integer percentages in the
+	// open range (0,100). Resources advertised at full allocatable are omitted,
+	// so an empty map means "no customization". This field is informational
+	// (surfaced on the dashboard); the Broker never re-derives Resources from it.
+	// +optional
+	CapacityScalePercent map[corev1.ResourceName]int32 `json:"capacityScalePercent,omitempty"`
 }
 
 // ClusterAdvertisementStatus is the Broker's observed view of the advertisement.

@@ -79,6 +79,42 @@ var _ = Describe("Broker REST API", func() {
 			Expect(cadv.Status.Available).To(BeTrue())
 		})
 
+		It("stores per-resource capacity customization and surfaces it on the snapshot", func() {
+			const capCluster = "provider-capped"
+			authClusterID = capCluster
+
+			resp := doJSON(http.MethodPost, "/api/v1/advertisements", AdvertisementRequest{
+				ClusterID:     capCluster,
+				LiqoClusterID: "liqo-" + capCluster,
+				Resources: corev1.ResourceList{
+					corev1.ResourceCPU:    resource.MustParse("8"),
+					corev1.ResourceMemory: resource.MustParse("8Gi"), // already scaled (50% of 16Gi)
+				},
+				CapacityScalePercent: map[corev1.ResourceName]int32{
+					corev1.ResourceMemory: 50,
+				},
+			})
+			Expect(resp.Status).To(Equal(http.StatusOK), resp.Describe())
+
+			// Persisted verbatim onto the CR spec.
+			cadv := &brokerv1alpha1.ClusterAdvertisement{}
+			Expect(k8sClient.Get(suiteCtx,
+				types.NamespacedName{Name: capCluster, Namespace: testNamespace},
+				cadv)).To(Succeed())
+			Expect(cadv.Spec.CapacityScalePercent).To(Equal(map[corev1.ResourceName]int32{
+				corev1.ResourceMemory: 50,
+			}))
+
+			// Surfaced back on the GET snapshot (same projection the dashboard uses).
+			getResp := doJSON(http.MethodGet, "/api/v1/advertisements/"+capCluster, nil)
+			Expect(getResp.Status).To(Equal(http.StatusOK), getResp.Describe())
+			var snap AdvertisementSnapshot
+			Expect(getResp.DecodeInto(&snap)).To(Succeed())
+			Expect(snap.CapacityScalePercent).To(Equal(map[corev1.ResourceName]int32{
+				corev1.ResourceMemory: 50,
+			}))
+		})
+
 		It("rejects a CN/body cluster-ID mismatch with 403", func() {
 			authClusterID = "intruder"
 			resp := doJSON(http.MethodPost, "/api/v1/advertisements", AdvertisementRequest{

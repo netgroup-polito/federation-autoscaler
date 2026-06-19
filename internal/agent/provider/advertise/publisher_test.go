@@ -23,6 +23,9 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"os"
+	"path/filepath"
+	"reflect"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -351,6 +354,102 @@ func TestPublisher_SnapshotFailure_ReportsResultFalse(t *testing.T) {
 	defer mu.Unlock()
 	if len(seen) != 1 || seen[0] {
 		t.Fatalf("want exactly one false callback, got %v", seen)
+	}
+}
+
+// -----------------------------------------------------------------------------
+// Capacity scaling (--capacity-file)
+// -----------------------------------------------------------------------------
+
+// capacityPublisher returns a bare Publisher whose capacity file holds body.
+// A zero-value logr.Logger is a safe no-op, so we skip New() here and exercise
+// applyCapacityScaling directly.
+func capacityPublisher(t *testing.T, body string) *Publisher {
+	t.Helper()
+	path := filepath.Join(t.TempDir(), "capacity.yaml")
+	if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	return &Publisher{capacityFile: path}
+}
+
+func TestApplyCapacityScaling(t *testing.T) {
+	alloc := corev1.ResourceList{
+		corev1.ResourceCPU:    resource.MustParse("8"),
+		corev1.ResourceMemory: resource.MustParse("16Gi"),
+	}
+	cases := []struct {
+		name           string
+		file           string
+		wantCPU        string
+		wantMem        string
+		wantCustomized map[corev1.ResourceName]int32
+	}{
+		{
+			name:           "memory halved, cpu left at 100",
+			file:           "cpu: 100\nmemory: 50\n",
+			wantCPU:        "8",
+			wantMem:        "8Gi",
+			wantCustomized: map[corev1.ResourceName]int32{corev1.ResourceMemory: 50},
+		},
+		{
+			name:           "over 100 clamps to full",
+			file:           "cpu: 150\n",
+			wantCPU:        "8",
+			wantMem:        "16Gi",
+			wantCustomized: nil,
+		},
+		{
+			name:           "zero and negative fall back to full",
+			file:           "cpu: 0\nmemory: -5\n",
+			wantCPU:        "8",
+			wantMem:        "16Gi",
+			wantCustomized: nil,
+		},
+		{
+			name:           "quoted percent is parsed leniently",
+			file:           "memory: \"25\"\n",
+			wantCPU:        "8",
+			wantMem:        "4Gi",
+			wantCustomized: map[corev1.ResourceName]int32{corev1.ResourceMemory: 25},
+		},
+		{
+			name:           "percent for an unadvertised resource is ignored",
+			file:           "nvidia.com/gpu: 50\n",
+			wantCPU:        "8",
+			wantMem:        "16Gi",
+			wantCustomized: nil,
+		},
+		{
+			name:           "empty file advertises full allocatable",
+			file:           "",
+			wantCPU:        "8",
+			wantMem:        "16Gi",
+			wantCustomized: nil,
+		},
+		{
+			name:           "unparseable file advertises full allocatable",
+			file:           "cpu: [1, 2]\n",
+			wantCPU:        "8",
+			wantMem:        "16Gi",
+			wantCustomized: nil,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			p := capacityPublisher(t, tc.file)
+			scaled, customized := p.applyCapacityScaling(alloc.DeepCopy())
+
+			if got := scaled[corev1.ResourceCPU]; got.Cmp(resource.MustParse(tc.wantCPU)) != 0 {
+				t.Errorf("cpu: want %s, got %s", tc.wantCPU, got.String())
+			}
+			if got := scaled[corev1.ResourceMemory]; got.Cmp(resource.MustParse(tc.wantMem)) != 0 {
+				t.Errorf("memory: want %s, got %s", tc.wantMem, got.String())
+			}
+			if !reflect.DeepEqual(customized, tc.wantCustomized) {
+				t.Errorf("customized: want %v, got %v", tc.wantCustomized, customized)
+			}
+		})
 	}
 }
 

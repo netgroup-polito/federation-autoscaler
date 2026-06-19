@@ -37,6 +37,8 @@ import (
 
 	"github.com/go-logr/logr"
 	corev1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/api/resource"
+	"k8s.io/apimachinery/pkg/util/intstr"
 	ctrlclient "sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 	"sigs.k8s.io/yaml"
@@ -71,6 +73,16 @@ type Options struct {
 	// restart. Empty/missing/unparseable ⇒ the provider advertises no price.
 	PriceFile string
 
+	// CapacityFile is an optional path to a YAML/JSON file holding this
+	// provider's per-resource advertised-capacity percentages (e.g.
+	// {"cpu":100,"memory":50}; keys are resource names, values are integer
+	// percentages of allocatable). It is re-read on every publish cycle so an
+	// operator can re-cap without a restart. A resource set to a value in
+	// (0,100) is advertised at that fraction of its allocatable; 100, >100, ≤0,
+	// or unset ⇒ the full allocatable is advertised for that resource.
+	// Empty/missing/unparseable ⇒ the provider advertises full allocatable.
+	CapacityFile string
+
 	// Interval overrides DefaultInterval. Mainly useful in tests.
 	Interval time.Duration
 
@@ -95,6 +107,7 @@ type Publisher struct {
 	clusterID     string
 	liqoClusterID string
 	priceFile     string
+	capacityFile  string
 	interval      time.Duration
 	log           logr.Logger
 	onResult      func(success bool)
@@ -127,6 +140,7 @@ func New(opts Options) (*Publisher, error) {
 		clusterID:     opts.ClusterID,
 		liqoClusterID: opts.LiqoClusterID,
 		priceFile:     opts.PriceFile,
+		capacityFile:  opts.CapacityFile,
 		interval:      interval,
 		log:           logger,
 		onResult:      opts.OnPublishResult,
@@ -169,11 +183,14 @@ func (p *Publisher) publishOnce(ctx context.Context) {
 		return
 	}
 
+	scaled, customized := p.applyCapacityScaling(snap.Allocatable)
+
 	req := &brokerapi.AdvertisementRequest{
-		ClusterID:     p.clusterID,
-		LiqoClusterID: p.liqoClusterID,
-		Resources:     snap.Allocatable,
-		UnitPrices:    p.loadUnitPrices(),
+		ClusterID:            p.clusterID,
+		LiqoClusterID:        p.liqoClusterID,
+		Resources:            scaled,
+		UnitPrices:           p.loadUnitPrices(),
+		CapacityScalePercent: customized,
 	}
 
 	resp, err := p.client.PostAdvertisement(ctx, req)
@@ -190,7 +207,65 @@ func (p *Publisher) publishOnce(ctx context.Context) {
 		"chunkCount", resp.ChunkCount,
 		"countedNodes", snap.CountedNodes,
 		"pricedResources", len(req.UnitPrices),
+		"customizedResources", len(customized),
 		"piggybackedInstructions", len(resp.Instructions))
+}
+
+// applyCapacityScaling reduces each allocatable resource to the operator's
+// configured percentage and returns (scaledResources, customizedPercents).
+// customizedPercents holds only the resources actually scaled down (so the
+// dashboard can flag them); it is nil when nothing was customized. The
+// normalization rules, per resource percent P (docs: --capacity-file):
+//
+//	0 < P < 100  → advertise P% of allocatable, recorded as customized
+//	P == 100     → advertise full allocatable (not customized)
+//	P  > 100     → clamped to 100 ⇒ full allocatable (not customized)
+//	P <= 0       → bad value ⇒ full allocatable, logged (not customized)
+//	unset        → full allocatable (not customized)
+//
+// A configured key absent from allocatable is ignored (logged at V(1)).
+func (p *Publisher) applyCapacityScaling(alloc corev1.ResourceList) (corev1.ResourceList, map[corev1.ResourceName]int32) {
+	percents := p.loadCapacityPercents()
+	if len(percents) == 0 {
+		return alloc, nil
+	}
+
+	scaled := make(corev1.ResourceList, len(alloc))
+	var customized map[corev1.ResourceName]int32
+	for name, qty := range alloc {
+		pct, ok := percents[name]
+		switch {
+		case !ok || pct >= 100:
+			scaled[name] = qty.DeepCopy()
+		case pct <= 0:
+			p.log.Info("invalid capacity percent (<= 0); advertising full allocatable for this resource",
+				"resource", name, "percent", pct)
+			scaled[name] = qty.DeepCopy()
+		default:
+			scaled[name] = scaleQuantity(qty, int64(pct))
+			if customized == nil {
+				customized = make(map[corev1.ResourceName]int32)
+			}
+			customized[name] = pct
+		}
+	}
+
+	for name := range percents {
+		if _, ok := alloc[name]; !ok {
+			p.log.V(1).Info("capacity percent set for a resource the provider does not advertise; ignored",
+				"resource", name)
+		}
+	}
+	return scaled, customized
+}
+
+// scaleQuantity returns q scaled to percent% of its value, preserving q's
+// format. percent is assumed in (0,100). Milli-precision keeps fractional CPU
+// honest (e.g. 50% of 3 cores → 1500m); for byte-scale resources like memory
+// the milli intermediate stays well within int64 for any realistic cluster.
+func scaleQuantity(q resource.Quantity, percent int64) resource.Quantity {
+	scaledMilli := q.MilliValue() * percent / 100
+	return *resource.NewMilliQuantity(scaledMilli, q.Format)
 }
 
 // loadUnitPrices reads and parses the per-resource unit-price file (if
@@ -222,6 +297,43 @@ func (p *Publisher) loadUnitPrices() corev1.ResourceList {
 		return nil
 	}
 	return prices
+}
+
+// loadCapacityPercents reads and parses the per-resource advertised-capacity
+// percentage file (if configured). Like loadUnitPrices it is best-effort: a
+// missing, empty, or unparseable file yields nil so the provider simply
+// advertises its full allocatable rather than failing the publish cycle.
+// Re-reading here (not at construction) is what lets an operator re-cap live —
+// kubelet refreshes the projected ConfigMap file and the next cycle picks it up.
+// Values are parsed leniently (an integer or a quoted integer) via IntOrString;
+// the (0,100) clamp/normalization happens in applyCapacityScaling.
+func (p *Publisher) loadCapacityPercents() map[corev1.ResourceName]int32 {
+	if p.capacityFile == "" {
+		return nil
+	}
+	data, err := os.ReadFile(p.capacityFile)
+	if err != nil {
+		p.log.V(1).Info("capacity file unreadable; advertising full allocatable",
+			"path", p.capacityFile, "err", err.Error())
+		return nil
+	}
+	if strings.TrimSpace(string(data)) == "" {
+		return nil
+	}
+	var raw map[corev1.ResourceName]intstr.IntOrString
+	if err := yaml.Unmarshal(data, &raw); err != nil {
+		p.log.V(1).Info("capacity file unparseable; advertising full allocatable",
+			"path", p.capacityFile, "err", err.Error())
+		return nil
+	}
+	if len(raw) == 0 {
+		return nil
+	}
+	out := make(map[corev1.ResourceName]int32, len(raw))
+	for k, v := range raw {
+		out[k] = int32(v.IntValue())
+	}
+	return out
 }
 
 func (p *Publisher) notifyResult(success bool) {

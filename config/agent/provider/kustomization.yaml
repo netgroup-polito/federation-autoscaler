@@ -9,6 +9,7 @@ kind: Kustomization
 resources:
 - ../base
 - prices-configmap.yaml
+- capacity-configmap.yaml
 
 patches:
 - path: role_patch.yaml

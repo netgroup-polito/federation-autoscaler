@@ -1,0 +1,27 @@
+# Per-provider advertised-capacity percentages, mounted into the provider agent
+# and re-read on every advertisement cycle (so the cap can change without a pod
+# restart).
+#
+# `capacity.yaml` is a YAML/JSON map of resource-name → integer percentage of
+# that resource's allocatable to advertise:
+#   cpu            → percent of allocatable CPU to advertise
+#   memory         → percent of allocatable memory to advertise
+#   nvidia.com/gpu → percent of allocatable GPUs to advertise
+# A value in the open range (0,100) advertises that fraction; 100, any value
+# >100, any value ≤0, or an unlisted resource advertises the full allocatable.
+# The Broker derives chunk counts from the (already-scaled) advertised capacity,
+# so capping here naturally lowers the chunks this provider offers.
+#
+# Ships EMPTY by default so the base behaviour is unchanged: an empty file ⇒ the
+# provider advertises its full allocatable ⇒ the Broker treats it as today.
+# Unlike prices, this is left for the provider-cluster admin to set MANUALLY
+# (e.g. `kubectl apply -f samples/provider-capacity.yaml` or
+# `kubectl patch configmap agent-capacity`); the fa_provider Ansible role does
+# not stamp it.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: agent-capacity
+  namespace: federation-autoscaler-system
+data:
+  capacity.yaml: ""

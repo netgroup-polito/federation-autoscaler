@@ -288,6 +288,28 @@ price; the consumer opts in per-policy; prices change live.
 > Return to Scenario A by removing the policy:
 > `kubectl --kubeconfig ~/.kube/consumer-1.yaml delete -f samples/consumer-policy.yaml`
 
+### Customizing advertised capacity (optional)
+
+By default a provider advertises **100 % of its allocatable** capacity. The
+provider-cluster admin can donate *less* — per resource — by applying an
+`agent-capacity` ConfigMap, the same manual, post-deploy gesture as setting
+prices (the `fa_provider` role does **not** stamp it):
+
+```bash
+kubectl --kubeconfig ~/.kube/provider-1.yaml apply -f samples/provider-capacity.yaml
+```
+
+`capacity.yaml` is a map of resource → integer percent. A value in `(0,100)`
+advertises that fraction of the resource's allocatable; `100`, anything `>100`,
+anything `<=0`, or an unlisted resource advertises the **full** allocatable. The
+sample caps memory to `50` and leaves CPU at `100`. Within ~30 s (next
+advertisement) the broker dashboard's **Custom** column shows `mem 50%` for that
+provider, and — because chunks are derived from the (now-reduced) advertised
+capacity — a memory-bound provider's `Total` chunk count drops accordingly. The
+file is re-read every cycle, so the cap changes live with no restart; clear it
+with `kubectl patch configmap agent-capacity ... ` or by re-applying an empty
+`capacity.yaml` to return to full capacity.
+
 ## Teardown
 
 ```bash

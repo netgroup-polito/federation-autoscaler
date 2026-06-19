@@ -135,6 +135,7 @@
       <thead><tr>
         <th>Provider</th><th>Type</th><th>Total</th><th>Reserved</th><th>Available</th>
         <th>Cost/chunk</th>
+        <th>Custom</th>
         <th>Ready</th><th>Last seen</th><th>Alloc. CPU</th><th>Alloc. Mem</th>
       </tr></thead>
       <tbody id="advBody"></tbody>
@@ -302,10 +303,21 @@
       }
     }
 
+    // Compact per-resource advertised-capacity customization, e.g. "mem 50%" or
+    // "cpu 80% · mem 50%". The provider agent only sends entries it scaled below
+    // 100%, so an empty/absent map renders as "—" (full allocatable advertised).
+    const RES_ABBR = { cpu: "cpu", memory: "mem", "nvidia.com/gpu": "gpu" };
+    function fmtCapacityCustom(m) {
+      if (!m) return "—";
+      const keys = Object.keys(m).sort();
+      if (!keys.length) return "—";
+      return keys.map(k => `${RES_ABBR[k] || k} ${m[k]}%`).join(" · ");
+    }
+
     function renderAdvertisements(list) {
       const tbody = $("advBody"); tbody.replaceChildren();
       $("advCount").textContent = list.length;
-      if (!list.length) { setEmpty(tbody, 10, "No providers advertising."); return; }
+      if (!list.length) { setEmpty(tbody, 11, "No providers advertising."); return; }
       for (const a of list) {
         const tr = document.createElement("tr");
         tr.appendChild(td(clusterShort(a.clusterId), { mono: true }));
@@ -319,6 +331,9 @@
         // Broker-computed per-chunk cost (unitPrices × chunk size); "—" when the
         // provider advertises no price.
         tr.appendChild(td(a.costPerChunk != null ? a.costPerChunk.toFixed(3) : "—", { mono: true }));
+        // Per-resource advertised-capacity customization (e.g. "mem 50%"); "—"
+        // when the provider advertises its full allocatable.
+        tr.appendChild(td(fmtCapacityCustom(a.capacityScalePercent), { mono: true }));
         tr.appendChild(a.available ? pill("ready", "green") : pill("stale", "amber"));
         tr.appendChild(td(fmtTime(a.lastSeen)));
         // Allocatable CPU / memory the provider advertised (.spec.resources.allocatable).

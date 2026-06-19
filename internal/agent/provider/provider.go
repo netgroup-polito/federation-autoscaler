@@ -82,6 +82,11 @@ type Options struct {
 	// Empty ⇒ the provider advertises no price.
 	PriceFile string
 
+	// CapacityFile is an optional path to this provider's per-resource
+	// advertised-capacity percentage file, re-read on every advertisement cycle
+	// (see advertise.Options). Empty ⇒ the provider advertises full allocatable.
+	CapacityFile string
+
 	// Logger is the structured logger every provider goroutine logs
 	// through. Defaults to controller-runtime's logger named "provider".
 	Logger logr.Logger
@@ -139,6 +144,7 @@ func Run(ctx context.Context, opts Options) error {
 		ClusterID:     opts.ClusterID,
 		LiqoClusterID: opts.LiqoClusterID,
 		PriceFile:     opts.PriceFile,
+		CapacityFile:  opts.CapacityFile,
 		Logger:        logger.WithName("advertise"),
 		// The probe's poll-staleness gate is a "broker reachability"
 		// signal in practice, so a successful advertisement also

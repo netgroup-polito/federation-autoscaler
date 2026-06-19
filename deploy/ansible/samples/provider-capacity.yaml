@@ -1,0 +1,27 @@
+# Per-resource advertised-capacity percentages for a PROVIDER. Apply on the
+# provider's cluster to advertise LESS than its full allocatable:
+#
+#   kubectl --kubeconfig ~/.kube/provider-1.yaml apply -f samples/provider-capacity.yaml
+#
+# This overwrites the `agent-capacity` ConfigMap that the provider overlay ships
+# empty. The provider agent re-reads it on every 30 s advertisement, so the cap
+# changes live with no restart. Values are integer percentages of each
+# resource's allocatable:
+#   cpu    -> percent of allocatable CPU to advertise
+#   memory -> percent of allocatable memory to advertise
+# Rules (per resource): a value in (0,100) advertises that fraction; 100, any
+# value >100, any value <=0, or an unlisted resource advertises the FULL
+# allocatable. Because the Broker derives chunks from the (already-scaled)
+# advertised capacity, capping a resource lowers the chunks this provider offers
+# (here memory is halved, so a memory-bound provider offers ~half its chunks).
+# The broker dashboard's "Custom" column shows the customized resources (e.g.
+# "mem 50%"); resources left at 100% are not flagged.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: agent-capacity
+  namespace: federation-autoscaler-system
+data:
+  capacity.yaml: |
+    cpu: 100
+    memory: 50

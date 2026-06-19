@@ -89,6 +89,7 @@ func main() {
 		healthProbeAddr string
 		namespace       string
 		priceFile       string
+		capacityFile    string
 	)
 
 	flag.StringVar(&role, "role", "",
@@ -119,6 +120,12 @@ func main() {
 		"(provider role only) Path to a YAML/JSON file of per-resource unit prices "+
 			"(e.g. {\"cpu\":\"0.03\",\"memory\":\"4Mi\"}). Re-read every advertisement "+
 			"cycle so prices can change without a restart. Empty ⇒ advertise no price.")
+	flag.StringVar(&capacityFile, "capacity-file", "",
+		"(provider role only) Path to a YAML/JSON file of per-resource advertised-"+
+			"capacity percentages (e.g. {\"cpu\":100,\"memory\":50}). A value in (0,100) "+
+			"advertises that fraction of the resource's allocatable; 100, >100, ≤0, or "+
+			"unset advertise the full allocatable. Re-read every advertisement cycle so "+
+			"the cap can change without a restart. Empty ⇒ advertise full allocatable.")
 
 	opts := zap.Options{Development: true}
 	opts.BindFlags(flag.CommandLine)
@@ -225,6 +232,7 @@ func main() {
 			ClusterID:     clusterID,
 			LiqoClusterID: liqoClusterID,
 			PriceFile:     priceFile,
+			CapacityFile:  capacityFile,
 			Logger:        ctrl.Log.WithName("provider"),
 			Probe:         probe,
 		}); err != nil {

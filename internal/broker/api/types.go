@@ -124,6 +124,15 @@ type AdvertisementRequest struct {
 	// treats unpriced providers as a last resort. Each value must be non-negative.
 	UnitPrices corev1.ResourceList `json:"unitPrices,omitempty"`
 
+	// CapacityScalePercent records, per resource, the percentage of allocatable
+	// the provider's admin chose to advertise when it is less than 100% — i.e.
+	// the agent has already scaled Resources down accordingly. Keys are resource
+	// names; values are integer percentages in (0,100). Resources advertised at
+	// full allocatable are omitted, so an empty/absent map means "no
+	// customization". The Broker only stores and surfaces this on the dashboard;
+	// it never re-derives Resources from it (Resources is authoritative).
+	CapacityScalePercent map[corev1.ResourceName]int32 `json:"capacityScalePercent,omitempty"`
+
 	// LiqoLabels are stamped on the virtual nodes Liqo creates on each
 	// peering consumer, e.g. liqo.io/type=virtual-node.
 	LiqoLabels map[string]string `json:"liqoLabels,omitempty"`
@@ -175,14 +184,19 @@ type AdvertisementSnapshot struct {
 	// CostPerChunk is the Broker-computed per-chunk cost (unitPrices × chunk
 	// size). Populated only on the dashboard projection; nil when the provider
 	// is unpriced. Not set on the agent-facing GET /advertisements path.
-	CostPerChunk    *float64          `json:"costPerChunk,omitempty"`
-	LiqoLabels      map[string]string `json:"liqoLabels,omitempty"`
-	LiqoTaints      []corev1.Taint    `json:"liqoTaints,omitempty"`
-	ChunkCount      int32             `json:"chunkCount"`
-	ReservedChunks  int32             `json:"reservedChunks"`
-	AvailableChunks int32             `json:"availableChunks"`
-	LastSeen        metav1.Time       `json:"lastSeen"`
-	Available       bool              `json:"available"`
+	CostPerChunk *float64 `json:"costPerChunk,omitempty"`
+	// CapacityScalePercent mirrors the provider's per-resource advertised-capacity
+	// customization (resource name → percentage in (0,100)); empty/absent means
+	// the provider advertises full allocatable. Surfaced so the dashboard can
+	// flag a customized provider.
+	CapacityScalePercent map[corev1.ResourceName]int32 `json:"capacityScalePercent,omitempty"`
+	LiqoLabels           map[string]string             `json:"liqoLabels,omitempty"`
+	LiqoTaints           []corev1.Taint                `json:"liqoTaints,omitempty"`
+	ChunkCount           int32                         `json:"chunkCount"`
+	ReservedChunks       int32                         `json:"reservedChunks"`
+	AvailableChunks      int32                         `json:"availableChunks"`
+	LastSeen             metav1.Time                   `json:"lastSeen"`
+	Available            bool                          `json:"available"`
 }
 
 // -----------------------------------------------------------------------------

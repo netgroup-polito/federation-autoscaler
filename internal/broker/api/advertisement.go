@@ -163,8 +163,9 @@ func (s *Server) upsertClusterAdvertisement(
 			Resources: brokerv1alpha1.AdvertisedResources{
 				Allocatable: req.Resources,
 			},
-			Topology:   req.Topology,
-			UnitPrices: req.UnitPrices,
+			Topology:             req.Topology,
+			UnitPrices:           req.UnitPrices,
+			CapacityScalePercent: req.CapacityScalePercent,
 		}
 		return nil
 	})
@@ -254,15 +255,16 @@ func (s *Server) handleAdvertisementGet(w http.ResponseWriter, r *http.Request) 
 
 func advertisementSnapshotFromCR(cadv *brokerv1alpha1.ClusterAdvertisement) AdvertisementSnapshot {
 	out := AdvertisementSnapshot{
-		ClusterID:       cadv.Spec.ClusterID,
-		LiqoClusterID:   cadv.Spec.LiqoClusterID,
-		Resources:       cadv.Spec.Resources.Allocatable,
-		Topology:        cadv.Spec.Topology,
-		UnitPrices:      cadv.Spec.UnitPrices,
-		ChunkCount:      cadv.Status.TotalChunks,
-		ReservedChunks:  cadv.Status.ReservedChunks,
-		AvailableChunks: cadv.Status.AvailableChunks,
-		Available:       cadv.Status.Available,
+		ClusterID:            cadv.Spec.ClusterID,
+		LiqoClusterID:        cadv.Spec.LiqoClusterID,
+		Resources:            cadv.Spec.Resources.Allocatable,
+		Topology:             cadv.Spec.Topology,
+		UnitPrices:           cadv.Spec.UnitPrices,
+		CapacityScalePercent: cadv.Spec.CapacityScalePercent,
+		ChunkCount:           cadv.Status.TotalChunks,
+		ReservedChunks:       cadv.Status.ReservedChunks,
+		AvailableChunks:      cadv.Status.AvailableChunks,
+		Available:            cadv.Status.Available,
 	}
 	if cadv.Status.LastSeen != nil {
 		out.LastSeen = *cadv.Status.LastSeen

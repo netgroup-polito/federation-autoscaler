@@ -5,6 +5,9 @@
 #    The agent re-reads this file every advertisement cycle so an operator can
 #    reprice without a restart. The ConfigMap is optional and ships empty, so a
 #    provider with no prices set behaves exactly as before (advertises no price).
+# 3. Append --capacity-file pointing at the mounted capacity ConfigMap, and mount
+#    it. Same re-read-every-cycle semantics; ships empty so a provider with no
+#    cap set advertises its full allocatable exactly as before.
 - op: add
   path: /spec/template/spec/containers/0/args/-
   value: --role=provider
@@ -12,10 +15,19 @@
   path: /spec/template/spec/containers/0/args/-
   value: --price-file=/etc/federation-autoscaler/prices/prices.yaml
 - op: add
+  path: /spec/template/spec/containers/0/args/-
+  value: --capacity-file=/etc/federation-autoscaler/capacity/capacity.yaml
+- op: add
   path: /spec/template/spec/containers/0/volumeMounts/-
   value:
     name: prices
     mountPath: /etc/federation-autoscaler/prices
+    readOnly: true
+- op: add
+  path: /spec/template/spec/containers/0/volumeMounts/-
+  value:
+    name: capacity
+    mountPath: /etc/federation-autoscaler/capacity
     readOnly: true
 - op: add
   path: /spec/template/spec/volumes/-
@@ -23,4 +35,11 @@
     name: prices
     configMap:
       name: agent-prices
+      optional: true
+- op: add
+  path: /spec/template/spec/volumes/-
+  value:
+    name: capacity
+    configMap:
+      name: agent-capacity
       optional: true
