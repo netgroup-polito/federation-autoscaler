@@ -121,7 +121,12 @@ var _ = Describe("Step 11 end-to-end: Peer → VirtualNodeState → reconciler �
 			c.Status.Available = true
 			c.Status.LastSeen = &now
 			c.Status.TotalChunks = 2
-			c.Status.AvailableChunks = 2
+			// One chunk is reserved — the materialised VirtualNodeState created
+			// below corresponds to a live (Peered) reservation, so the broker's
+			// ReservedChunks is 1. NodeGroupTargetSize reports this reserved-chunk
+			// count (not the materialised-node count), so this is what makes it 1.
+			c.Status.ReservedChunks = 1
+			c.Status.AvailableChunks = 1
 			return k8sClient.Status().Update(suiteCtx, c)
 		}, suiteTimeout, suiteInterval).Should(Succeed())
 
@@ -280,7 +285,7 @@ var _ = Describe("Step 11 end-to-end: Peer → VirtualNodeState → reconciler �
 		ctx, cancel := context.WithTimeout(suiteCtx, 10*time.Second)
 		defer cancel()
 
-		By("NodeGroupTargetSize reflects the materialised chunk")
+		By("NodeGroupTargetSize reflects the reserved chunk")
 		Eventually(func(g Gomega) {
 			resp, err := client.NodeGroupTargetSize(ctx, &protos.NodeGroupTargetSizeRequest{Id: nodeGroupID})
 			g.Expect(err).NotTo(HaveOccurred())

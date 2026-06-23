@@ -88,10 +88,19 @@ func (s *Server) NodeGroupForNode(ctx context.Context, req *protos.NodeGroupForN
 	return &protos.NodeGroupForNodeResponse{NodeGroup: &protos.NodeGroup{}}, nil
 }
 
-// NodeGroupTargetSize returns the number of virtual nodes currently
-// known on the consumer cluster for the requested group. This is
-// CA's only view of "did the last scale-up actually materialise" so
-// the count must be the live one, not a cached "desired".
+// NodeGroupTargetSize returns the group's current target size — the number of
+// CHUNKS the Broker has reserved for this consumer on the group's provider
+// (NodeGroupView.CurrentReserved), which counts in-flight reservations whose
+// virtual node has not materialised yet.
+//
+// It deliberately does NOT count only the live virtual nodes. A borrowed node
+// takes ~100 s to peer; during that window a node-only count reports 0, so CA —
+// still seeing the Pending Pods — re-issues NodeGroupIncreaseSize every reconcile
+// loop until it hits MaxSize. That over-provisions reservations on any provider
+// with more than one chunk (capped at 1 on single-chunk providers, which hid the
+// bug) and orphans the surplus reservations on scale-down. Reporting reserved
+// chunks — in the same chunk units as MaxSize and the IncreaseSize delta — lets
+// CA see its request land immediately and then grow only as real demand requires.
 func (s *Server) NodeGroupTargetSize(ctx context.Context, req *protos.NodeGroupTargetSizeRequest) (*protos.NodeGroupTargetSizeResponse, error) {
 	if req == nil || req.Id == "" {
 		return nil, status.Error(codes.InvalidArgument, "id is required")
@@ -99,17 +108,17 @@ func (s *Server) NodeGroupTargetSize(ctx context.Context, req *protos.NodeGroupT
 	if s.agent == nil {
 		return nil, status.Error(codes.FailedPrecondition, "agent client not configured")
 	}
-	list, err := s.agent.GetVirtualNodes(ctx)
+	resp, err := s.agent.GetNodeGroups(ctx)
 	if err != nil {
-		return nil, mapAgentError(err, "GetVirtualNodes")
+		return nil, mapAgentError(err, "GetNodeGroups")
 	}
-	var count int32
-	for i := range list.VirtualNodes {
-		if list.VirtualNodes[i].NodeGroupID == req.Id {
-			count++
+	for i := range resp.NodeGroups {
+		if resp.NodeGroups[i].ID == req.Id {
+			return &protos.NodeGroupTargetSizeResponse{TargetSize: resp.NodeGroups[i].CurrentReserved}, nil
 		}
 	}
-	return &protos.NodeGroupTargetSizeResponse{TargetSize: count}, nil
+	// Group no longer advertised → size 0 (CA treats it as scaled to nothing).
+	return &protos.NodeGroupTargetSizeResponse{TargetSize: 0}, nil
 }
 
 // NodeGroupTemplateNodeInfo builds a synthetic v1.Node that mirrors

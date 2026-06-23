@@ -271,34 +271,50 @@ func TestNodeGroupForNode_RejectsMissingNode(t *testing.T) {
 // NodeGroupTargetSize
 // -----------------------------------------------------------------------------
 
-func TestNodeGroupTargetSize_CountsMatchingGroup(t *testing.T) {
+func TestNodeGroupTargetSize_ReturnsReservedChunks(t *testing.T) {
+	// p1/standard has 2 chunks RESERVED but — deliberately — no materialized
+	// virtual node yet (the ~100 s peering window). TargetSize must report 2
+	// (reserved chunks), NOT 0, so CA sees its request landed and does not
+	// re-issue IncreaseSize every loop up to MaxSize (the over-provision bug).
 	fb := &fakeLocalAPI{
-		virtualNodes: &localapi.VirtualNodeListResponse{
-			VirtualNodes: []localapi.VirtualNodeView{
-				{Name: "vn-1", NodeGroupID: "p1/standard"},
-				{Name: "vn-2", NodeGroupID: "p1/standard"},
-				{Name: "vn-3", NodeGroupID: "p2/gpu"},
+		nodeGroups: &brokerapi.NodeGroupListResponse{
+			NodeGroups: []brokerapi.NodeGroupView{
+				{ID: "p1/standard", ProviderClusterID: "p1", Type: brokerv1alpha1.ChunkTypeStandard, MinSize: 0, MaxSize: 3, CurrentReserved: 2},
+				{ID: "p2/gpu", ProviderClusterID: "p2", Type: brokerv1alpha1.ChunkTypeGPU, MinSize: 0, MaxSize: 4, CurrentReserved: 0},
 			},
 		},
+		// No virtual nodes have materialized — proves TargetSize is
+		// reservation-driven, not live-node-count-driven.
 	}
 	client := newRunningServer(t, fb)
+
 	resp, err := client.NodeGroupTargetSize(context.Background(),
 		&protos.NodeGroupTargetSizeRequest{Id: "p1/standard"})
 	if err != nil {
 		t.Fatalf("err: %v", err)
 	}
 	if resp.TargetSize != 2 {
-		t.Errorf("want 2, got %d", resp.TargetSize)
+		t.Errorf("want 2 (reserved chunks), got %d", resp.TargetSize)
 	}
 
-	// Group with no virtual nodes → 0, not an error.
+	// A group with no reservations → 0.
+	resp, err = client.NodeGroupTargetSize(context.Background(),
+		&protos.NodeGroupTargetSizeRequest{Id: "p2/gpu"})
+	if err != nil {
+		t.Fatalf("err: %v", err)
+	}
+	if resp.TargetSize != 0 {
+		t.Errorf("want 0 for a group with no reservations, got %d", resp.TargetSize)
+	}
+
+	// A group the broker no longer advertises → 0, not an error.
 	resp, err = client.NodeGroupTargetSize(context.Background(),
 		&protos.NodeGroupTargetSizeRequest{Id: "p3/standard"})
 	if err != nil {
 		t.Fatalf("err: %v", err)
 	}
 	if resp.TargetSize != 0 {
-		t.Errorf("want 0, got %d", resp.TargetSize)
+		t.Errorf("want 0 for an unknown group, got %d", resp.TargetSize)
 	}
 }
 
