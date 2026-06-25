@@ -86,6 +86,7 @@ func main() {
 		brokerCAPath    string
 		pollInterval    time.Duration
 		localAPIAddr    string
+		consoleAddr     string
 		healthProbeAddr string
 		namespace       string
 		priceFile       string
@@ -113,6 +114,11 @@ func main() {
 		"Interval between GET /api/v1/instructions polls against the Broker.")
 	flag.StringVar(&localAPIAddr, "local-api-bind-address", "127.0.0.1:9090",
 		"(consumer role only) Address the loopback REST API binds to; consumed by the local gRPC server.")
+	flag.StringVar(&consoleAddr, "console-bind-address", "",
+		"Address the role-specific config console (a plain-HTTP, UNAUTHENTICATED web UI "+
+			"for setting policy/region/workload on a consumer, or prices/region/capacity on a "+
+			"provider) binds to, e.g. :9095. Empty ⇒ console disabled. Exposing it on a NodePort "+
+			"lets anyone with node network reach mutate cluster state — demo use only.")
 	flag.StringVar(&healthProbeAddr, "health-probe-bind-address", ":8081",
 		"Address the health/readiness probe endpoint binds to.")
 	flag.StringVar(&namespace, "namespace", envOrDefault("POD_NAMESPACE", defaultNamespace),
@@ -233,6 +239,7 @@ func main() {
 			ClusterID:     clusterID,
 			LiqoClusterID: liqoClusterID,
 			LocalAPIAddr:  localAPIAddr,
+			ConsoleAddr:   consoleAddr,
 			Namespace:     namespace,
 			RegionFile:    regionFile,
 			MockGeoURL:    mockGeoURL,
@@ -254,6 +261,7 @@ func main() {
 			RegionFile:    regionFile,
 			MockEcoURL:    mockEcoURL,
 			MockGeoURL:    mockGeoURL,
+			ConsoleAddr:   consoleAddr,
 			Logger:        ctrl.Log.WithName("provider"),
 			Probe:         probe,
 		}); err != nil {

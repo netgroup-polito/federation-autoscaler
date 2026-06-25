@@ -1,0 +1,24 @@
+# NodePort Service exposing the consumer config console to a browser on the
+# operator's machine. The console is plain-HTTP and UNAUTHENTICATED and WRITES
+# cluster state (policy / region / workload) — demo-grade; expose only on a
+# trusted network. Separate from the cluster-internal `agent` Service so the
+# loopback localapi (port 9090) stays ClusterIP-only.
+apiVersion: v1
+kind: Service
+metadata:
+  name: agent-console
+  namespace: federation-autoscaler-system
+  labels:
+    app.kubernetes.io/name: federation-autoscaler
+    app.kubernetes.io/component: agent
+spec:
+  type: NodePort
+  selector:
+    app.kubernetes.io/name: federation-autoscaler
+    app.kubernetes.io/component: agent
+  ports:
+  - name: console
+    port: 9095
+    targetPort: console
+    nodePort: 30445
+    protocol: TCP

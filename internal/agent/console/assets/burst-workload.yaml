@@ -1,0 +1,39 @@
+# Burst workload embedded into the agent so the consumer config console can
+# apply/delete it on demand. This is a COPY of deploy/ansible/samples/burst-workload.yaml
+# (go:embed cannot reach a path outside this package dir). Keep the two in sync;
+# internal/agent/console/server_test.go asserts the sizing below to catch drift.
+#
+# The `default` namespace is offloaded LocalAndRemote, so the scheduler fills the
+# consumer's own node first and the overflow replicas pend; Cluster Autoscaler
+# then scales a federation node group and the pods land on the borrowed chunks.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: federation-demo
+  namespace: default
+  labels:
+    app: federation-demo
+spec:
+  replicas: 5
+  selector:
+    matchLabels:
+      app: federation-demo
+  template:
+    metadata:
+      labels:
+        app: federation-demo
+    spec:
+      tolerations:
+        - key: virtual-node.liqo.io/not-allowed
+          operator: Exists
+          effect: NoExecute
+      containers:
+        - name: pause
+          image: registry.k8s.io/pause:3.9
+          resources:
+            requests:
+              cpu: "1"
+              memory: "1Gi"
+            limits:
+              cpu: "1"
+              memory: "1Gi"

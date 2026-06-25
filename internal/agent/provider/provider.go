@@ -38,6 +38,7 @@ import (
 
 	autoscalingv1alpha1 "github.com/netgroup-polito/federation-autoscaler/api/autoscaling/v1alpha1"
 	agentclient "github.com/netgroup-polito/federation-autoscaler/internal/agent/client"
+	"github.com/netgroup-polito/federation-autoscaler/internal/agent/console"
 	"github.com/netgroup-polito/federation-autoscaler/internal/agent/health"
 	"github.com/netgroup-polito/federation-autoscaler/internal/agent/poller"
 	"github.com/netgroup-polito/federation-autoscaler/internal/agent/provider/advertise"
@@ -97,6 +98,12 @@ type Options struct {
 	// respective lookup.
 	MockEcoURL string
 	MockGeoURL string
+
+	// ConsoleAddr is the address the (plain-HTTP, unauthenticated) config
+	// console binds to, e.g. ":9095". Empty disables the console. This is the
+	// provider role's only HTTP server; it lets an operator set this provider's
+	// prices / region / advertised-capacity from a browser (NodePort).
+	ConsoleAddr string
 
 	// Logger is the structured logger every provider goroutine logs
 	// through. Defaults to controller-runtime's logger named "provider".
@@ -169,6 +176,27 @@ func Run(ctx context.Context, opts Options) error {
 		return fmt.Errorf("provider: build advertisement publisher: %w", err)
 	}
 	go publisher.Run(ctx)
+
+	// Optional config console (plain HTTP, no auth) — the provider role's only
+	// HTTP server. Empty addr ⇒ disabled. The provider has no --namespace flag
+	// (it is consumer-only), so the console defaults to the agent namespace
+	// where the agent-prices / agent-capacity / agent-location ConfigMaps live.
+	if opts.ConsoleAddr != "" {
+		consoleSrv, err := console.New(console.Options{
+			Role:        console.RoleProvider,
+			BindAddress: opts.ConsoleAddr,
+			LocalClient: opts.LocalClient,
+			Logger:      logger.WithName("console"),
+		})
+		if err != nil {
+			return fmt.Errorf("provider: build config console: %w", err)
+		}
+		go func() {
+			if err := consoleSrv.Run(ctx); err != nil {
+				logger.Error(err, "config console stopped with error")
+			}
+		}()
+	}
 
 	logger.Info("provider role bootstrapped",
 		"clusterID", opts.ClusterID,

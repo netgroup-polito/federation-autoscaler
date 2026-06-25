@@ -48,3 +48,15 @@
     configMap:
       name: agent-capacity
       optional: true
+# Config console (plain HTTP, no auth) — exposed via the agent-console NodePort
+# Service so an operator can set prices/region/capacity from a browser. This is
+# the provider role's only HTTP server.
+- op: add
+  path: /spec/template/spec/containers/0/args/-
+  value: --console-bind-address=:9095
+- op: add
+  path: /spec/template/spec/containers/0/ports/-
+  value:
+    name: console
+    containerPort: 9095
+    protocol: TCP

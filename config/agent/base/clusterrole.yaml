@@ -78,8 +78,14 @@ rules:
 # liqoctl's EnsureRoles creates a RoleBinding for the peering-user that
 # grants `configmaps get/list/watch`. Kubernetes RBAC escalation prevention
 # requires the agent SA to *hold* every permission it tries to grant, so
-# we need configmaps-read at the cluster scope even though we never read
-# configmaps ourselves.
+# we need configmaps-read at the cluster scope even though liqoctl never has
+# us read configmaps ourselves.
+#
+# create/update/patch are additionally required by the config console
+# (internal/agent/console): it upserts the agent-location (both roles) and
+# agent-prices / agent-capacity (provider) ConfigMaps in the agent namespace so
+# an operator can set region/prices/capacity from the browser instead of
+# `kubectl apply`.
 - apiGroups:
   - ""
   resources:
@@ -88,6 +94,9 @@ rules:
   - get
   - list
   - watch
+  - create
+  - update
+  - patch
 - apiGroups:
   - ""
   resources:
@@ -183,7 +192,9 @@ rules:
   - update
 # ConsumerPolicy is read each heartbeat by the consumer agent to learn this
 # consumer's placement policy (e.g. prefer the cheapest providers) and push it
-# to the Broker. Read-only — operators stamp it, the agent never writes it.
+# to the Broker. Operators stamp it; the consumer config console
+# (internal/agent/console) additionally create/update/deletes the `default`
+# ConsumerPolicy when the operator picks a policy in the browser.
 - apiGroups:
   - autoscaling.federation-autoscaler.io
   resources:
@@ -192,6 +203,10 @@ rules:
   - get
   - list
   - watch
+  - create
+  - update
+  - patch
+  - delete
 # --- Liqo CRs (consumer role) -------------------------------------------
 # `liqoctl unpeer` starts with a "bidirectional peering check" that LISTS
 # foreignclusters.core.liqo.io at cluster scope; without this the Unpeer

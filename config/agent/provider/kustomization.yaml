@@ -10,6 +10,7 @@ resources:
 - ../base
 - prices-configmap.yaml
 - capacity-configmap.yaml
+- console-service.yaml
 
 patches:
 - path: role_patch.yaml

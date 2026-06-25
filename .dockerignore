@@ -15,6 +15,13 @@
 # or `go build` fails with "pattern ...: no matching files found".
 !internal/broker/api/dashboard_assets/index.html
 
+# Re-include the embedded agent config-console assets. server.go embeds the two
+# role HTML pages and workload.go embeds the burst-workload manifest, so the
+# build context MUST carry them or the agent `go build` fails the same way.
+!internal/agent/console/assets/consumer.html
+!internal/agent/console/assets/provider.html
+!internal/agent/console/assets/burst-workload.yaml
+
 # Re-include the host-prefetched liqoctl binary the Makefile drops under
 # bin/liqoctl-<version>-<os>-<arch>/liqoctl. The agent runtime stage COPYs
 # from this path instead of curling github.com during the build.

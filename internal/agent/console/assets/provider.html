@@ -1,0 +1,240 @@
+<!DOCTYPE html>
+<!--
+ Federation-Autoscaler Provider Console.
+
+ Self-contained single page (no build step, no external assets) embedded into the
+ agent binary via //go:embed. It reads GET /api/state + GET /api/regions on load
+ and POSTs to /api/prices, /api/region, /api/capacity.
+
+ Security note: served on a plain-HTTP, unauthenticated listener that WRITES
+ cluster state. Demo-grade only. Every dynamic value is set via textContent.
+-->
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Provider Console — Federation Autoscaler</title>
+  <style>
+    :root {
+      --bg: #0f1419; --panel: #1a212b; --panel-2: #222b37; --border: #2d3949;
+      --fg: #e6edf3; --muted: #8b98a9; --accent: #4aa8ff; --green: #3fb950;
+      --amber: #d29922; --red: #f85149; --purple: #bc8cff;
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0; background: var(--bg); color: var(--fg);
+      font: 14px/1.5 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+      padding: 0 0 64px;
+    }
+    header {
+      display: flex; align-items: center; gap: 14px; flex-wrap: wrap;
+      padding: 14px 22px; background: var(--panel); border-bottom: 1px solid var(--border);
+      position: sticky; top: 0; z-index: 10;
+    }
+    header h1 { font-size: 16px; margin: 0; font-weight: 600; }
+    .role { font-size: 11px; font-weight: 700; letter-spacing: .5px; text-transform: uppercase;
+      padding: 3px 8px; border-radius: 4px; background: rgba(188,140,255,.15); color: var(--purple);
+      border: 1px solid rgba(188,140,255,.4); }
+    .spacer { flex: 1; }
+    .ns { color: var(--muted); font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12px; }
+    main { max-width: 920px; margin: 0 auto; padding: 0 22px; }
+    section {
+      background: var(--panel); border: 1px solid var(--border); border-radius: 10px;
+      padding: 18px 20px; margin-top: 18px;
+    }
+    section h2 {
+      font-size: 13px; font-weight: 600; text-transform: uppercase; letter-spacing: .6px;
+      color: var(--muted); margin: 0 0 4px;
+    }
+    section p.hint { color: var(--muted); font-size: 12px; margin: 0 0 14px; }
+    .row { display: flex; align-items: center; gap: 14px; flex-wrap: wrap; }
+    .field { display: flex; flex-direction: column; gap: 6px; }
+    .field label { color: var(--muted); font-size: 12px; }
+    .field .unit { color: var(--muted); font-size: 11px; }
+    select, input[type=text] {
+      background: var(--bg); color: var(--fg); border: 1px solid var(--border);
+      border-radius: 6px; padding: 9px 11px; font-size: 14px; min-width: 200px;
+    }
+    select:focus, input:focus { outline: none; border-color: var(--accent); }
+    button {
+      background: var(--accent); color: #04121f; border: none; border-radius: 6px;
+      padding: 9px 18px; font-size: 13px; font-weight: 700; cursor: pointer;
+    }
+    button:disabled { background: var(--panel-2); color: var(--muted); cursor: not-allowed; }
+    .submit-row { margin-top: 14px; }
+    /* range sliders */
+    .slider-field { margin-bottom: 16px; }
+    .slider-field .top { display: flex; justify-content: space-between; align-items: baseline; }
+    .slider-field .name { font-weight: 600; }
+    .slider-field .pct { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 16px; font-weight: 700; color: var(--accent); }
+    input[type=range] { width: 100%; accent-color: var(--accent); margin-top: 8px; }
+    #toast {
+      position: fixed; bottom: 24px; left: 50%; transform: translateX(-50%);
+      background: var(--panel); border: 1px solid var(--green); color: var(--fg);
+      padding: 11px 18px; border-radius: 8px; font-size: 13px; opacity: 0; pointer-events: none;
+      transition: opacity .25s; box-shadow: 0 8px 30px rgba(0,0,0,.4); max-width: 90vw;
+    }
+    #toast.show { opacity: 1; }
+    #toast.err { border-color: var(--red); }
+  </style>
+</head>
+<body>
+  <header>
+    <span class="role">Provider</span>
+    <h1>Federation Autoscaler Console</h1>
+    <span class="spacer"></span>
+    <span class="ns" id="ns"></span>
+  </header>
+
+  <main>
+    <!-- Prices -->
+    <section>
+      <h2>Unit prices</h2>
+      <p class="hint">What you charge per unit per hour (the Price strategy ranks on this). Takes effect on the next advertisement (~30&nbsp;s).</p>
+      <div class="row">
+        <div class="field">
+          <label for="cpuPrice">CPU <span class="unit">(per core-hour)</span></label>
+          <input type="text" id="cpuPrice" inputmode="decimal" placeholder="e.g. 0.020" />
+        </div>
+        <div class="field">
+          <label for="memPrice">Memory <span class="unit">(per GiB-hour)</span></label>
+          <input type="text" id="memPrice" inputmode="decimal" placeholder="e.g. 0.003" />
+        </div>
+      </div>
+      <div class="submit-row"><button id="pricesSubmit">Apply prices</button></div>
+    </section>
+
+    <!-- Region -->
+    <section>
+      <h2>Region</h2>
+      <p class="hint">Your cluster's location — resolves to carbon (Eco) and coordinates (Latency). Applied via the agent-location ConfigMap; takes effect within ~60&nbsp;s.</p>
+      <div class="row">
+        <select id="regionSelect"></select>
+        <button id="regionSubmit" disabled>Apply region</button>
+      </div>
+    </section>
+
+    <!-- Capacity -->
+    <section>
+      <h2>Advertised capacity</h2>
+      <p class="hint">The percentage of allocatable CPU / RAM you donate to the federation. Takes effect on the next advertisement (~30&nbsp;s).</p>
+      <div class="slider-field">
+        <div class="top"><span class="name">CPU</span><span class="pct" id="cpuPct">100%</span></div>
+        <input type="range" id="cpuRange" min="0" max="100" value="100" />
+      </div>
+      <div class="slider-field">
+        <div class="top"><span class="name">RAM</span><span class="pct" id="memPct">100%</span></div>
+        <input type="range" id="memRange" min="0" max="100" value="100" />
+      </div>
+      <div class="submit-row"><button id="capacitySubmit">Apply capacity</button></div>
+    </section>
+  </main>
+
+  <div id="toast"></div>
+
+  <script>
+    "use strict";
+
+    let currentRegion = "";
+
+    function toast(msg, isErr) {
+      const el = document.getElementById("toast");
+      el.textContent = msg;
+      el.classList.toggle("err", !!isErr);
+      el.classList.add("show");
+      clearTimeout(el._t);
+      el._t = setTimeout(() => el.classList.remove("show"), 4000);
+    }
+
+    async function postJSON(path, body) {
+      const res = await fetch(path, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(body),
+      });
+      if (!res.ok) {
+        let msg = "HTTP " + res.status;
+        try { const j = await res.json(); if (j.error) msg = j.error; } catch (e) {}
+        throw new Error(msg);
+      }
+      return res.json();
+    }
+
+    async function loadRegions() {
+      const res = await fetch("/api/regions");
+      const data = await res.json();
+      const sel = document.getElementById("regionSelect");
+      sel.textContent = "";
+      const none = document.createElement("option");
+      none.value = ""; none.textContent = "— none —";
+      sel.appendChild(none);
+      for (const r of (data.regions || [])) {
+        const o = document.createElement("option");
+        o.value = r.code; o.textContent = r.code + " — " + r.city;
+        sel.appendChild(o);
+      }
+      sel.onchange = () => {
+        document.getElementById("regionSubmit").disabled = (sel.value === currentRegion);
+      };
+    }
+
+    function setPct(rangeId, pctId, v) {
+      document.getElementById(rangeId).value = v;
+      document.getElementById(pctId).textContent = v + "%";
+    }
+
+    async function loadState() {
+      const res = await fetch("/api/state", { cache: "no-store" });
+      const st = await res.json();
+      document.getElementById("ns").textContent = st.role;
+
+      const prices = st.prices || {};
+      document.getElementById("cpuPrice").value = prices.cpu || "";
+      document.getElementById("memPrice").value = prices.memory || "";
+
+      currentRegion = st.region || "";
+      document.getElementById("regionSelect").value = currentRegion;
+      document.getElementById("regionSubmit").disabled = true;
+
+      const cap = st.capacity || {};
+      setPct("cpuRange", "cpuPct", cap.cpu != null ? cap.cpu : 100);
+      setPct("memRange", "memPct", cap.memory != null ? cap.memory : 100);
+    }
+
+    document.getElementById("cpuRange").oninput = (e) => { document.getElementById("cpuPct").textContent = e.target.value + "%"; };
+    document.getElementById("memRange").oninput = (e) => { document.getElementById("memPct").textContent = e.target.value + "%"; };
+
+    document.getElementById("pricesSubmit").onclick = async () => {
+      const cpu = document.getElementById("cpuPrice").value.trim();
+      const memory = document.getElementById("memPrice").value.trim();
+      try {
+        await postJSON("/api/prices", { cpu, memory });
+        toast("Prices applied — advertised within ~30 s");
+        await loadState();
+      } catch (e) { toast(e.message, true); }
+    };
+    document.getElementById("regionSubmit").onclick = async () => {
+      const region = document.getElementById("regionSelect").value;
+      try {
+        await postJSON("/api/region", { region });
+        toast("Region set to “" + (region || "none") + "” — takes effect within ~60 s");
+        await loadState();
+      } catch (e) { toast(e.message, true); }
+    };
+    document.getElementById("capacitySubmit").onclick = async () => {
+      const cpu = parseInt(document.getElementById("cpuRange").value, 10);
+      const memory = parseInt(document.getElementById("memRange").value, 10);
+      try {
+        await postJSON("/api/capacity", { cpu, memory });
+        toast("Capacity applied — advertised within ~30 s");
+        await loadState();
+      } catch (e) { toast(e.message, true); }
+    };
+
+    (async () => {
+      try { await loadRegions(); await loadState(); }
+      catch (e) { toast("Failed to load: " + e.message, true); }
+    })();
+  </script>
+</body>
+</html>

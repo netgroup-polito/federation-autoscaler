@@ -9,6 +9,8 @@ kind: Kustomization
 resources:
 - ../base
 - service.yaml
+- console-service.yaml
+- workload_role.yaml
 
 patches:
 - path: role_patch.yaml

@@ -59,6 +59,7 @@ all work). Open the following ports between them:
 | 6443                | TCP      | k3s apiserver (used by `kubectl`)     |
 | 30443               | TCP      | Broker NodePort (agents → broker)     |
 | 30444               | TCP      | Broker dashboard NodePort (browser)   |
+| 30445               | TCP      | Agent config console NodePort (browser) |
 | 80                  | TCP      | Liqo dashboard Ingress (consumer)     |
 | 30000–32767         | UDP      | Liqo WireGuard gateway                |
 
@@ -201,6 +202,17 @@ registered consumers — plus each provider's **Cost/chunk** and each consumer's
 **Policy**) at `http://<central-ip>:30444/`. It refreshes every couple of
 seconds and needs no login — keep it on a trusted network, as it is
 unauthenticated.
+
+Each consumer and provider cluster also serves a small **config console** — a
+plain-HTTP web UI (no login) at `http://<cluster-ip>:30445/` for setting that
+cluster's federation knobs from the browser instead of `kubectl apply`-ing YAML:
+the **consumer** console sets the placement policy (No policy / Price / Eco /
+Latency), the region, and applies/deletes the demo workload; the **provider**
+console sets unit prices, region, and advertised CPU/RAM capacity. It writes the
+same `ConsumerPolicy` / `agent-location` / `agent-prices` / `agent-capacity`
+resources the samples do, so changes take effect on the next heartbeat (~15 s) /
+advertisement (~30 s). It is unauthenticated AND write-capable — keep it on a
+trusted network (demo-grade only).
 
 The consumer cluster also runs the [Liqo dashboard](https://github.com/ArubaKube/liqo-dashboard)
 (peerings, virtual nodes, offloaded pods), installed by `02-deploy` with image

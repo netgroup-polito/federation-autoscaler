@@ -38,6 +38,7 @@ import (
 
 	autoscalingv1alpha1 "github.com/netgroup-polito/federation-autoscaler/api/autoscaling/v1alpha1"
 	agentclient "github.com/netgroup-polito/federation-autoscaler/internal/agent/client"
+	"github.com/netgroup-polito/federation-autoscaler/internal/agent/console"
 	"github.com/netgroup-polito/federation-autoscaler/internal/agent/consumer/heartbeat"
 	"github.com/netgroup-polito/federation-autoscaler/internal/agent/consumer/instructions"
 	"github.com/netgroup-polito/federation-autoscaler/internal/agent/consumer/localapi"
@@ -94,6 +95,12 @@ type Options struct {
 	// production wiring keeps it on 127.0.0.1 so the listener is
 	// exposed to the co-located pod only.
 	LocalAPIAddr string
+
+	// ConsoleAddr is the address the (plain-HTTP, unauthenticated) config
+	// console binds to, e.g. ":9095". Empty disables the console. Unlike the
+	// loopback API this is meant to be node-reachable (NodePort) so an operator
+	// can drive the consumer's policy / region / workload from a browser.
+	ConsoleAddr string
 
 	// Namespace is where the consumer agent creates the kubeconfig
 	// Secret, the Liqo ResourceSlice, and the VirtualNodeState CR, and
@@ -210,6 +217,25 @@ func Run(ctx context.Context, opts Options) error {
 			logger.Error(err, "loopback REST server stopped with error")
 		}
 	}()
+
+	// Optional config console (plain HTTP, no auth). Empty addr ⇒ disabled.
+	if opts.ConsoleAddr != "" {
+		consoleSrv, err := console.New(console.Options{
+			Role:        console.RoleConsumer,
+			BindAddress: opts.ConsoleAddr,
+			LocalClient: opts.LocalClient,
+			Namespace:   namespace,
+			Logger:      logger.WithName("console"),
+		})
+		if err != nil {
+			return fmt.Errorf("consumer: build config console: %w", err)
+		}
+		go func() {
+			if err := consoleSrv.Run(ctx); err != nil {
+				logger.Error(err, "config console stopped with error")
+			}
+		}()
+	}
 
 	logger.Info("consumer role bootstrapped",
 		"clusterID", opts.ClusterID,

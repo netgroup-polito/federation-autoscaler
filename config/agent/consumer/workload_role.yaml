@@ -1,0 +1,45 @@
+# Scoped write access for the consumer config console's demo-workload control.
+#
+# The console (internal/agent/console) applies/deletes the `federation-demo`
+# Deployment in the `default` namespace (where the Liqo NamespaceOffloading is
+# stamped). The agent's shared ClusterRole keeps apps/deployments at get/list
+# only — deployment WRITE is deliberately NOT cluster-wide and NOT granted to
+# the provider SA. This namespaced Role limits the blast radius to `default`,
+# and ships ONLY in the consumer overlay.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: agent-workload
+  namespace: default
+  labels:
+    app.kubernetes.io/name: federation-autoscaler
+    app.kubernetes.io/component: agent
+rules:
+- apiGroups:
+  - apps
+  resources:
+  - deployments
+  verbs:
+  - get
+  - list
+  - create
+  - update
+  - patch
+  - delete
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: agent-workload
+  namespace: default
+  labels:
+    app.kubernetes.io/name: federation-autoscaler
+    app.kubernetes.io/component: agent
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: agent-workload
+subjects:
+- kind: ServiceAccount
+  name: agent
+  namespace: federation-autoscaler-system
