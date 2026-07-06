@@ -142,7 +142,7 @@ Issues and pull requests are welcome. We follow the standard *fork → branch �
 ## References
 
 - S. Galantino, R. Medina, A. Oliva, F. Risso, and G.  Frattini. "_Dynamic Multi-Provider Cluster Autoscaling For The Computing Continuum,_" in Proceedings of the 3rd International Workshop on Middleware for the Computing Continuum (Mid4CC '25), Nashville (TN), USA, December 2025, Association for Computing Machinery, New York, NY, USA, pages 1–6. https://doi.org/10.1145/3774898.3778037.
-- K. Bigdeli, "_Kubernetes Federation Autoscaler Demo_", July 2026, https://youtu.be/8KfzRoJ84qE?si=NVEyWtbOTlLVoViW.
+- K. Bigdeli, "_Kubernetes Federation Autoscaler Demo_", July 2026, https://www.youtube.com/watch?v=8KfzRoJ84qE.
 
 ---
 
