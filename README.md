@@ -45,7 +45,7 @@ Full design, CRDs, API contracts, and execution flows: **[docs/design.md](docs/d
 
 ## Required components (TODO - KAZEM)
 - A vanilla K8s cluster acting as consumer
-- A set of one or more K8s clusters acting as providers
+- A set of one or more vanilla K8s clusters acting as providers
 - The vanilla Kubernetes Federation Autoscaler installed in the consumer cluster
 - The Kubernetes Federation autoscaler installed in the consumer cluster (WHERE CAN I DOWNLOAD IT FROM?)
 - Liqo installed in all clusters
