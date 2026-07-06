@@ -28,7 +28,7 @@ Works from NATed / firewalled clusters: only the Broker needs a public endpoint;
 
 ## Architecture at a glance
 
-![Architecture](docs/diagrams/architecture-diagram.png)
+![Architecture](docs/diagrams/architecture-diagram-2.svg)
 
 | Channel | Initiator | Transport |
 | --- | --- | --- |
@@ -43,15 +43,15 @@ Full design, CRDs, API contracts, and execution flows: **[docs/design.md](docs/d
 
 ---
 
-## Required components (TODO - KAZEM)
+## Required components
 - A vanilla K8s cluster acting as consumer
 - A set of one or more vanilla K8s clusters acting as providers
-- The vanilla Kubernetes Federation Autoscaler installed in the consumer cluster
-- The Kubernetes Federation autoscaler installed in the consumer cluster (WHERE CAN I DOWNLOAD IT FROM?)
+- The vanilla Kubernetes Cluster Autoscaler installed in the consumer cluster
+- The Consumer installed in the consumer cluster
+- The Provider installed in the consumer cluster
 - Liqo installed in all clusters
-- The Kubernetes Federation Broker running somewhere (WHERE CAN I DOWNLOAD IT FROM?)
-
-TODO - KAZEM - ADD A SIMPLIFIED PICTURE, POSSIBLY IN SVG, SUCH AS THE INITIAL PICTURE YOU USED IN THE VIDEO
+- The Kubernetes Federation Broker running somewhere as a separated K8s cluster
+- Mock servers running on a separated K8s cluster (or a simple machine) in case the policies are used
 
 ---
 
