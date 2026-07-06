@@ -1,6 +1,12 @@
-# federation-autoscaler
+# Kubernetes Federation Autoscaler
 
-**A Kubernetes Cluster Autoscaler extension that dynamically borrows compute capacity from multiple existing Kubernetes clusters across heterogeneous providers — cloud, edge, and on-premise — and exposes them to the local scheduler as virtual nodes via Liqo.**
+The **Kubernetes Federation Autoscaler** defines a set of components and protocols that allow a Kubernetes _consumer_ cluster to acquire compute capacity from one or more existing Kubernetes _provider_ clusters running in arbitrary locations (cloud, edge, and on-premise) through a _broker_ that acts as an intermediary.
+
+This project leverages the vanilla [Kubernetes Cluster Autoscaler](https://github.com/kubernetes/autoscaler) installed in the _consumer_ cluster, which intercepts an unsatisfied demand of resources and, instead of enlarging the cluster by adding one or more traditional nodes (e.g., VMs) to the cluster itself, it adds a virtual node that maps remote computing resources through [Liqo](https://liqo.io).
+Hence, this allows the consumer cluser to borrow compute capacity from multiple existing Kubernetes clusters across heterogeneous providers.
+
+The business logic is triggered by a set of policies in the _consumer_ cluster (e.g., prefer _cheapest_/_greenest_/_lowest latency_/etc provider clusters), which is applied by a _broker_ that knows all the available providers and determines the best one based on the consumer policies.
+Then it returns the proper parameters to both consumer and provider clusters in order to start a Liqo peering relationship, which allow the consumer cluster to acquire (and consume) the negotiated provider resources.
 
 <!-- Replace the placeholders once CI / releases exist -->
 <!-- ![build](https://img.shields.io/github/actions/workflow/status/netgroup-polito/federation-autoscaler/ci.yml) -->
@@ -37,6 +43,18 @@ Full design, CRDs, API contracts, and execution flows: **[docs/design.md](docs/d
 
 ---
 
+## Required components (TODO - KAZEM)
+- A vanilla K8s cluster acting as consumer
+- A set of one or more K8s clusters acting as providers
+- The vanilla Kubernetes Federation Autoscaler installed in the consumer cluster
+- The Kubernetes Federation autoscaler installed in the consumer cluster (WHERE CAN I DOWNLOAD IT FROM?)
+- Liqo installed in all clusters
+- The Kubernetes Federation Broker running somewhere (WHERE CAN I DOWNLOAD IT FROM?)
+
+TODO - KAZEM - ADD A SIMPLIFIED PICTURE, POSSIBLY IN SVG, SUCH AS THE INITIAL PICTURE YOU USED IN THE VIDEO
+
+---
+
 ## Repository layout
 
 ```
@@ -61,7 +79,7 @@ federation-autoscaler/
 
 ## Quick start
 
-You need four Ubuntu 22.04/24.04 VMs on the same network — 1 central, 1 consumer, 2 providers (add one more VM via `--mocks` for the eco/latency strategies). Then, from a control host:
+You need FOUR Ubuntu 22.04/24.04 VMs on the same network — 1 central, 1 consumer, 2 providers (add one more VM via `--mocks` for the eco/latency strategies). Then, from a control host:
 
 ```bash
 # Bring up the whole demo in one command — installs tooling, then k3s,
@@ -121,9 +139,10 @@ Issues and pull requests are welcome. We follow the standard *fork → branch �
 
 ---
 
-## Reference
+## References
 
-Based on the paper *"Dynamic Multi-Provider Cluster Autoscaling For The Computing Continuum"*, ACM SAC 2025.
+- S. Galantino, R. Medina, A. Oliva, F. Risso, and G.  Frattini. "_Dynamic Multi-Provider Cluster Autoscaling For The Computing Continuum,_" in Proceedings of the 3rd International Workshop on Middleware for the Computing Continuum (Mid4CC '25), Nashville (TN), USA, December 2025, Association for Computing Machinery, New York, NY, USA, pages 1–6. https://doi.org/10.1145/3774898.3778037.
+- K. Bigdeli, "_Kubernetes Federation Autoscaler Demo_", July 2026, https://youtu.be/8KfzRoJ84qE?si=NVEyWtbOTlLVoViW.
 
 ---
 
