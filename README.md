@@ -30,15 +30,6 @@ Works from NATed / firewalled clusters: only the Broker needs a public endpoint;
 
 ![Architecture](docs/diagrams/architecture-diagram-2.svg)
 
-| Channel | Initiator | Transport |
-| --- | --- | --- |
-| CA ↔ gRPC Server | CA | gRPC, in-cluster |
-| gRPC Server ↔ Consumer Agent | gRPC Server | HTTP, in-cluster |
-| Consumer Agent ↔ Broker | **Consumer Agent only** | HTTPS + mTLS — 5 s polling + synchronous POSTs (heartbeat, reservations) |
-| Provider Agent ↔ Broker | **Provider Agent only** | HTTPS + mTLS — 5 s polling + synchronous POSTs (advertisements every 30 s) |
-| Agent → Mock servers | **Agent only** | HTTP (plain), agent-initiated — region-keyed carbon (mock-eco) + coordinates (mock-geo) for the eco/latency strategies |
-| Broker → any Agent | *never happens* | — |
-
 Full design, CRDs, API contracts, and execution flows: **[docs/design.md](docs/design.md)** (as-built — every section has an `Implemented in:` footer pointing at the canonical Go package).
 
 ---
