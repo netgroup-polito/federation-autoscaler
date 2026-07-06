@@ -38,8 +38,8 @@ Full design, CRDs, API contracts, and execution flows: **[docs/design.md](docs/d
 - A vanilla K8s cluster acting as consumer
 - A set of one or more vanilla K8s clusters acting as providers
 - The vanilla Kubernetes Cluster Autoscaler installed in the consumer cluster
-- The Consumer installed in the consumer cluster
-- The Provider installed in the consumer cluster
+- The consumer agent installed in the consumer cluster
+- The provider agent installed in the provider clusters
 - Liqo installed in all clusters
 - The Kubernetes Federation Broker running somewhere as a separated K8s cluster
 - Mock servers running on a separated K8s cluster (or a simple machine) in case the policies are used
