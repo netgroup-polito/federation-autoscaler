@@ -54,7 +54,8 @@ federation-autoscaler/
 ├── cmd/            # broker, agent, grpc-server, mock-eco, mock-geo entrypoints
 ├── config/         # kustomize overlays (broker, agent/{base,consumer,provider}, grpc-server, mock-eco, mock-geo, default meta)
 ├── deploy/
-│   └── ansible/    # 4-host k3s demo install: playbooks, roles, demo-up.sh, burst-workload sample
+│   ├── ansible/    # 4-host k3s demo install: playbooks, roles, demo-up.sh (one-command), samples
+│   └── standalone/ # per-cluster deploy scripts (no Ansible / no cert-manager); one script per role + join bundles
 ├── docs/           # design.md (as-built), diagrams/
 ├── hack/           # development scripts
 ├── internal/       # controllers, broker REST API, agent core, gRPC server
@@ -70,18 +71,25 @@ federation-autoscaler/
 
 ## Quick start
 
-You need FOUR Ubuntu 22.04/24.04 VMs on the same network — 1 central, 1 consumer, 2 providers (add one more VM via `--mocks` for the eco/latency strategies). Then, from a control host:
+Pick the path that matches your setup — each has its own step-by-step guide:
 
-```bash
-# Bring up the whole demo in one command — installs tooling, then k3s,
-# cert-manager, Liqo, broker, agents, grpc-server and Cluster Autoscaler
-# on every VM:
-curl -fsSL https://raw.githubusercontent.com/netgroup-polito/federation-autoscaler/main/deploy/ansible/scripts/demo-up.sh -o demo-up.sh
-chmod +x demo-up.sh
-./demo-up.sh --central <ip> --consumers <ip> --providers <ip>,<ip>
-#   add --tag v0.X.Y to deploy a specific image tag (default: repo's fa_tag)
-#   add --mocks <ip>  to stand up the mock cluster the eco/latency strategies need
-```
+- **[deploy/standalone/README.md](deploy/standalone/README.md)** — *standalone,
+  per-cluster.* For real deployments where the central, provider, consumer, and
+  mock clusters are each administered separately: **one script per role**, run by
+  that cluster's own admin against its already-running cluster — no shared control
+  host, no Ansible, no cert-manager. Central mints a signed join-bundle per
+  participant.
+- **[deploy/ansible/scripts/README.md](deploy/ansible/scripts/README.md)** —
+  *one-command demo.* From a single control host, `demo-up.sh` installs the
+  tooling, generates the inventory from the IPs you pass, distributes your SSH
+  key, and runs the whole Ansible install end-to-end. The fastest path to a
+  working demo on a set of fresh Ubuntu VMs.
+- **[deploy/ansible/README.md](deploy/ansible/README.md)** — *Ansible, step by
+  step.* The same install driven playbook-by-playbook (bootstrap → deploy →
+  verify → teardown), with hardware/network requirements, tunable variables, the
+  demo scenarios, and troubleshooting.
+
+All three paths converge on the same running federation and the same browser UIs:
 
 ### Dashboards
 
@@ -112,13 +120,10 @@ kubectl --kubeconfig ~/.kube/consumer-1.yaml apply  -f ~/federation-autoscaler/d
 kubectl --kubeconfig ~/.kube/consumer-1.yaml delete -f ~/federation-autoscaler/deploy/ansible/samples/burst-workload.yaml
 ```
 
-For the detailed setup — hardware and network requirements, the playbook-by-playbook manual install, tuning variables, troubleshooting — see **[deploy/ansible/README.md](deploy/ansible/README.md)**.
-
 ---
 
 ## Documentation
 
-- **[deploy/ansible/README.md](deploy/ansible/README.md)** — install + demo guide (hardware/network requirements, the four playbooks step by step, running the demo, troubleshooting).
 - **[docs/design.md](docs/design.md)** — full architectural proposal (v3.2, as-built) with `Implemented in:` footers.
 - **[docs/diagrams/](docs/diagrams/)** — Mermaid sources + PNG renderings of the architecture / registration / scale-up / scale-down flows.
 
