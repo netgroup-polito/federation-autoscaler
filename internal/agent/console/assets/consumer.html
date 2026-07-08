@@ -147,6 +147,22 @@
         </div>
       </div>
     </section>
+
+    <!-- Manual reservation -->
+    <section>
+      <h2>Manual reservation</h2>
+      <p class="hint">Reserve federated capacity up front — no pending pods needed. Each reservation is sized into whole chunks and peered on a broker-chosen provider. Release a specific one from the list.</p>
+      <div class="row">
+        <label>CPU <input type="text" id="mrCpu" placeholder="e.g. 4" style="width:6rem"></label>
+        <label>Memory <input type="text" id="mrMem" placeholder="e.g. 8Gi" style="width:7rem"></label>
+        <label>GPU <input type="text" id="mrGpu" placeholder="opt." style="width:4.5rem"></label>
+        <button id="mrApply">Reserve</button>
+      </div>
+      <div class="row" style="margin-top:.6rem">
+        <select id="mrSelect" style="min-width:24rem"></select>
+        <button id="mrRelease">Release</button>
+      </div>
+    </section>
   </main>
 
   <div id="toast"></div>
@@ -261,6 +277,30 @@
       document.getElementById("wlReplicas").textContent = (wl.replicas != null ? String(wl.replicas) : "–");
       document.getElementById("wlRequests").textContent = fmtRes(wl.requests);
       document.getElementById("wlLimits").textContent = fmtRes(wl.limits);
+
+      const reservations = st.manualReservations || [];
+      const mrSel = document.getElementById("mrSelect");
+      const prev = mrSel.value;
+      mrSel.textContent = "";
+      if (!reservations.length) {
+        const o = document.createElement("option");
+        o.value = ""; o.textContent = "— no active reservations —";
+        mrSel.appendChild(o);
+        document.getElementById("mrRelease").disabled = true;
+      } else {
+        for (const rvn of reservations) {
+          const o = document.createElement("option");
+          o.value = rvn.name;
+          const size = [rvn.cpu ? rvn.cpu + " CPU" : null, rvn.memory, rvn.gpu ? rvn.gpu + " GPU" : null].filter(Boolean).join(" / ") || "—";
+          const bits = [rvn.phase || "—"];
+          if (rvn.provider) bits.push(rvn.provider);
+          if (rvn.chunks) bits.push(rvn.chunks + " chunk" + (rvn.chunks === 1 ? "" : "s"));
+          o.textContent = size + "  ·  " + bits.join(" · ");
+          mrSel.appendChild(o);
+        }
+        if (prev && reservations.some(r => r.name === prev)) mrSel.value = prev;
+        document.getElementById("mrRelease").disabled = false;
+      }
     }
 
     document.getElementById("policySubmit").onclick = async () => {
@@ -285,6 +325,28 @@
         toast(action === "apply" ? "Workload applied — scale-up begins shortly" : "Workload deleted — scale-down begins shortly");
         await loadState();
       } catch (e) { toast(e.message, true); await loadState(); }
+    };
+    document.getElementById("mrApply").onclick = async () => {
+      const cpu = document.getElementById("mrCpu").value.trim();
+      const memory = document.getElementById("mrMem").value.trim();
+      const gpu = document.getElementById("mrGpu").value.trim();
+      try {
+        await postJSON("/api/reservation", { action: "apply", cpu, memory, gpu });
+        toast("Reservation created — peering begins shortly");
+        document.getElementById("mrCpu").value = "";
+        document.getElementById("mrMem").value = "";
+        document.getElementById("mrGpu").value = "";
+        await loadState();
+      } catch (e) { toast(e.message, true); }
+    };
+    document.getElementById("mrRelease").onclick = async () => {
+      const name = document.getElementById("mrSelect").value;
+      if (!name) { toast("Select a reservation to release", true); return; }
+      try {
+        await postJSON("/api/reservation", { action: "delete", name });
+        toast("Reservation released — unpeering shortly");
+        await loadState();
+      } catch (e) { toast(e.message, true); }
     };
 
     (async () => {

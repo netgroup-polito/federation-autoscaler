@@ -20,12 +20,14 @@ import (
 	"context"
 	"fmt"
 	"net/http"
+	"sort"
 	"strings"
 
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/types"
+	ctrlclient "sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/yaml"
 
 	autoscalingv1alpha1 "github.com/netgroup-polito/federation-autoscaler/api/autoscaling/v1alpha1"
@@ -34,12 +36,27 @@ import (
 // consumerState is the GET /api/state body on a consumer; it lets the UI
 // pre-select the current policy/region and reflect the workload switch.
 type consumerState struct {
-	Role          string       `json:"role"`
-	ClusterID     string       `json:"clusterId"`
-	LiqoClusterID string       `json:"liqoClusterId"`
-	Policy        string       `json:"policy"`
-	Region        string       `json:"region"`
-	Workload      workloadInfo `json:"workload"`
+	Role               string                  `json:"role"`
+	ClusterID          string                  `json:"clusterId"`
+	LiqoClusterID      string                  `json:"liqoClusterId"`
+	Policy             string                  `json:"policy"`
+	Region             string                  `json:"region"`
+	Workload           workloadInfo            `json:"workload"`
+	ManualReservations []manualReservationInfo `json:"manualReservations"`
+}
+
+// manualReservationInfo is one console-managed ResourceRequest (manual
+// reservation), surfaced so the UI can list active reservations and release a
+// chosen one by name.
+type manualReservationInfo struct {
+	Name     string `json:"name"`
+	Phase    string `json:"phase,omitempty"`
+	Provider string `json:"provider,omitempty"`
+	Chunks   int32  `json:"chunks,omitempty"`
+	Message  string `json:"message,omitempty"`
+	CPU      string `json:"cpu,omitempty"`
+	Memory   string `json:"memory,omitempty"`
+	GPU      string `json:"gpu,omitempty"`
 }
 
 // providerState is the GET /api/state body on a provider.
@@ -64,12 +81,13 @@ func (s *Server) handleState(w http.ResponseWriter, r *http.Request) {
 		}
 		info.Present = s.workloadPresent(ctx)
 		s.writeJSON(w, http.StatusOK, consumerState{
-			Role:          RoleConsumer,
-			ClusterID:     s.clusterID,
-			LiqoClusterID: s.liqoClusterID,
-			Policy:        s.readPolicy(ctx),
-			Region:        region,
-			Workload:      info,
+			Role:               RoleConsumer,
+			ClusterID:          s.clusterID,
+			LiqoClusterID:      s.liqoClusterID,
+			Policy:             s.readPolicy(ctx),
+			Region:             region,
+			Workload:           info,
+			ManualReservations: s.listManualReservations(ctx),
 		})
 		return
 	}
@@ -81,6 +99,43 @@ func (s *Server) handleState(w http.ResponseWriter, r *http.Request) {
 		Region:        region,
 		Capacity:      s.readCapacity(ctx),
 	})
+}
+
+// listManualReservations returns all console-managed ResourceRequests in the
+// agent namespace (sorted by name) so the UI can list active reservations and
+// release a chosen one. Hand-created ResourceRequests (no console label) are
+// omitted — the console manages only what it created.
+func (s *Server) listManualReservations(ctx context.Context) []manualReservationInfo {
+	var list autoscalingv1alpha1.ResourceRequestList
+	if err := s.local.List(ctx, &list,
+		ctrlclient.InNamespace(s.ns),
+		ctrlclient.MatchingLabels{consoleManagedLabel: consoleManagedValue}); err != nil {
+		s.log.V(1).Info("list manual reservations failed", "err", err.Error())
+		return nil
+	}
+	out := make([]manualReservationInfo, 0, len(list.Items))
+	for i := range list.Items {
+		rr := &list.Items[i]
+		info := manualReservationInfo{
+			Name:     rr.Name,
+			Phase:    string(rr.Status.Phase),
+			Provider: rr.Status.ProviderClusterID,
+			Chunks:   rr.Status.ChunkCount,
+			Message:  rr.Status.Message,
+		}
+		if q, ok := rr.Spec.Resources[corev1.ResourceCPU]; ok {
+			info.CPU = q.String()
+		}
+		if q, ok := rr.Spec.Resources[corev1.ResourceMemory]; ok {
+			info.Memory = q.String()
+		}
+		if q, ok := rr.Spec.Resources[manualReservationGPU]; ok {
+			info.GPU = q.String()
+		}
+		out = append(out, info)
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].Name < out[j].Name })
+	return out
 }
 
 // readPolicy returns the current `default` ConsumerPolicy type, or "" when the

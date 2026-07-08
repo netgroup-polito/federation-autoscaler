@@ -260,6 +260,70 @@ func TestWorkloadApplyDelete(t *testing.T) {
 	wantStatus(t, post(t, ts, "/api/workload", `{"action":"delete"}`), http.StatusOK)
 }
 
+// --- Manual reservation (apply / delete) -------------------------------------
+
+func TestReservationApplyDelete(t *testing.T) {
+	fc, ts := newTestServer(t, RoleConsumer)
+	ctx := context.Background()
+	listReservations := func() []autoscalingv1alpha1.ResourceRequest {
+		var l autoscalingv1alpha1.ResourceRequestList
+		if err := fc.List(ctx, &l, ctrlclient.InNamespace(testNS)); err != nil {
+			t.Fatalf("list: %v", err)
+		}
+		return l.Items
+	}
+
+	// apply creates a NEW, labelled ResourceRequest with the requested resources.
+	wantStatus(t, post(t, ts, "/api/reservation", `{"action":"apply","cpu":"4","memory":"8Gi"}`), http.StatusOK)
+	items := listReservations()
+	if len(items) != 1 {
+		t.Fatalf("want 1 reservation after apply, got %d", len(items))
+	}
+	rr := items[0]
+	if rr.Labels[consoleManagedLabel] != consoleManagedValue {
+		t.Errorf("missing console label: %v", rr.Labels)
+	}
+	if q := rr.Spec.Resources[corev1.ResourceCPU]; q.String() != "4" {
+		t.Errorf("cpu = %s, want 4", q.String())
+	}
+	if q := rr.Spec.Resources[corev1.ResourceMemory]; q.String() != "8Gi" {
+		t.Errorf("memory = %s, want 8Gi", q.String())
+	}
+	firstName := rr.Name
+
+	// a second apply creates a SECOND reservation (not an update-in-place).
+	wantStatus(t, post(t, ts, "/api/reservation", `{"action":"apply","cpu":"2"}`), http.StatusOK)
+	if n := len(listReservations()); n != 2 {
+		t.Fatalf("want 2 reservations after second apply, got %d", n)
+	}
+
+	// invalid quantity and empty request are rejected.
+	wantStatus(t, post(t, ts, "/api/reservation", `{"action":"apply","cpu":"bad!"}`), http.StatusBadRequest)
+	wantStatus(t, post(t, ts, "/api/reservation", `{"action":"apply"}`), http.StatusBadRequest)
+
+	// delete requires a name; releasing by name removes exactly that one.
+	wantStatus(t, post(t, ts, "/api/reservation", `{"action":"delete"}`), http.StatusBadRequest)
+	wantStatus(t, post(t, ts, "/api/reservation", `{"action":"delete","name":"`+firstName+`"}`), http.StatusOK)
+	items = listReservations()
+	if len(items) != 1 {
+		t.Fatalf("want 1 reservation after release, got %d", len(items))
+	}
+	if items[0].Name == firstName {
+		t.Errorf("released the wrong reservation: %s still present", firstName)
+	}
+
+	// the state endpoint lists the remaining reservation.
+	var st consumerState
+	getJSON(t, ts, "/api/state", &st)
+	if len(st.ManualReservations) != 1 {
+		t.Errorf("state manualReservations = %d, want 1", len(st.ManualReservations))
+	}
+
+	// provider role has no manual-reservation endpoint.
+	_, tsP := newTestServer(t, RoleProvider)
+	wantStatus(t, post(t, tsP, "/api/reservation", `{"action":"apply","cpu":"1"}`), http.StatusMethodNotAllowed)
+}
+
 // --- GET /api/state ----------------------------------------------------------
 
 func TestStateConsumer(t *testing.T) {

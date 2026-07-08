@@ -11,6 +11,8 @@ rules:
   verbs:
   - get
   - list
+  - patch
+  - update
   - watch
 - apiGroups:
   - ""
@@ -26,6 +28,7 @@ rules:
   resources:
   - providerinstructions
   - reservationinstructions
+  - resourcerequests
   - virtualnodestates
   verbs:
   - create
@@ -40,6 +43,7 @@ rules:
   resources:
   - providerinstructions/finalizers
   - reservationinstructions/finalizers
+  - resourcerequests/finalizers
   - virtualnodestates/finalizers
   verbs:
   - update
@@ -48,6 +52,7 @@ rules:
   resources:
   - providerinstructions/status
   - reservationinstructions/status
+  - resourcerequests/status
   - virtualnodestates/status
   verbs:
   - get

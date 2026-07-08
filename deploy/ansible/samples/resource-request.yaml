@@ -1,0 +1,28 @@
+# Manually reserve federated capacity BEFORE any pending pods exist — to
+# pre-provision ahead of a known spike, run a batch job that knows its shape, or
+# test the federation without the autoscaler. Apply on the CONSUMER cluster:
+#
+#   kubectl --kubeconfig ~/.kube/consumer-1.yaml apply -f samples/resource-request.yaml
+#
+# The grpc-server's controller sizes this into whole node-sized chunks, reserves
+# them on a broker-chosen provider (honouring this consumer's ConsumerPolicy,
+# exactly like the autoscaler path), and drives the Liqo peering. Watch it:
+#
+#   kubectl --kubeconfig ~/.kube/consumer-1.yaml get resourcerequests
+#   # Phase: Pending -> Reserved; the Provider and Chunks columns fill in.
+#
+# DELETE it to release — unpeer + free the capacity, with no leak:
+#   kubectl --kubeconfig ~/.kube/consumer-1.yaml delete -f samples/resource-request.yaml
+apiVersion: autoscaling.federation-autoscaler.io/v1alpha1
+kind: ResourceRequest
+metadata:
+  name: preprovision
+  namespace: default
+spec:
+  # Total capacity to reserve; rounded UP to whole chunks (a chunk is ~2 vCPU / 4 GiB).
+  resources:
+    cpu: "4"
+    memory: 8Gi
+  # Optional (recorded but not yet enforced in v1):
+  # duration: "2h"   # lifetime hint; the global --reservation-timeout applies for now
+  # priority: 10     # reserved for the standard composite policy (feature 3)

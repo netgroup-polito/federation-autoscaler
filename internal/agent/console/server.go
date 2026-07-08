@@ -26,6 +26,7 @@ limitations under the License.
 //	  POST /api/policy    create/update/delete the `default` ConsumerPolicy
 //	  POST /api/region    upsert the agent-location ConfigMap
 //	  POST /api/workload  apply/delete the federation-demo burst workload
+//	  POST /api/reservation apply/delete the console-managed ResourceRequest
 //	provider role:
 //	  POST /api/prices    upsert the agent-prices ConfigMap
 //	  POST /api/region    upsert the agent-location ConfigMap
@@ -95,6 +96,18 @@ const (
 	// hand-created sibling CR would still influence placement; the console only
 	// owns this one (the heartbeat picks the lowest-named CR).
 	consumerPolicyName = "default"
+
+	// manualReservationPrefix is the generateName prefix for console-created
+	// ResourceRequests (each Reserve makes a new, uniquely-named one so several
+	// can coexist and be released individually).
+	manualReservationPrefix = "manual-res-"
+	// consoleManagedLabel/Value tag the ResourceRequests the console creates, so
+	// the release dropdown lists only those and a release never touches a
+	// hand-created request.
+	consoleManagedLabel = "federation-autoscaler.io/console"
+	consoleManagedValue = "manual-reservation"
+	// manualReservationGPU is the GPU resource key on a manual reservation.
+	manualReservationGPU corev1.ResourceName = "nvidia.com/gpu"
 )
 
 //go:embed assets/consumer.html
@@ -215,6 +228,7 @@ func (s *Server) handler() http.Handler {
 	case RoleConsumer:
 		mux.HandleFunc("POST /api/policy", s.handlePolicy)
 		mux.HandleFunc("POST /api/workload", s.handleWorkload)
+		mux.HandleFunc("POST /api/reservation", s.handleReservation)
 	case RoleProvider:
 		mux.HandleFunc("POST /api/prices", s.handlePrices)
 		mux.HandleFunc("POST /api/capacity", s.handleCapacity)
@@ -359,6 +373,103 @@ func (s *Server) handleWorkload(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	s.ok(w)
+}
+
+// handleReservation creates or releases a console-managed ResourceRequest
+// (manual reservation). "apply" creates a NEW, uniquely-named request from the
+// requested cpu/memory/gpu (so several can coexist) and the grpc-server
+// controller reserves + peers it; "delete" releases the one named in the body
+// (from the release dropdown) so the finalizer frees it. Consumer-only.
+func (s *Server) handleReservation(w http.ResponseWriter, r *http.Request) {
+	if s.role != RoleConsumer {
+		s.writeError(w, http.StatusMethodNotAllowed, "manual reservation is a consumer-only action")
+		return
+	}
+	var body struct {
+		Action   string `json:"action"`
+		Name     string `json:"name"`
+		CPU      string `json:"cpu"`
+		Memory   string `json:"memory"`
+		GPU      string `json:"gpu"`
+		Duration string `json:"duration"`
+		Priority int32  `json:"priority"`
+	}
+	if !s.decode(w, r, &body) {
+		return
+	}
+	switch body.Action {
+	case "apply":
+		res := corev1.ResourceList{}
+		for _, kv := range []struct {
+			name corev1.ResourceName
+			val  string
+		}{{corev1.ResourceCPU, body.CPU}, {corev1.ResourceMemory, body.Memory}, {manualReservationGPU, body.GPU}} {
+			v := strings.TrimSpace(kv.val)
+			if v == "" {
+				continue
+			}
+			q, err := resource.ParseQuantity(v)
+			if err != nil {
+				s.writeError(w, http.StatusBadRequest, fmt.Sprintf("invalid %s quantity %q: %v", kv.name, v, err))
+				return
+			}
+			res[kv.name] = q
+		}
+		if len(res) == 0 {
+			s.writeError(w, http.StatusBadRequest, "at least one of cpu/memory/gpu is required")
+			return
+		}
+		if err := s.createManualReservation(r.Context(), res, strings.TrimSpace(body.Duration), body.Priority); err != nil {
+			s.writeError(w, http.StatusInternalServerError, "apply reservation: "+err.Error())
+			return
+		}
+	case "delete":
+		name := strings.TrimSpace(body.Name)
+		if name == "" {
+			s.writeError(w, http.StatusBadRequest, "name is required to release a reservation")
+			return
+		}
+		if err := s.releaseManualReservation(r.Context(), name); err != nil {
+			s.writeError(w, http.StatusInternalServerError, "release reservation: "+err.Error())
+			return
+		}
+	default:
+		s.writeError(w, http.StatusBadRequest, fmt.Sprintf("unknown action %q (want apply|delete)", body.Action))
+		return
+	}
+	s.ok(w)
+}
+
+// createManualReservation creates a new, uniquely-named, console-labelled
+// ResourceRequest so multiple manual reservations can coexist.
+func (s *Server) createManualReservation(ctx context.Context, res corev1.ResourceList, duration string, priority int32) error {
+	rr := &autoscalingv1alpha1.ResourceRequest{
+		ObjectMeta: metav1.ObjectMeta{
+			GenerateName: manualReservationPrefix,
+			Namespace:    s.ns,
+			Labels:       map[string]string{consoleManagedLabel: consoleManagedValue},
+		},
+		Spec: autoscalingv1alpha1.ResourceRequestSpec{Resources: res, Duration: duration, Priority: priority},
+	}
+	return s.local.Create(ctx, rr)
+}
+
+// releaseManualReservation deletes the named ResourceRequest, but only if the
+// console created it (label guard) — so a crafted request can't release a
+// hand-created one. Deleting a not-found request is a no-op.
+func (s *Server) releaseManualReservation(ctx context.Context, name string) error {
+	var rr autoscalingv1alpha1.ResourceRequest
+	err := s.local.Get(ctx, types.NamespacedName{Namespace: s.ns, Name: name}, &rr)
+	if apierrors.IsNotFound(err) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	if rr.Labels[consoleManagedLabel] != consoleManagedValue {
+		return fmt.Errorf("reservation %q is not managed by the console", name)
+	}
+	return s.local.Delete(ctx, &rr)
 }
 
 // handlePrices upserts the agent-prices ConfigMap. Values are unit prices

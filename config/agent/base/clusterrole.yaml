@@ -207,6 +207,21 @@ rules:
   - update
   - patch
   - delete
+# ResourceRequest is the user-created manual-reservation CRD. The consumer config
+# console creates/deletes one when the operator drives a manual reservation in
+# the browser (the grpc-server controller reconciles it into a reservation).
+- apiGroups:
+  - autoscaling.federation-autoscaler.io
+  resources:
+  - resourcerequests
+  verbs:
+  - get
+  - list
+  - watch
+  - create
+  - update
+  - patch
+  - delete
 # --- Liqo CRs (consumer role) -------------------------------------------
 # `liqoctl unpeer` starts with a "bidirectional peering check" that LISTS
 # foreignclusters.core.liqo.io at cluster scope; without this the Unpeer

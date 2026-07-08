@@ -5,6 +5,7 @@ resources:
 - bases/broker.federation-autoscaler.io_clusteradvertisements.yaml
 - bases/broker.federation-autoscaler.io_reservations.yaml
 - bases/autoscaling.federation-autoscaler.io_virtualnodestates.yaml
+- bases/autoscaling.federation-autoscaler.io_resourcerequests.yaml
 - bases/autoscaling.federation-autoscaler.io_providerinstructions.yaml
 - bases/autoscaling.federation-autoscaler.io_reservationinstructions.yaml
 - bases/autoscaling.federation-autoscaler.io_consumerpolicies.yaml

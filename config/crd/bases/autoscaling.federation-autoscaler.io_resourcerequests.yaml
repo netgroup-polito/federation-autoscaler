@@ -1,0 +1,127 @@
+---
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  annotations:
+    controller-gen.kubebuilder.io/version: v0.19.0
+  name: resourcerequests.autoscaling.federation-autoscaler.io
+spec:
+  group: autoscaling.federation-autoscaler.io
+  names:
+    kind: ResourceRequest
+    listKind: ResourceRequestList
+    plural: resourcerequests
+    shortNames:
+    - rr
+    singular: resourcerequest
+  scope: Namespaced
+  versions:
+  - additionalPrinterColumns:
+    - jsonPath: .status.phase
+      name: Phase
+      type: string
+    - jsonPath: .status.providerClusterId
+      name: Provider
+      type: string
+    - jsonPath: .status.chunkCount
+      name: Chunks
+      type: integer
+    - jsonPath: .metadata.creationTimestamp
+      name: Age
+      type: date
+    name: v1alpha1
+    schema:
+      openAPIV3Schema:
+        description: |-
+          ResourceRequest is a consumer-cluster-local, user-created request for
+          federated capacity — a manual reservation. It reuses the exact reservation +
+          Liqo-peering path the Cluster Autoscaler drives, so applying it peers with a
+          broker-chosen provider and deleting it releases the capacity. It lives only on
+          the consumer cluster; the grpc-server controller drives it via the co-located
+          consumer agent's loopback API (the agent-initiated, no-broker-dial-in model).
+        properties:
+          apiVersion:
+            description: |-
+              APIVersion defines the versioned schema of this representation of an object.
+              Servers should convert recognized schemas to the latest internal value, and
+              may reject unrecognized values.
+              More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#resources
+            type: string
+          kind:
+            description: |-
+              Kind is a string value representing the REST resource this object represents.
+              Servers may infer this from the endpoint the client submits requests to.
+              Cannot be updated.
+              In CamelCase.
+              More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#types-kinds
+            type: string
+          metadata:
+            type: object
+          spec:
+            description: spec is the desired capacity to reserve.
+            properties:
+              duration:
+                description: |-
+                  Duration is an optional lifetime hint as a Go duration string (e.g. "2h").
+                  v1 records it but does not yet enforce a per-request TTL — the broker's
+                  global --reservation-timeout applies; delete the ResourceRequest to release
+                  early. A future revision will translate this into a per-reservation expiry.
+                type: string
+              priority:
+                description: |-
+                  Priority is an optional preference (higher = preferred) reserved for the
+                  standard composite placement policy. v1 records it but does not yet act on
+                  it.
+                format: int32
+                type: integer
+              resources:
+                additionalProperties:
+                  anyOf:
+                  - type: integer
+                  - type: string
+                  pattern: ^(\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))(([KMGTPE]i)|[numkMGTPE]|([eE](\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))))?$
+                  x-kubernetes-int-or-string: true
+                description: |-
+                  Resources is the total capacity to reserve (cpu / memory / nvidia.com/gpu).
+                  The controller rounds each resource UP to whole node-sized chunks, because
+                  capacity is only ever borrowed a node at a time. At least one resource must
+                  be set.
+                type: object
+            required:
+            - resources
+            type: object
+          status:
+            description: status is the controller's observed state.
+            properties:
+              chunkCount:
+                description: ChunkCount is the number of node-sized chunks reserved.
+                format: int32
+                type: integer
+              lastTransitionTime:
+                description: LastTransitionTime is when Phase last changed.
+                format: date-time
+                type: string
+              message:
+                description: Message is a human-readable status detail (e.g. why it
+                  is still Pending).
+                type: string
+              phase:
+                description: Phase is the coarse lifecycle state.
+                type: string
+              providerClusterId:
+                description: ProviderClusterID is the provider the broker chose for
+                  this request.
+                type: string
+              reservationId:
+                description: |-
+                  ReservationID is the broker reservation this request created (deterministic:
+                  "mr-<uid>"), used to release it on delete.
+                type: string
+            type: object
+        required:
+        - spec
+        type: object
+    served: true
+    storage: true
+    subresources:
+      status: {}

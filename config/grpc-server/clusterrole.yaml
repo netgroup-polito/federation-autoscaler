@@ -1,9 +1,10 @@
 # gRPC server ClusterRole.
 #
-# Strictly narrower than the broker / agent roles — the gRPC server reconciles
-# exactly ONE CRD (VirtualNodeState on the consumer cluster) and otherwise only
-# READS Liqo / core resources. Every grant below matches a //+kubebuilder:rbac
-# directive in internal/controller/autoscaling/virtualnodestate_controller.go.
+# Narrower than the broker / agent roles — on the consumer cluster the gRPC
+# server reconciles the VirtualNodeState CRD and the user-created ResourceRequest
+# CRD (manual reservations), and otherwise only READS Liqo / core resources.
+# Every grant below matches a //+kubebuilder:rbac directive in
+# internal/controller/autoscaling/{virtualnodestate,resourcerequest}_controller.go.
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRole
 metadata:
@@ -39,6 +40,32 @@ rules:
   verbs:
   - update
 - apiGroups:
+  - autoscaling.federation-autoscaler.io
+  resources:
+  - resourcerequests
+  verbs:
+  - get
+  - list
+  - watch
+  - create
+  - update
+  - patch
+  - delete
+- apiGroups:
+  - autoscaling.federation-autoscaler.io
+  resources:
+  - resourcerequests/status
+  verbs:
+  - get
+  - update
+  - patch
+- apiGroups:
+  - autoscaling.federation-autoscaler.io
+  resources:
+  - resourcerequests/finalizers
+  verbs:
+  - update
+- apiGroups:
   - ""
   resources:
   - nodes
@@ -46,6 +73,11 @@ rules:
   - get
   - list
   - watch
+  # update/patch: the ResourceRequest controller sets the CA
+  # scale-down-disabled annotation on a manual reservation's node(s) so the
+  # autoscaler does not reclaim the empty (pod-less) borrowed node.
+  - update
+  - patch
 - apiGroups:
   - ""
   resources:

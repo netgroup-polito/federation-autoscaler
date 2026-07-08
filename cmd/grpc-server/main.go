@@ -95,6 +95,18 @@ func main() {
 		os.Exit(1)
 	}
 
+	// Build the typed agent client (step 10b) so the gRPC RPCs — and the
+	// ResourceRequest controller below — can proxy to the co-located Consumer
+	// Agent's loopback REST.
+	agent, err := agentclient.New(agentclient.Options{
+		BaseURL: agentLocalAPIURL,
+		Logger:  ctrl.Log.WithName("grpc-agentclient"),
+	})
+	if err != nil {
+		setupLog.Error(err, "unable to build agent client")
+		os.Exit(1)
+	}
+
 	if err := (&autoscalingcontroller.VirtualNodeStateReconciler{
 		Client: mgr.GetClient(),
 		Scheme: mgr.GetScheme(),
@@ -103,14 +115,15 @@ func main() {
 		os.Exit(1)
 	}
 
-	// Build the typed agent client (step 10b) so the gRPC RPCs can
-	// proxy to the co-located Consumer Agent's loopback REST.
-	agent, err := agentclient.New(agentclient.Options{
-		BaseURL: agentLocalAPIURL,
-		Logger:  ctrl.Log.WithName("grpc-agentclient"),
-	})
-	if err != nil {
-		setupLog.Error(err, "unable to build agent client")
+	// The ResourceRequest controller turns user-created manual reservations into
+	// the same broker reservation + Liqo peering the autoscaler path drives, via
+	// the agent loopback (feature: manual reservations).
+	if err := (&autoscalingcontroller.ResourceRequestReconciler{
+		Client: mgr.GetClient(),
+		Scheme: mgr.GetScheme(),
+		Agent:  agent,
+	}).SetupWithManager(mgr); err != nil {
+		setupLog.Error(err, "unable to create controller", "controller", "ResourceRequest")
 		os.Exit(1)
 	}
 
