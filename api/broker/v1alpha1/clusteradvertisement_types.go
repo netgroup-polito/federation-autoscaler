@@ -109,6 +109,13 @@ type ClusterAdvertisementSpec struct {
 	// Broker never re-derives Resources from it.
 	// +optional
 	CapacityFixed corev1.ResourceList `json:"capacityFixed,omitempty"`
+
+	// Renewable is the provider admin's self-declaration that this cluster runs on
+	// renewable energy. Honour-system (the Broker does not verify it). The standard
+	// composite default policy gives renewable providers a placement bonus; other
+	// policies ignore it. false/unset ⇒ no bonus.
+	// +optional
+	Renewable bool `json:"renewable,omitempty"`
 }
 
 // ClusterAdvertisementStatus is the Broker's observed view of the advertisement.

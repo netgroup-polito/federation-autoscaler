@@ -123,6 +123,13 @@ spec:
                   Agents use this value when executing liqoctl peer.
                 minLength: 1
                 type: string
+              renewable:
+                description: |-
+                  Renewable is the provider admin's self-declaration that this cluster runs on
+                  renewable energy. Honour-system (the Broker does not verify it). The standard
+                  composite default policy gives renewable providers a placement bonus; other
+                  policies ignore it. false/unset ⇒ no bonus.
+                type: boolean
               resources:
                 description: Resources is the currently allocatable capacity donated
                   by the provider.

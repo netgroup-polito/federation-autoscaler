@@ -44,6 +44,20 @@ func stdAdvAt(name string, reserved int32, lat, lon float64) *brokerv1alpha1.Clu
 	return a
 }
 
+// stdAdvRenewable is stdAdv with the provider's self-declared renewable flag set
+// (the standard composite policy's bonus input).
+func stdAdvRenewable(name string, reserved int32, renewable bool) *brokerv1alpha1.ClusterAdvertisement {
+	a := stdAdv(name, reserved, nil)
+	a.Spec.Renewable = renewable
+	return a
+}
+
+// withStandardPolicy records an explicit Standard-preferring heartbeat.
+func withStandardPolicy(s *Server) {
+	s.consumers.Touch(consumerCluster, "liqo-c",
+		autoscalingv1alpha1.PlacementPolicy{Type: autoscalingv1alpha1.PlacementStrategyStandard}, "", nil, nil)
+}
+
 func withEcoPolicy(s *Server) {
 	s.consumers.Touch(consumerCluster, "liqo-c",
 		autoscalingv1alpha1.PlacementPolicy{Type: autoscalingv1alpha1.PlacementStrategyEco}, "", nil, nil)
@@ -67,11 +81,16 @@ func withLatencyPolicyNoLocation(s *Server) {
 // when an Eco policy is set AND a carbon-bearing provider has capacity; lowest
 // carbon wins and carbon-less providers are a last resort.
 func TestNodeGroupsEcoPreference(t *testing.T) {
-	t.Run("no policy, carbon set -> all exposed (carbon inert)", func(t *testing.T) {
-		s := newDashboardTestServer(t, stdAdvCarbon("p-green", 0, 25), stdAdvCarbon("p-dirty", 0, 650))
+	t.Run("no policy -> Standard composite ignores carbon; most-free grows", func(t *testing.T) {
+		// p-green is greener but LESS free; without an Eco policy the composite
+		// ignores carbon and grows the more-free (dirtier) provider.
+		s := newDashboardTestServer(t, stdAdvCarbon("p-green", 2, 25), stdAdvCarbon("p-dirty", 0, 650))
 		hr := headroomByProvider(callNodeGroups(t, s))
-		if hr["p-green"] != 3 || hr["p-dirty"] != 3 {
-			t.Errorf("without a policy carbon must not narrow; got %+v", hr)
+		if hr["p-dirty"] == 0 {
+			t.Errorf("without an Eco policy carbon must be inert; composite grows the most-free provider; got %+v", hr)
+		}
+		if hr["p-green"] != 0 {
+			t.Errorf("greener-but-less-free provider must be masked; got %+v", hr)
 		}
 	})
 
@@ -154,6 +173,57 @@ func TestNodeGroupsLatencyPreference(t *testing.T) {
 		}
 		if hr["p-far"] != 3 {
 			t.Errorf("next-closest must be promoted to growable; got %+v", hr)
+		}
+	})
+}
+
+// TestNodeGroupsStandardDefault covers the composite default (no ConsumerPolicy):
+// it always narrows to one grower — the most-free provider, with a renewable
+// tie-break — and an explicit "Standard" policy behaves identically.
+func TestNodeGroupsStandardDefault(t *testing.T) {
+	t.Run("most-free provider grows (spread load)", func(t *testing.T) {
+		// No Touch → no policy → Standard composite. p-idle is more free.
+		s := newDashboardTestServer(t, stdAdv("p-busy", 2, nil), stdAdv("p-idle", 0, nil))
+		hr := headroomByProvider(callNodeGroups(t, s))
+		if hr["p-idle"] == 0 {
+			t.Errorf("most-free provider must grow; got %+v", hr)
+		}
+		if hr["p-busy"] != 0 {
+			t.Errorf("busier provider must be masked; got %+v", hr)
+		}
+	})
+
+	t.Run("renewable breaks a capacity tie", func(t *testing.T) {
+		// Equal free capacity ⇒ the renewable bonus decides.
+		s := newDashboardTestServer(t, stdAdvRenewable("p-grey", 0, false), stdAdvRenewable("p-clean", 0, true))
+		hr := headroomByProvider(callNodeGroups(t, s))
+		if hr["p-clean"] == 0 {
+			t.Errorf("renewable provider must win a capacity tie; got %+v", hr)
+		}
+		if hr["p-grey"] != 0 {
+			t.Errorf("non-renewable provider must be masked; got %+v", hr)
+		}
+	})
+
+	t.Run("more capacity outweighs the renewable bonus", func(t *testing.T) {
+		// p-clean is renewable but less free (0.8*1/3+0.2 = 0.467); p-grey is
+		// fully free but grey (0.8). Capacity wins.
+		s := newDashboardTestServer(t, stdAdvRenewable("p-clean", 2, true), stdAdvRenewable("p-grey", 0, false))
+		hr := headroomByProvider(callNodeGroups(t, s))
+		if hr["p-grey"] == 0 {
+			t.Errorf("much-more-free provider must beat renewable-but-less-free; got %+v", hr)
+		}
+		if hr["p-clean"] != 0 {
+			t.Errorf("renewable-but-less-free provider must be masked; got %+v", hr)
+		}
+	})
+
+	t.Run("explicit Standard policy behaves like the default", func(t *testing.T) {
+		s := newDashboardTestServer(t, stdAdv("p-busy", 2, nil), stdAdv("p-idle", 0, nil))
+		withStandardPolicy(s)
+		hr := headroomByProvider(callNodeGroups(t, s))
+		if hr["p-idle"] == 0 || hr["p-busy"] != 0 {
+			t.Errorf("explicit Standard must match the default; got %+v", hr)
 		}
 	})
 }

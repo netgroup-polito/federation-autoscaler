@@ -486,3 +486,34 @@ func getText(t *testing.T, ts *httptest.Server, path string) string {
 	_, _ = buf.ReadFrom(resp.Body)
 	return buf.String()
 }
+
+func TestRenewableToggle(t *testing.T) {
+	fc, ts := newTestServer(t, RoleProvider)
+	ctx := context.Background()
+	key := types.NamespacedName{Namespace: testNS, Name: renewableConfigMap}
+
+	wantStatus(t, post(t, ts, "/api/renewable", `{"renewable":true}`), http.StatusOK)
+	var cm corev1.ConfigMap
+	if err := fc.Get(ctx, key, &cm); err != nil {
+		t.Fatalf("get agent-renewable: %v", err)
+	}
+	if !strings.Contains(cm.Data[renewableKey], "renewable: true") {
+		t.Errorf("want renewable: true, got %q", cm.Data[renewableKey])
+	}
+	var st providerState
+	getJSON(t, ts, "/api/state", &st)
+	if !st.Renewable {
+		t.Error("state.renewable should be true")
+	}
+
+	// Clearing it flips the state back.
+	wantStatus(t, post(t, ts, "/api/renewable", `{"renewable":false}`), http.StatusOK)
+	getJSON(t, ts, "/api/state", &st)
+	if st.Renewable {
+		t.Error("state.renewable should be false after clearing")
+	}
+
+	// Consumer role has no renewable endpoint.
+	_, tsC := newTestServer(t, RoleConsumer)
+	wantStatus(t, post(t, tsC, "/api/renewable", `{"renewable":true}`), http.StatusMethodNotAllowed)
+}

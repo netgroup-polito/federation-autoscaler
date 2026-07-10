@@ -173,20 +173,29 @@ func TestNodeGroupsPricePreference(t *testing.T) {
 	cheapPrices := cpuMemPrices("0.01") // per-chunk cost 0.024
 	dearPrices := cpuMemPrices("0.05")  // per-chunk cost 0.104
 
-	t.Run("case 1: no policy, no prices → all exposed", func(t *testing.T) {
-		s := newDashboardTestServer(t, stdAdv("p-a", 0, nil), stdAdv("p-b", 0, nil))
+	t.Run("case 1: no policy → Standard composite grows the most-free provider", func(t *testing.T) {
+		// No Touch → no ConsumerPolicy → the Standard composite default, which
+		// narrows by remaining free capacity (p-free is more free than p-full).
+		s := newDashboardTestServer(t, stdAdv("p-full", 2, nil), stdAdv("p-free", 0, nil))
 		hr := headroomByProvider(callNodeGroups(t, s))
-		if hr["p-a"] != 3 || hr["p-b"] != 3 {
-			t.Errorf("expected both providers growable; got %+v", hr)
+		if hr["p-free"] == 0 {
+			t.Errorf("Standard default must grow the most-free provider; got %+v", hr)
+		}
+		if hr["p-full"] != 0 {
+			t.Errorf("less-free provider must be masked by the composite; got %+v", hr)
 		}
 	})
 
-	t.Run("case 2: no policy, prices set → still all exposed (prices inert)", func(t *testing.T) {
-		s := newDashboardTestServer(t, stdAdv("p-cheap", 0, cheapPrices), stdAdv("p-dear", 0, dearPrices))
-		// No Touch → consumer has no policy.
+	t.Run("case 2: no policy → prices are inert; composite (capacity) drives the choice", func(t *testing.T) {
+		// p-cheap is cheaper but LESS free; without a Price policy the composite
+		// ignores price and grows the more-free (dearer) provider.
+		s := newDashboardTestServer(t, stdAdv("p-cheap", 2, cheapPrices), stdAdv("p-dear", 0, dearPrices))
 		hr := headroomByProvider(callNodeGroups(t, s))
-		if hr["p-cheap"] != 3 || hr["p-dear"] != 3 {
-			t.Errorf("without a policy prices must not narrow; got %+v", hr)
+		if hr["p-dear"] == 0 {
+			t.Errorf("without a Price policy price must be inert; composite grows the most-free provider; got %+v", hr)
+		}
+		if hr["p-cheap"] != 0 {
+			t.Errorf("cheaper-but-less-free provider must be masked; got %+v", hr)
 		}
 	})
 

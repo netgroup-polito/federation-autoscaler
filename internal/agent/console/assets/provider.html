@@ -144,6 +144,16 @@
       </div>
       <div class="submit-row"><button id="capacitySubmit">Apply capacity</button></div>
     </section>
+
+    <!-- Renewable -->
+    <section>
+      <h2>Renewable energy</h2>
+      <p class="hint">Self-declare that this cluster runs on renewable energy — the default (Standard) placement policy gives renewable providers a small bonus. Honour-system; takes effect on the next advertisement (~30&nbsp;s).</p>
+      <div class="row">
+        <label><input type="checkbox" id="renewToggle"> Runs on renewable energy</label>
+        <button id="renewSubmit">Apply</button>
+      </div>
+    </section>
   </main>
 
   <div id="toast"></div>
@@ -251,6 +261,8 @@
 
       loadCap("cpu", st);
       loadCap("mem", st);
+
+      document.getElementById("renewToggle").checked = !!st.renewable;
     }
 
     for (const res of ["cpu", "mem"]) {
@@ -282,6 +294,14 @@
       try {
         await postJSON("/api/capacity", { cpu, memory });
         toast("Capacity applied — advertised within ~30 s");
+        await loadState();
+      } catch (e) { toast(e.message, true); }
+    };
+    document.getElementById("renewSubmit").onclick = async () => {
+      const renewable = document.getElementById("renewToggle").checked;
+      try {
+        await postJSON("/api/renewable", { renewable });
+        toast("Renewable flag " + (renewable ? "set" : "cleared") + " — advertised within ~30 s");
         await loadState();
       } catch (e) { toast(e.message, true); }
     };

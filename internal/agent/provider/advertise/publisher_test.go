@@ -539,3 +539,32 @@ func TestPublisher_ContextCancellation_StopsPromptly(t *testing.T) {
 		t.Fatal("Run did not return within 1s of ctx cancel")
 	}
 }
+
+func TestLoadRenewable(t *testing.T) {
+	write := func(body string) *Publisher {
+		t.Helper()
+		path := filepath.Join(t.TempDir(), "renewable.yaml")
+		if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
+			t.Fatalf("write: %v", err)
+		}
+		return &Publisher{renewableFile: path}
+	}
+	cases := []struct {
+		name string
+		p    *Publisher
+		want bool
+	}{
+		{"no file", &Publisher{}, false},
+		{"empty file", write(""), false},
+		{"renewable true", write("renewable: true\n"), true},
+		{"renewable false", write("renewable: false\n"), false},
+		{"unparseable", write("renewable: [\n"), false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := tc.p.loadRenewable(); got != tc.want {
+				t.Errorf("loadRenewable = %v, want %v", got, tc.want)
+			}
+		})
+	}
+}

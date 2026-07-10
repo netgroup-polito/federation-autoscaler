@@ -86,36 +86,39 @@ func (s *Server) handleNodeGroupsList(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Per-consumer placement preference: narrow to the single best provider with
-	// capacity within each chunk type, where "best" is cheapest (Price), greenest
-	// (Eco), or closest (Latency). No policy (or no qualifying provider with
-	// capacity) ⇒ no masking ⇒ today's behaviour.
+	// capacity within each chunk type. "best" is the composite Standard default
+	// (most free capacity, renewable bonus) when no policy is set, or cheapest
+	// (Price) / greenest (Eco) / closest (Latency) when one is.
 	consumerID := ClusterIDFromContext(ctx)
-	if entry, ok := s.consumers.Lookup(consumerID); ok && entry.Placement.Type != "" {
-		// In-flight reservations gate the "spill to the next-best" step so we
-		// don't prematurely expose a worse provider while the chosen one's chunk
-		// is still peering (CA would grab it and then have to unpeer it). The gate
-		// is policy-agnostic, so all three strategies share it.
-		inflight, err := s.inFlightByProvider(ctx, consumerID)
-		if err != nil {
-			s.log.Error(err, "list Reservations for placement gate failed", "requestId", requestID)
-			writeError(w, http.StatusInternalServerError, ErrorResponse{
-				Code: ErrCodeInternalError, Message: "reservation list failed", RequestID: requestID,
-			})
-			return
-		}
-		switch entry.Placement.Type {
-		case autoscalingv1alpha1.PlacementStrategyPrice:
-			applyPricePreference(views, costs, priced, inflight)
-		case autoscalingv1alpha1.PlacementStrategyEco:
-			applyEcoPreference(views, carbons, hasCarbon, inflight)
-		case autoscalingv1alpha1.PlacementStrategyLatency:
-			// Latency is a consumer↔provider PAIR metric: distance depends on the
-			// calling consumer's own location (from its heartbeat). If the consumer
-			// has not advertised a location, distances carry no usable value and the
-			// masking is a no-op (all providers stay exposed).
-			distances, hasDist := consumerProviderDistances(entry, avail)
-			applyLatencyPreference(views, distances, hasDist, inflight)
-		}
+	entry, _ := s.consumers.Lookup(consumerID) // zero ConsumerEntry ⇒ Standard default
+
+	// In-flight reservations gate the "spill to the next-best" step so we don't
+	// prematurely expose a worse provider while the chosen one's chunk is still
+	// peering (CA would grab it and then have to unpeer it). The gate is
+	// policy-agnostic, so every strategy shares it.
+	inflight, err := s.inFlightByProvider(ctx, consumerID)
+	if err != nil {
+		s.log.Error(err, "list Reservations for placement gate failed", "requestId", requestID)
+		writeError(w, http.StatusInternalServerError, ErrorResponse{
+			Code: ErrCodeInternalError, Message: "reservation list failed", RequestID: requestID,
+		})
+		return
+	}
+	switch entry.Placement.Type {
+	case autoscalingv1alpha1.PlacementStrategyPrice:
+		applyPricePreference(views, costs, priced, inflight)
+	case autoscalingv1alpha1.PlacementStrategyEco:
+		applyEcoPreference(views, carbons, hasCarbon, inflight)
+	case autoscalingv1alpha1.PlacementStrategyLatency:
+		// Latency is a consumer↔provider PAIR metric: distance depends on the
+		// calling consumer's own location (from its heartbeat). If the consumer
+		// has not advertised a location, distances carry no usable value and the
+		// masking is a no-op (all providers stay exposed).
+		distances, hasDist := consumerProviderDistances(entry, avail)
+		applyLatencyPreference(views, distances, hasDist, inflight)
+	default:
+		// Empty (no ConsumerPolicy) or "Standard" → the composite default.
+		applyStandardPreference(views, avail, inflight)
 	}
 
 	sort.SliceStable(views, func(i, j int) bool {
@@ -178,6 +181,46 @@ func applyEcoPreference(views []NodeGroupView, carbons []float64, hasCarbon []bo
 // masking at all (all providers stay exposed) — see consumerProviderDistances.
 func applyLatencyPreference(views []NodeGroupView, distances []float64, hasDist []bool, inflight map[string]bool) {
 	applyMetricPreference(views, distances, hasDist, inflight)
+}
+
+// standardCapacityWeight / standardRenewableWeight are the composite Standard
+// policy's blend: mostly remaining free capacity (spread load across providers),
+// plus a bonus for self-declared renewable-energy providers. Highest score wins.
+const (
+	standardCapacityWeight  = 0.8
+	standardRenewableWeight = 0.2
+)
+
+// applyStandardPreference masks the node-group view for a consumer with no
+// explicit policy (the Standard composite default). It scores every provider by
+// standardCapacityWeight·freeFraction + standardRenewableWeight·renewable
+// (higher = better, so it spreads load and prefers greener providers) and feeds
+// (1 − score) — lower wins — through the shared greedy masking, so the Cluster
+// Autoscaler grows the single best provider (spilling to the next-best as each
+// fills). Unlike the single-metric policies EVERY provider has a score, so this
+// always narrows to one grower rather than exposing all.
+//
+// avail[i] is the advertisement behind views[i]; free capacity uses the same
+// TotalChunks/ReservedChunks the view carries so a just-reserved chunk lowers the
+// score and the next call naturally balances onto the now-more-free provider.
+func applyStandardPreference(views []NodeGroupView, avail []*brokerv1alpha1.ClusterAdvertisement, inflight map[string]bool) {
+	metric := make([]float64, len(views))
+	has := make([]bool, len(views))
+	for i, cadv := range avail {
+		free := 0.0
+		if total := cadv.Status.TotalChunks; total > 0 {
+			available := max(total-cadv.Status.ReservedChunks, 0)
+			free = float64(available) / float64(total)
+		}
+		renewable := 0.0
+		if cadv.Spec.Renewable {
+			renewable = 1.0
+		}
+		score := standardCapacityWeight*free + standardRenewableWeight*renewable
+		metric[i] = 1.0 - score // invert: applyMetricPreference is lower-wins
+		has[i] = true           // every provider has a composite score
+	}
+	applyMetricPreference(views, metric, has, inflight)
 }
 
 // applyMetricPreference is the strictly-additive greedy masking shared by all

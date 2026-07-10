@@ -1,0 +1,22 @@
+# Self-declare that a PROVIDER cluster runs on renewable energy. Apply on the
+# provider's cluster:
+#
+#   kubectl --kubeconfig ~/.kube/provider-2.yaml apply -f samples/provider-renewable.yaml
+#
+# This overwrites the `agent-renewable` ConfigMap that the provider overlay ships
+# empty. The provider agent re-reads it on every 30 s advertisement, so it toggles
+# live with no restart. It is an HONOUR-SYSTEM flag — the Broker does not verify it.
+#
+# The Standard composite DEFAULT placement policy (applied when a consumer sets no
+# ConsumerPolicy) gives renewable providers a small placement bonus on top of the
+# free-capacity ranking; the Price/Eco/Latency policies ignore it. Watch the
+# broker dashboard's "Renew" column flip to "renewable" within ~30 s. Set
+# `renewable: false` (or delete this file's ConfigMap) to clear it.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: agent-renewable
+  namespace: federation-autoscaler-system
+data:
+  renewable.yaml: |
+    renewable: true

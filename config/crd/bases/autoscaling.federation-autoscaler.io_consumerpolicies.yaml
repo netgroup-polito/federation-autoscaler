@@ -64,6 +64,7 @@ spec:
                       (no preference; the Cluster Autoscaler picks). Supported values are
                       "Price" (cheapest), "Eco" (lowest carbon), and "Latency" (closest).
                     enum:
+                    - Standard
                     - Price
                     - Eco
                     - Latency

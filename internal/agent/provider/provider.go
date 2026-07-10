@@ -83,6 +83,11 @@ type Options struct {
 	// Empty ⇒ the provider advertises no price.
 	PriceFile string
 
+	// RenewableFile is an optional path to this provider's self-declared
+	// renewable-energy flag file, re-read on every advertisement cycle (see
+	// advertise.Options). Empty/false ⇒ no renewable bonus.
+	RenewableFile string
+
 	// CapacityFile is an optional path to this provider's per-resource
 	// advertised-capacity percentage file, re-read on every advertisement cycle
 	// (see advertise.Options). Empty ⇒ the provider advertises full allocatable.
@@ -163,6 +168,7 @@ func Run(ctx context.Context, opts Options) error {
 		LiqoClusterID: opts.LiqoClusterID,
 		PriceFile:     opts.PriceFile,
 		CapacityFile:  opts.CapacityFile,
+		RenewableFile: opts.RenewableFile,
 		RegionFile:    opts.RegionFile,
 		MockEcoURL:    opts.MockEcoURL,
 		MockGeoURL:    opts.MockGeoURL,

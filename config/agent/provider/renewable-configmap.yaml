@@ -1,0 +1,21 @@
+# Per-provider renewable-energy self-declaration, mounted into the provider agent
+# and re-read on every advertisement cycle (so it can toggle without a restart).
+#
+# `renewable.yaml` is a YAML/JSON doc with a single boolean:
+#   renewable: true    # this cluster runs on renewable energy
+# It is an HONOUR-SYSTEM flag — the Broker does not verify it. The standard
+# composite default placement policy (applied when a consumer sets no policy)
+# gives renewable providers a small placement bonus; the Price/Eco/Latency
+# policies ignore it.
+#
+# Ships EMPTY (⇒ renewable: false) so the base behaviour is unchanged. It is left
+# for the provider-cluster admin to set MANUALLY (the consumer/provider config
+# console can toggle it, or `kubectl patch configmap agent-renewable`); the
+# fa_provider Ansible role does not stamp it.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: agent-renewable
+  namespace: federation-autoscaler-system
+data:
+  renewable.yaml: ""

@@ -67,6 +67,7 @@ type providerState struct {
 	Prices        map[string]string `json:"prices"`
 	Region        string            `json:"region"`
 	Capacity      map[string]string `json:"capacity"`
+	Renewable     bool              `json:"renewable"`
 }
 
 // handleState returns the current settings so the UI can pre-fill its controls.
@@ -98,6 +99,7 @@ func (s *Server) handleState(w http.ResponseWriter, r *http.Request) {
 		Prices:        s.readPrices(ctx),
 		Region:        region,
 		Capacity:      s.readCapacity(ctx),
+		Renewable:     s.readRenewable(ctx),
 	})
 }
 
@@ -136,6 +138,23 @@ func (s *Server) listManualReservations(ctx context.Context) []manualReservation
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].Name < out[j].Name })
 	return out
+}
+
+// readRenewable returns this provider's self-declared renewable flag from the
+// agent-renewable ConfigMap, or false when unset/absent/unparseable.
+func (s *Server) readRenewable(ctx context.Context) bool {
+	raw := s.readConfigMapKey(ctx, renewableConfigMap, renewableKey)
+	if raw == "" {
+		return false
+	}
+	var doc struct {
+		Renewable bool `json:"renewable"`
+	}
+	if err := yaml.Unmarshal([]byte(raw), &doc); err != nil {
+		s.log.V(1).Info("agent-renewable unparseable", "err", err.Error())
+		return false
+	}
+	return doc.Renewable
 }
 
 // readPolicy returns the current `default` ConsumerPolicy type, or "" when the

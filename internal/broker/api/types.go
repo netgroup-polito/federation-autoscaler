@@ -149,6 +149,12 @@ type AdvertisementRequest struct {
 	// never re-derives Resources from it.
 	CapacityFixed corev1.ResourceList `json:"capacityFixed,omitempty"`
 
+	// Renewable is the provider admin's self-declaration that this cluster runs
+	// on renewable energy. It is an honour-system boolean (the Broker does not
+	// verify it); the standard composite default policy gives renewable providers
+	// a placement bonus. Omitted/false ⇒ no bonus.
+	Renewable bool `json:"renewable,omitempty"`
+
 	// LiqoLabels are stamped on the virtual nodes Liqo creates on each
 	// peering consumer, e.g. liqo.io/type=virtual-node.
 	LiqoLabels map[string]string `json:"liqoLabels,omitempty"`
@@ -213,14 +219,17 @@ type AdvertisementSnapshot struct {
 	// CapacityFixed mirrors the provider's per-resource fixed advertised-capacity
 	// cap (resource name → quantity, e.g. memory: "8Gi"); empty/absent means no
 	// fixed cap lowered allocatable. Surfaced alongside CapacityScalePercent.
-	CapacityFixed   corev1.ResourceList `json:"capacityFixed,omitempty"`
-	LiqoLabels      map[string]string   `json:"liqoLabels,omitempty"`
-	LiqoTaints      []corev1.Taint      `json:"liqoTaints,omitempty"`
-	ChunkCount      int32               `json:"chunkCount"`
-	ReservedChunks  int32               `json:"reservedChunks"`
-	AvailableChunks int32               `json:"availableChunks"`
-	LastSeen        metav1.Time         `json:"lastSeen"`
-	Available       bool                `json:"available"`
+	CapacityFixed corev1.ResourceList `json:"capacityFixed,omitempty"`
+	// Renewable mirrors the provider's self-declared renewable-energy flag,
+	// surfaced on the dashboard and used by the standard composite policy.
+	Renewable       bool              `json:"renewable,omitempty"`
+	LiqoLabels      map[string]string `json:"liqoLabels,omitempty"`
+	LiqoTaints      []corev1.Taint    `json:"liqoTaints,omitempty"`
+	ChunkCount      int32             `json:"chunkCount"`
+	ReservedChunks  int32             `json:"reservedChunks"`
+	AvailableChunks int32             `json:"availableChunks"`
+	LastSeen        metav1.Time       `json:"lastSeen"`
+	Available       bool              `json:"available"`
 }
 
 // -----------------------------------------------------------------------------

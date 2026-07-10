@@ -31,6 +31,7 @@ limitations under the License.
 //	  POST /api/prices    upsert the agent-prices ConfigMap
 //	  POST /api/region    upsert the agent-location ConfigMap
 //	  POST /api/capacity  upsert the agent-capacity ConfigMap
+//	  POST /api/renewable upsert the agent-renewable ConfigMap
 //	both roles:
 //	  GET  /              the role's embedded single-page UI
 //	  GET  /api/state     current values (so the UI can pre-select/pre-fill)
@@ -80,12 +81,14 @@ const (
 // and keys MUST match what the agent's loaders read (loadRegion / loadUnitPrices
 // / loadCapacityPercents) and what the per-role kustomize overlays mount.
 const (
-	locationConfigMap = "agent-location"
-	locationKey       = "location.yaml"
-	pricesConfigMap   = "agent-prices"
-	pricesKey         = "prices.yaml"
-	capacityConfigMap = "agent-capacity"
-	capacityKey       = "capacity.yaml"
+	locationConfigMap  = "agent-location"
+	locationKey        = "location.yaml"
+	pricesConfigMap    = "agent-prices"
+	pricesKey          = "prices.yaml"
+	capacityConfigMap  = "agent-capacity"
+	capacityKey        = "capacity.yaml"
+	renewableConfigMap = "agent-renewable"
+	renewableKey       = "renewable.yaml"
 
 	// The burst workload lives in `default` (offloaded LocalAndRemote), NOT in
 	// the agent namespace — the consumer overlay's scoped Role grants the write.
@@ -232,6 +235,7 @@ func (s *Server) handler() http.Handler {
 	case RoleProvider:
 		mux.HandleFunc("POST /api/prices", s.handlePrices)
 		mux.HandleFunc("POST /api/capacity", s.handleCapacity)
+		mux.HandleFunc("POST /api/renewable", s.handleRenewable)
 	}
 	return mux
 }
@@ -470,6 +474,28 @@ func (s *Server) releaseManualReservation(ctx context.Context, name string) erro
 		return fmt.Errorf("reservation %q is not managed by the console", name)
 	}
 	return s.local.Delete(ctx, &rr)
+}
+
+// handleRenewable upserts the agent-renewable ConfigMap with this provider's
+// self-declared renewable-energy flag (the standard composite policy's bonus
+// input). Provider-only.
+func (s *Server) handleRenewable(w http.ResponseWriter, r *http.Request) {
+	if s.role != RoleProvider {
+		s.writeError(w, http.StatusMethodNotAllowed, "renewable is a provider-only setting")
+		return
+	}
+	var body struct {
+		Renewable bool `json:"renewable"`
+	}
+	if !s.decode(w, r, &body) {
+		return
+	}
+	value := fmt.Sprintf("renewable: %t\n", body.Renewable)
+	if err := s.upsertConfigMap(r.Context(), renewableConfigMap, renewableKey, value); err != nil {
+		s.writeError(w, http.StatusInternalServerError, "write agent-renewable: "+err.Error())
+		return
+	}
+	s.ok(w)
 }
 
 // handlePrices upserts the agent-prices ConfigMap. Values are unit prices

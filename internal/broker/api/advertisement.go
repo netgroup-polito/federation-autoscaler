@@ -170,6 +170,7 @@ func (s *Server) upsertClusterAdvertisement(
 			CarbonIntensity:      req.CarbonIntensity,
 			CapacityScalePercent: req.CapacityScalePercent,
 			CapacityFixed:        req.CapacityFixed,
+			Renewable:            req.Renewable,
 		}
 		return nil
 	})
@@ -267,6 +268,7 @@ func advertisementSnapshotFromCR(cadv *brokerv1alpha1.ClusterAdvertisement) Adve
 		CarbonIntensity:      cadv.Spec.CarbonIntensity,
 		CapacityScalePercent: cadv.Spec.CapacityScalePercent,
 		CapacityFixed:        cadv.Spec.CapacityFixed,
+		Renewable:            cadv.Spec.Renewable,
 		ChunkCount:           cadv.Status.TotalChunks,
 		ReservedChunks:       cadv.Status.ReservedChunks,
 		AvailableChunks:      cadv.Status.AvailableChunks,

@@ -91,6 +91,7 @@ func main() {
 		namespace       string
 		priceFile       string
 		capacityFile    string
+		renewableFile   string
 		regionFile      string
 		mockEcoURL      string
 		mockGeoURL      string
@@ -135,6 +136,11 @@ func main() {
 			"advertises that fraction of the resource's allocatable; 100, >100, ≤0, or "+
 			"unset advertise the full allocatable. Re-read every advertisement cycle so "+
 			"the cap can change without a restart. Empty ⇒ advertise full allocatable.")
+	flag.StringVar(&renewableFile, "renewable-file", "",
+		"(provider role only) Path to a YAML/JSON file with this cluster's self-"+
+			"declared renewable-energy flag (e.g. {\"renewable\":true}). Re-read every "+
+			"cycle so it can toggle without a restart. The standard composite default "+
+			"policy gives renewable providers a placement bonus. Empty/false ⇒ no bonus.")
 	flag.StringVar(&regionFile, "region-file", "",
 		"Path to a YAML/JSON file holding this cluster's region (e.g. {\"region\":\"QC\"}). "+
 			"Re-read every cycle so the region can change without a restart. Used by the "+
@@ -258,6 +264,7 @@ func main() {
 			LiqoClusterID: liqoClusterID,
 			PriceFile:     priceFile,
 			CapacityFile:  capacityFile,
+			RenewableFile: renewableFile,
 			RegionFile:    regionFile,
 			MockEcoURL:    mockEcoURL,
 			MockGeoURL:    mockGeoURL,

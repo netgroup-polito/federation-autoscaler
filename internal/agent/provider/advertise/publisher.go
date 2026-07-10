@@ -90,6 +90,13 @@ type Options struct {
 	// allocatable.
 	CapacityFile string
 
+	// RenewableFile is an optional path to a YAML/JSON file holding this
+	// provider's self-declared renewable-energy flag (e.g. {"renewable":true}).
+	// Re-read on every publish cycle so an operator can toggle it without a
+	// restart. Empty/missing/unparseable or {"renewable":false} ⇒ the provider
+	// advertises no renewable bonus. Honour-system: the Broker does not verify it.
+	RenewableFile string
+
 	// RegionFile is an optional path to a YAML/JSON file holding this provider's
 	// region (e.g. {"region":"QC"}). Re-read on every publish cycle so an
 	// operator can relocate the provider without a restart. When set, the region
@@ -132,6 +139,7 @@ type Publisher struct {
 	liqoClusterID string
 	priceFile     string
 	capacityFile  string
+	renewableFile string
 	regionFile    string
 	mockEcoURL    string
 	mockGeoURL    string
@@ -170,6 +178,7 @@ func New(opts Options) (*Publisher, error) {
 		liqoClusterID: opts.LiqoClusterID,
 		priceFile:     opts.PriceFile,
 		capacityFile:  opts.CapacityFile,
+		renewableFile: opts.RenewableFile,
 		regionFile:    opts.RegionFile,
 		mockEcoURL:    opts.MockEcoURL,
 		mockGeoURL:    opts.MockGeoURL,
@@ -229,6 +238,7 @@ func (p *Publisher) publishOnce(ctx context.Context) {
 		CarbonIntensity:      carbon,
 		CapacityScalePercent: pctCustom,
 		CapacityFixed:        fixedCustom,
+		Renewable:            p.loadRenewable(),
 	}
 
 	resp, err := p.client.PostAdvertisement(ctx, req)
@@ -424,6 +434,34 @@ type capRule struct {
 	isPercent bool
 	percent   int32
 	fixed     resource.Quantity
+}
+
+// loadRenewable reads and parses the optional renewable-energy file (if
+// configured). Like loadRegion it is best-effort: a missing, empty, or
+// unparseable file yields false so the provider simply advertises no renewable
+// bonus. Re-reading here (not at construction) lets an operator toggle it live.
+func (p *Publisher) loadRenewable() bool {
+	if p.renewableFile == "" {
+		return false
+	}
+	data, err := os.ReadFile(p.renewableFile)
+	if err != nil {
+		p.log.V(1).Info("renewable file unreadable; advertising no renewable bonus",
+			"path", p.renewableFile, "err", err.Error())
+		return false
+	}
+	if strings.TrimSpace(string(data)) == "" {
+		return false
+	}
+	var doc struct {
+		Renewable bool `json:"renewable"`
+	}
+	if err := yaml.Unmarshal(data, &doc); err != nil {
+		p.log.V(1).Info("renewable file unparseable; advertising no renewable bonus",
+			"path", p.renewableFile, "err", err.Error())
+		return false
+	}
+	return doc.Renewable
 }
 
 // loadCapacityCaps reads and parses the per-resource advertised-capacity cap
