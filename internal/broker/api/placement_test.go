@@ -17,6 +17,7 @@ limitations under the License.
 package api
 
 import (
+	"math"
 	"testing"
 
 	autoscalingv1alpha1 "github.com/netgroup-polito/federation-autoscaler/api/autoscaling/v1alpha1"
@@ -224,6 +225,80 @@ func TestNodeGroupsStandardDefault(t *testing.T) {
 		hr := headroomByProvider(callNodeGroups(t, s))
 		if hr["p-idle"] == 0 || hr["p-busy"] != 0 {
 			t.Errorf("explicit Standard must match the default; got %+v", hr)
+		}
+	})
+}
+
+// stdAdvForecast is a fully-available stdAdv with an advertised hourly carbon
+// forecast (the eco weighted-ranking input).
+func stdAdvForecast(name string, forecast []float64) *brokerv1alpha1.ClusterAdvertisement {
+	a := stdAdv(name, 0, nil)
+	a.Spec.CarbonForecast = forecast
+	return a
+}
+
+func TestEcoWeightedScore(t *testing.T) {
+	// Uniform forecast → the weighted average equals the value.
+	if v, ok := ecoWeightedScore([]float64{100, 100, 100, 100, 100, 100}); !ok || v != 100 {
+		t.Errorf("uniform: got (%v,%v), want (100,true)", v, ok)
+	}
+	// Known weighting: 0.40·10+0.25·20+0.15·30+0.10·40+0.06·50+0.04·60 = 22.9 (Σw=1).
+	if v, ok := ecoWeightedScore([]float64{10, 20, 30, 40, 50, 60}); !ok || math.Abs(v-22.9) > 1e-9 {
+		t.Errorf("weighted: got %v, want 22.9", v)
+	}
+	// A short forecast normalizes by the weights actually used: [10,10] → 10.
+	if v, ok := ecoWeightedScore([]float64{10, 10}); !ok || math.Abs(v-10) > 1e-9 {
+		t.Errorf("short: got %v, want 10", v)
+	}
+	// Only the first 6 hours count.
+	if v, ok := ecoWeightedScore([]float64{0, 0, 0, 0, 0, 0, 1000, 1000}); !ok || v != 0 {
+		t.Errorf("6-hour cap: got %v, want 0", v)
+	}
+	// Empty forecast has no score.
+	if _, ok := ecoWeightedScore(nil); ok {
+		t.Error("empty forecast must be !ok")
+	}
+}
+
+// TestNodeGroupsEcoForecast: with a forecast advertised, the eco ranking uses the
+// 6-hour weighted score — not the single current value.
+func TestNodeGroupsEcoForecast(t *testing.T) {
+	t.Run("greenest weighted forecast grows", func(t *testing.T) {
+		s := newDashboardTestServer(t,
+			stdAdvForecast("p-green-fc", []float64{10, 10, 10, 10, 10, 10}),
+			stdAdvForecast("p-dirty-fc", []float64{500, 500, 500, 500, 500, 500}))
+		withEcoPolicy(s)
+		hr := headroomByProvider(callNodeGroups(t, s))
+		if hr["p-green-fc"] != 3 {
+			t.Errorf("greenest forecast must grow; got %+v", hr)
+		}
+		if hr["p-dirty-fc"] != 0 {
+			t.Errorf("dirtier forecast must be masked; got %+v", hr)
+		}
+	})
+
+	t.Run("forecast overrides a misleading current value", func(t *testing.T) {
+		// p-a's current value is the worst (999) but its forecast is the greenest;
+		// the ranking must follow the forecast, so p-a wins.
+		a := stdAdvForecast("p-a", []float64{10, 10, 10, 10, 10, 10})
+		big := 999.0
+		a.Spec.CarbonIntensity = &big
+		s := newDashboardTestServer(t, a, stdAdvForecast("p-b", []float64{500, 500, 500, 500, 500, 500}))
+		withEcoPolicy(s)
+		hr := headroomByProvider(callNodeGroups(t, s))
+		if hr["p-a"] != 3 || hr["p-b"] != 0 {
+			t.Errorf("forecast must drive ranking, not CarbonIntensity; got %+v", hr)
+		}
+	})
+
+	t.Run("no forecast falls back to the single current value", func(t *testing.T) {
+		// p-green has only a (green) single value; p-dirty only a (dirty) single
+		// value. Fallback keeps the greenest-first behaviour.
+		s := newDashboardTestServer(t, stdAdvCarbon("p-green", 0, 25), stdAdvCarbon("p-dirty", 0, 650))
+		withEcoPolicy(s)
+		hr := headroomByProvider(callNodeGroups(t, s))
+		if hr["p-green"] != 3 || hr["p-dirty"] != 0 {
+			t.Errorf("single-value fallback must still rank greenest first; got %+v", hr)
 		}
 	})
 }

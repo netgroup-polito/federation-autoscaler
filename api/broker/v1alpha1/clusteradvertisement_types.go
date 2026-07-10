@@ -90,6 +90,14 @@ type ClusterAdvertisementSpec struct {
 	// +optional
 	CarbonIntensity *float64 `json:"carbonIntensity,omitempty"`
 
+	// CarbonForecast is the provider's hourly carbon-intensity forecast
+	// (gCO2eq/kWh, current hour first), optional. When present the Broker ranks
+	// eco-preferring consumers on a weighted average of the first few hours (the
+	// near future counts most); when absent it falls back to CarbonIntensity. The
+	// Broker never fetches this — it only ranks what providers advertise.
+	// +optional
+	CarbonForecast []float64 `json:"carbonForecast,omitempty"`
+
 	// CapacityScalePercent records, per resource, the percentage of allocatable
 	// the provider's admin chose to advertise when it is below 100% — the
 	// Provider Agent has already scaled Resources.Allocatable down accordingly.

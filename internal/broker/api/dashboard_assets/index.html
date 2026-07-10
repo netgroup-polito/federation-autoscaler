@@ -311,6 +311,18 @@
     // capped below allocatable, split across a percentage map and a fixed map,
     // so an empty/absent pair renders as "—" (full allocatable advertised).
     const RES_ABBR = { cpu: "cpu", memory: "mem", "nvidia.com/gpu": "gpu" };
+    // Carbon shown is the broker's 6-hour weighted value (what the eco strategy
+    // ranks on), with a ↑/↓ arrow when the next forecast hour rises/falls; falls
+    // back to the current value, or "—" when the provider advertises no carbon.
+    function fmtCarbon(a) {
+      const v = a.carbonWeighted != null ? a.carbonWeighted : a.carbonIntensity;
+      if (v == null) return "—";
+      let arrow = "";
+      const f = a.carbonForecast;
+      if (Array.isArray(f) && f.length >= 2 && f[1] !== f[0]) arrow = f[1] > f[0] ? " ↑" : " ↓";
+      return v.toFixed(0) + arrow;
+    }
+
     function fmtCapacityCustom(pct, fixed) {
       const parts = [];
       for (const k of Object.keys(pct || {}).sort()) {
@@ -339,9 +351,9 @@
         // Broker-computed per-chunk cost (unitPrices × chunk size); "—" when the
         // provider advertises no price.
         tr.appendChild(td(a.costPerChunk != null ? a.costPerChunk.toFixed(3) : "—", { mono: true }));
-        // Provider's advertised current carbon intensity (gCO2eq/kWh); "—" when
-        // it advertises none. Lowest wins under the eco placement strategy.
-        tr.appendChild(td(a.carbonIntensity != null ? a.carbonIntensity.toFixed(0) : "—", { mono: true }));
+        // Carbon: the broker's 6-hour weighted value (what the eco strategy ranks
+        // on) with a rising/falling arrow from the forecast; "—" when none. Lowest wins.
+        tr.appendChild(td(fmtCarbon(a), { mono: true }));
         // Advertised region (topology.region); "—" when unset. Drives the eco
         // (carbon) + latency (distance) strategies.
         tr.appendChild(td(a.topology && a.topology.region ? a.topology.region : "—", { mono: true }));

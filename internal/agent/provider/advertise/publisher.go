@@ -227,7 +227,7 @@ func (p *Publisher) publishOnce(ctx context.Context) {
 	}
 
 	scaled, pctCustom, fixedCustom := p.applyCapacityScaling(snap.Allocatable)
-	topology, carbon := p.loadPlacementInputs(ctx)
+	topology, carbon, carbonForecast := p.loadPlacementInputs(ctx)
 
 	req := &brokerapi.AdvertisementRequest{
 		ClusterID:            p.clusterID,
@@ -236,6 +236,7 @@ func (p *Publisher) publishOnce(ctx context.Context) {
 		Topology:             topology,
 		UnitPrices:           p.loadUnitPrices(),
 		CarbonIntensity:      carbon,
+		CarbonForecast:       carbonForecast,
 		CapacityScalePercent: pctCustom,
 		CapacityFixed:        fixedCustom,
 		Renewable:            p.loadRenewable(),
@@ -371,10 +372,10 @@ func (p *Publisher) loadUnitPrices() corev1.ResourceList {
 // advertise (nil when no region) and the carbon intensity (nil when unavailable
 // or no mock-eco URL). Every lookup is best-effort: a failure logs at V(1) and
 // the corresponding field is omitted, never failing the publish cycle.
-func (p *Publisher) loadPlacementInputs(ctx context.Context) (*brokerv1alpha1.Topology, *float64) {
+func (p *Publisher) loadPlacementInputs(ctx context.Context) (*brokerv1alpha1.Topology, *float64, []float64) {
 	region := p.loadRegion()
 	if region == "" {
-		return nil, nil
+		return nil, nil, nil
 	}
 	topology := &brokerv1alpha1.Topology{Region: region}
 	if latlon, ok, err := p.geoClient.Lookup(ctx, p.mockGeoURL, region); err != nil {
@@ -384,12 +385,30 @@ func (p *Publisher) loadPlacementInputs(ctx context.Context) (*brokerv1alpha1.To
 		topology.Latitude = latlon.Lat
 		topology.Longitude = latlon.Lon
 	}
-	carbon, err := p.ecoClient.CurrentCarbon(ctx, p.mockEcoURL, region)
+	carbon, forecast := p.loadCarbon(ctx, region)
+	return topology, carbon, forecast
+}
+
+// loadCarbon fetches the region's carbon signal. It prefers the hourly forecast
+// (using forecast[0] as the current value) and falls back to the single
+// current-value endpoint when the forecast is unavailable — so an older carbon
+// service without /carbon/forecast still works. Every failure is best-effort:
+// it logs at V(1) and advertises no carbon rather than failing the publish cycle.
+func (p *Publisher) loadCarbon(ctx context.Context, region string) (*float64, []float64) {
+	forecast, err := p.ecoClient.Forecast(ctx, p.mockEcoURL, region)
+	if err != nil {
+		p.log.V(1).Info("carbon forecast fetch failed; falling back to current value",
+			"region", region, "err", err.Error())
+	} else if len(forecast) > 0 {
+		cur := forecast[0]
+		return &cur, forecast
+	}
+	cur, err := p.ecoClient.CurrentCarbon(ctx, p.mockEcoURL, region)
 	if err != nil {
 		p.log.V(1).Info("carbon fetch failed; advertising no carbon intensity",
 			"region", region, "err", err.Error())
 	}
-	return topology, carbon
+	return cur, nil
 }
 
 // loadRegion reads and parses the optional region file (if configured). Like

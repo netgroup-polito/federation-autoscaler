@@ -91,6 +91,16 @@ spec:
                   so an empty map means "no customization". This field is informational
                   (surfaced on the dashboard); the Broker never re-derives Resources from it.
                 type: object
+              carbonForecast:
+                description: |-
+                  CarbonForecast is the provider's hourly carbon-intensity forecast
+                  (gCO2eq/kWh, current hour first), optional. When present the Broker ranks
+                  eco-preferring consumers on a weighted average of the first few hours (the
+                  near future counts most); when absent it falls back to CarbonIntensity. The
+                  Broker never fetches this — it only ranks what providers advertise.
+                items:
+                  type: number
+                type: array
               carbonIntensity:
                 description: |-
                   CarbonIntensity is the provider's current grid carbon intensity in

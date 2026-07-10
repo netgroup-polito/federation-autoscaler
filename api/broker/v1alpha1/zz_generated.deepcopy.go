@@ -128,6 +128,11 @@ func (in *ClusterAdvertisementSpec) DeepCopyInto(out *ClusterAdvertisementSpec) 
 		*out = new(float64)
 		**out = **in
 	}
+	if in.CarbonForecast != nil {
+		in, out := &in.CarbonForecast, &out.CarbonForecast
+		*out = make([]float64, len(*in))
+		copy(*out, *in)
+	}
 	if in.CapacityScalePercent != nil {
 		in, out := &in.CapacityScalePercent, &out.CapacityScalePercent
 		*out = make(map[v1.ResourceName]int32, len(*in))

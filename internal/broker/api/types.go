@@ -131,6 +131,13 @@ type AdvertisementRequest struct {
 	// treats such providers as a last resort. Must be non-negative.
 	CarbonIntensity *float64 `json:"carbonIntensity,omitempty"`
 
+	// CarbonForecast is the provider's hourly carbon-intensity forecast
+	// (gCO2eq/kWh, current hour first), optional. When present the Broker ranks
+	// eco-preferring consumers on a weighted average of the first few hours rather
+	// than the single CarbonIntensity; when absent it falls back to
+	// CarbonIntensity. Fetched from the same service (mock-eco /carbon/forecast).
+	CarbonForecast []float64 `json:"carbonForecast,omitempty"`
+
 	// CapacityScalePercent records, per resource, the percentage of allocatable
 	// the provider's admin chose to advertise when it is less than 100% — i.e.
 	// the agent has already scaled Resources down accordingly. Keys are resource
@@ -211,6 +218,13 @@ type AdvertisementSnapshot struct {
 	// (gCO2eq/kWh); nil when the provider advertises none. Surfaced on the
 	// dashboard for the eco placement strategy.
 	CarbonIntensity *float64 `json:"carbonIntensity,omitempty"`
+	// CarbonForecast mirrors the provider's hourly carbon-intensity forecast
+	// (current hour first); surfaced for the dashboard's rising/falling trend.
+	CarbonForecast []float64 `json:"carbonForecast,omitempty"`
+	// CarbonWeighted is the Broker's 6-hour weighted eco score — the value it
+	// actually ranks on (from the forecast, or the single CarbonIntensity when
+	// there is no forecast); nil when the provider advertises no carbon. Dashboard.
+	CarbonWeighted *float64 `json:"carbonWeighted,omitempty"`
 	// CapacityScalePercent mirrors the provider's per-resource advertised-capacity
 	// customization (resource name → percentage in (0,100)); empty/absent means
 	// the provider advertises full allocatable. Surfaced so the dashboard can

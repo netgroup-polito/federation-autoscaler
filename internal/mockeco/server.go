@@ -53,26 +53,62 @@ type carbonResponse struct {
 	CarbonIntensity int    `json:"carbonIntensity"`
 }
 
-// Handler serves GET /carbon?region=XX with the region's current-hour carbon
-// intensity. Lowest wins under the eco placement strategy.
-func Handler(w http.ResponseWriter, r *http.Request) {
-	region := r.URL.Query().Get("region")
-	w.Header().Set("Content-Type", "application/json")
+// forecastResponse is the JSON shape of GET /carbon/forecast: the next 24 hours
+// of carbon intensity, current hour first.
+type forecastResponse struct {
+	Region   string `json:"region"`
+	Forecast []int  `json:"forecast"`
+}
 
+// lookupProfile resolves the region's 24-hour profile, writing an error response
+// and returning ok=false when the region is missing/unknown.
+func lookupProfile(w http.ResponseWriter, region string) ([24]int, bool) {
 	if region == "" {
 		w.WriteHeader(http.StatusBadRequest)
 		_ = json.NewEncoder(w).Encode(map[string]string{"error": "missing 'region' query parameter"})
-		return
+		return [24]int{}, false
 	}
 	profile, ok := regionData[region]
 	if !ok {
 		w.WriteHeader(http.StatusNotFound)
 		_ = json.NewEncoder(w).Encode(map[string]string{"error": fmt.Sprintf("unknown region: %s", region)})
+		return [24]int{}, false
+	}
+	return profile, true
+}
+
+// Handler serves GET /carbon?region=XX with the region's current-hour carbon
+// intensity. Lowest wins under the eco placement strategy.
+func Handler(w http.ResponseWriter, r *http.Request) {
+	region := r.URL.Query().Get("region")
+	w.Header().Set("Content-Type", "application/json")
+	profile, ok := lookupProfile(w, region)
+	if !ok {
 		return
 	}
-
 	current := profile[time.Now().UTC().Hour()%24]
 	if err := json.NewEncoder(w).Encode(carbonResponse{Region: region, CarbonIntensity: current}); err != nil {
+		log.Printf("mock-eco: encode error: %v", err)
+	}
+}
+
+// ForecastHandler serves GET /carbon/forecast?region=XX with the next 24 hours of
+// carbon intensity, current hour first (wrapping the region's daily profile). The
+// Broker's eco ranking weights the first few hours; the agent advertises the
+// series alongside the current value.
+func ForecastHandler(w http.ResponseWriter, r *http.Request) {
+	region := r.URL.Query().Get("region")
+	w.Header().Set("Content-Type", "application/json")
+	profile, ok := lookupProfile(w, region)
+	if !ok {
+		return
+	}
+	start := time.Now().UTC().Hour() % 24
+	forecast := make([]int, 24)
+	for i := range forecast {
+		forecast[i] = profile[(start+i)%24]
+	}
+	if err := json.NewEncoder(w).Encode(forecastResponse{Region: region, Forecast: forecast}); err != nil {
 		log.Printf("mock-eco: encode error: %v", err)
 	}
 }
@@ -81,6 +117,7 @@ func Handler(w http.ResponseWriter, r *http.Request) {
 func StartServer(port int) error {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /carbon", Handler)
+	mux.HandleFunc("GET /carbon/forecast", ForecastHandler)
 	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusOK) })
 
 	addr := fmt.Sprintf(":%d", port)

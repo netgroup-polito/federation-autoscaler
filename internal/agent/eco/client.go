@@ -40,28 +40,43 @@ type carbonResponse struct {
 	CarbonIntensity float64 `json:"carbonIntensity"`
 }
 
+// forecastResponse mirrors the mock-eco GET /carbon/forecast?region=XX response
+// (the next hours of carbon intensity, current hour first).
+type forecastResponse struct {
+	Region   string `json:"region"`
+	Forecast []int  `json:"forecast"`
+}
+
 type cacheEntry struct {
 	value     float64
 	fetchedAt time.Time
 }
 
-// Client fetches a region's current carbon intensity and caches it per region
-// for a TTL (the value changes at most hourly). Safe for concurrent use.
+type forecastEntry struct {
+	values    []float64
+	fetchedAt time.Time
+}
+
+// Client fetches a region's current carbon intensity (and its hourly forecast)
+// and caches each per region for a TTL (values change at most hourly). Safe for
+// concurrent use.
 type Client struct {
-	mu    sync.Mutex
-	cache map[string]cacheEntry
-	ttl   time.Duration
-	now   func() time.Time
-	http  *http.Client
+	mu     sync.Mutex
+	cache  map[string]cacheEntry
+	fcache map[string]forecastEntry
+	ttl    time.Duration
+	now    func() time.Time
+	http   *http.Client
 }
 
 // NewClient returns an eco Client caching for 1 h with a 5 s per-request timeout.
 func NewClient() *Client {
 	return &Client{
-		cache: make(map[string]cacheEntry),
-		ttl:   time.Hour,
-		now:   time.Now,
-		http:  &http.Client{Timeout: 5 * time.Second},
+		cache:  make(map[string]cacheEntry),
+		fcache: make(map[string]forecastEntry),
+		ttl:    time.Hour,
+		now:    time.Now,
+		http:   &http.Client{Timeout: 5 * time.Second},
 	}
 }
 
@@ -113,6 +128,59 @@ func (c *Client) staleOrErr(region string, err error) (*float64, error) {
 	if e, ok := c.cache[region]; ok {
 		v := e.value
 		return &v, nil
+	}
+	return nil, err
+}
+
+// Forecast returns the region's hourly carbon-intensity forecast (gCO2eq/kWh,
+// current hour first) from baseURL. It returns (nil, nil) when disabled (baseURL
+// or region empty). On a fetch error it falls back to a still-cached series if one
+// exists (nil error); otherwise (nil, err) and the caller advertises no forecast
+// (falling back to the single current value). Cached per region for the TTL.
+func (c *Client) Forecast(ctx context.Context, baseURL, region string) ([]float64, error) {
+	if baseURL == "" || region == "" {
+		return nil, nil
+	}
+
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if e, ok := c.fcache[region]; ok && c.now().Sub(e.fetchedAt) < c.ttl {
+		return append([]float64(nil), e.values...), nil
+	}
+
+	reqURL := fmt.Sprintf("%s/carbon/forecast?region=%s", baseURL, url.QueryEscape(region))
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, reqURL, nil)
+	if err != nil {
+		return c.staleForecastOrErr(region, fmt.Errorf("eco: build forecast request: %w", err))
+	}
+	resp, err := c.http.Do(req)
+	if err != nil {
+		return c.staleForecastOrErr(region, fmt.Errorf("eco: call mock-eco forecast: %w", err))
+	}
+	defer func() { _ = resp.Body.Close() }()
+
+	if resp.StatusCode != http.StatusOK {
+		return c.staleForecastOrErr(region, fmt.Errorf("eco: mock-eco forecast returned status %d for region %q", resp.StatusCode, region))
+	}
+
+	var out forecastResponse
+	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
+		return c.staleForecastOrErr(region, fmt.Errorf("eco: decode forecast response: %w", err))
+	}
+
+	vals := make([]float64, len(out.Forecast))
+	for i, v := range out.Forecast {
+		vals[i] = float64(v)
+	}
+	c.fcache[region] = forecastEntry{values: vals, fetchedAt: c.now()}
+	return append([]float64(nil), vals...), nil
+}
+
+// staleForecastOrErr returns a still-cached forecast (with a nil error) when one
+// exists for region, otherwise the supplied error. The caller must hold c.mu.
+func (c *Client) staleForecastOrErr(region string, err error) ([]float64, error) {
+	if e, ok := c.fcache[region]; ok {
+		return append([]float64(nil), e.values...), nil
 	}
 	return nil, err
 }

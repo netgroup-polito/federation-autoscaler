@@ -168,6 +168,7 @@ func (s *Server) upsertClusterAdvertisement(
 			Topology:             req.Topology,
 			UnitPrices:           req.UnitPrices,
 			CarbonIntensity:      req.CarbonIntensity,
+			CarbonForecast:       req.CarbonForecast,
 			CapacityScalePercent: req.CapacityScalePercent,
 			CapacityFixed:        req.CapacityFixed,
 			Renewable:            req.Renewable,
@@ -266,6 +267,7 @@ func advertisementSnapshotFromCR(cadv *brokerv1alpha1.ClusterAdvertisement) Adve
 		Topology:             cadv.Spec.Topology,
 		UnitPrices:           cadv.Spec.UnitPrices,
 		CarbonIntensity:      cadv.Spec.CarbonIntensity,
+		CarbonForecast:       cadv.Spec.CarbonForecast,
 		CapacityScalePercent: cadv.Spec.CapacityScalePercent,
 		CapacityFixed:        cadv.Spec.CapacityFixed,
 		Renewable:            cadv.Spec.Renewable,
@@ -276,6 +278,12 @@ func advertisementSnapshotFromCR(cadv *brokerv1alpha1.ClusterAdvertisement) Adve
 	}
 	if cadv.Status.LastSeen != nil {
 		out.LastSeen = *cadv.Status.LastSeen
+	}
+	// CarbonWeighted is the 6-hour weighted value the eco ranking uses (forecast,
+	// or the single current value) — surfaced so the dashboard shows what the
+	// Broker actually ranks on.
+	if v, ok := weightedCarbon(cadv); ok {
+		out.CarbonWeighted = &v
 	}
 	// LiqoLabels / LiqoTaints aren't on the spec yet (designed but not in
 	// the CRD types as of step 2). When they land, populate them here.

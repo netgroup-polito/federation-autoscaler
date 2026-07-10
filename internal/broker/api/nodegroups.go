@@ -79,9 +79,7 @@ func (s *Server) handleNodeGroupsList(w http.ResponseWriter, r *http.Request) {
 	for i, cadv := range avail {
 		cost, ok := s.perChunkCost(cadv)
 		costs[i], priced[i] = cost, ok
-		if cadv.Spec.CarbonIntensity != nil {
-			carbons[i], hasCarbon[i] = *cadv.Spec.CarbonIntensity, true
-		}
+		carbons[i], hasCarbon[i] = weightedCarbon(cadv)
 		views[i] = s.nodeGroupViewFromAdvertisement(cadv, cost, ok)
 	}
 
@@ -163,6 +161,40 @@ func (s *Server) handleNodeGroupsList(w http.ResponseWriter, r *http.Request) {
 // is true when this consumer has a not-yet-Peered reservation on that provider.
 func applyPricePreference(views []NodeGroupView, costs []float64, priced []bool, inflight map[string]bool) {
 	applyMetricPreference(views, costs, priced, inflight)
+}
+
+// ecoWeights weights the next 6 hours of a carbon forecast for the eco ranking —
+// the near future counts most (mirrors the origin's eco scoring). Lower weighted
+// score = greener.
+var ecoWeights = [6]float64{0.40, 0.25, 0.15, 0.10, 0.06, 0.04}
+
+// weightedCarbon returns the carbon value the eco ranking uses for a provider,
+// and whether it has one: the 6-hour weighted forecast average when a forecast is
+// advertised, else the single current CarbonIntensity, else (0, false).
+func weightedCarbon(cadv *brokerv1alpha1.ClusterAdvertisement) (float64, bool) {
+	if v, ok := ecoWeightedScore(cadv.Spec.CarbonForecast); ok {
+		return v, true
+	}
+	if cadv.Spec.CarbonIntensity != nil {
+		return *cadv.Spec.CarbonIntensity, true
+	}
+	return 0, false
+}
+
+// ecoWeightedScore returns the weighted average of the first min(6, len) forecast
+// hours, normalized by the weights actually used (so a short forecast still
+// scores sensibly). ok=false for an empty forecast.
+func ecoWeightedScore(forecast []float64) (float64, bool) {
+	n := min(len(forecast), len(ecoWeights))
+	if n == 0 {
+		return 0, false
+	}
+	var sum, wsum float64
+	for i := range n {
+		sum += ecoWeights[i] * forecast[i]
+		wsum += ecoWeights[i]
+	}
+	return sum / wsum, true
 }
 
 // applyEcoPreference masks the node-group view for a carbon-preferring consumer:
