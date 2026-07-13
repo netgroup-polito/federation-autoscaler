@@ -12,13 +12,15 @@
 #                 in this inventory (the Liqo network plane requires it).
 #   service_cidr  Service CIDR for k3s. Same non-overlap rule.
 #
-# Regions for the eco/latency strategies are NOT set here — they are applied
-# MANUALLY, per cluster, via the sample ConfigMaps (like the Price demo's prices
-# and the consumer policy):
-#   kubectl --kubeconfig ~/.kube/provider-1.yaml apply -f samples/provider-1-location.yaml
-#   kubectl --kubeconfig ~/.kube/consumer-1.yaml apply -f samples/consumer-location.yaml
-# (A `fa_cluster_region` per-host var also exists as an optional Ansible auto-stamp,
-# mirroring `fa_provider_prices`, but the demo path is the manual apply above.)
+# Location for the eco/latency strategies is AUTO-DISCOVERED from each cluster's
+# node IP (mock-geo maps the IP → region + coordinates). Nothing to set for the
+# common case. To STEER the demo (place clusters in distinct cities so the
+# greenest/closest provider wins visibly), optionally set a per-host
+# `fa_advertised_ip` to an IP inside a distinct mock-geo /26 block — it overrides
+# the node IP:
+#   provider-1: { ..., fa_advertised_ip: "172.23.4.10" }   # → Montreal (QC)
+#   provider-2: { ..., fa_advertised_ip: "172.23.4.130" }  # → Sydney (NSW)
+# See internal/mockgeo/server.go for the CIDR → city table.
 #
 # The `mocks` group below is a dedicated cluster hosting mock-eco + mock-geo
 # (option A). When present, its address is auto-wired into every agent as

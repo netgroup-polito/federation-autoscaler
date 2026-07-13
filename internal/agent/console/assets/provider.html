@@ -3,8 +3,9 @@
  Federation-Autoscaler Provider Console.
 
  Self-contained single page (no build step, no external assets) embedded into the
- agent binary via //go:embed. It reads GET /api/state + GET /api/regions on load
- and POSTs to /api/prices, /api/region, /api/capacity.
+ agent binary via //go:embed. It reads GET /api/state on load (which includes the
+ auto-discovered location, shown read-only) and POSTs to /api/prices,
+ /api/capacity, /api/renewable.
 
  Security note: served on a plain-HTTP, unauthenticated listener that WRITES
  cluster state. Demo-grade only. Every dynamic value is set via textContent.
@@ -110,14 +111,11 @@
       <div class="submit-row"><button id="pricesSubmit">Apply prices</button></div>
     </section>
 
-    <!-- Region -->
+    <!-- Location (auto-discovered, read-only) -->
     <section>
-      <h2>Region</h2>
-      <p class="hint">Your cluster's location — resolves to carbon (Eco) and coordinates (Latency). Applied via the agent-location ConfigMap; takes effect within ~60&nbsp;s.</p>
-      <div class="row">
-        <select id="regionSelect"></select>
-        <button id="regionSubmit" disabled>Apply region</button>
-      </div>
+      <h2>Location</h2>
+      <p class="hint">Auto-discovered from this cluster's node IP — drives carbon (Eco) and coordinates (Latency). Read-only; set the demo override with the agent's <code>--advertised-ip</code> flag.</p>
+      <div id="locationBox" class="hint">discovering…</div>
     </section>
 
     <!-- Capacity -->
@@ -161,8 +159,6 @@
   <script>
     "use strict";
 
-    let currentRegion = "";
-
     function toast(msg, isErr) {
       const el = document.getElementById("toast");
       el.textContent = msg;
@@ -186,22 +182,19 @@
       return res.json();
     }
 
-    async function loadRegions() {
-      const res = await fetch("/api/regions");
-      const data = await res.json();
-      const sel = document.getElementById("regionSelect");
-      sel.textContent = "";
-      const none = document.createElement("option");
-      none.value = ""; none.textContent = "— none —";
-      sel.appendChild(none);
-      for (const r of (data.regions || [])) {
-        const o = document.createElement("option");
-        o.value = r.code; o.textContent = r.code + " — " + r.city;
-        sel.appendChild(o);
-      }
-      sel.onchange = () => {
-        document.getElementById("regionSubmit").disabled = (sel.value === currentRegion);
-      };
+    // renderLocation shows the auto-discovered location (read-only). loc is null
+    // when discovery is off; when the IP matched no known subnet the place line
+    // says so but the IP is still shown.
+    function renderLocation(loc) {
+      const box = document.getElementById("locationBox");
+      if (!loc) { box.textContent = "not configured (no node IP / mock-geo URL)"; return; }
+      const place = [loc.city, loc.region, loc.country].filter(Boolean).join(", ")
+        || "IP not in any known subnet";
+      const meta = [];
+      if (loc.lat || loc.lon) meta.push((loc.lat || 0).toFixed(4) + ", " + (loc.lon || 0).toFixed(4));
+      if (loc.ip) meta.push("IP " + loc.ip + (loc.source === "advertised-ip" ? " (override)" : ""));
+      box.innerHTML = "<strong>" + place + "</strong>" +
+        (meta.length ? ' <span class="unit">— ' + meta.join(" · ") + "</span>" : "");
     }
 
     // Capacity controls: each resource ("cpu" / "mem") has a mode select, a
@@ -255,9 +248,7 @@
       document.getElementById("cpuPrice").value = prices.cpu || "";
       document.getElementById("memPrice").value = prices.memory || "";
 
-      currentRegion = st.region || "";
-      document.getElementById("regionSelect").value = currentRegion;
-      document.getElementById("regionSubmit").disabled = true;
+      renderLocation(st.location);
 
       loadCap("cpu", st);
       loadCap("mem", st);
@@ -280,14 +271,6 @@
         await loadState();
       } catch (e) { toast(e.message, true); }
     };
-    document.getElementById("regionSubmit").onclick = async () => {
-      const region = document.getElementById("regionSelect").value;
-      try {
-        await postJSON("/api/region", { region });
-        toast("Region set to “" + (region || "none") + "” — takes effect within ~60 s");
-        await loadState();
-      } catch (e) { toast(e.message, true); }
-    };
     document.getElementById("capacitySubmit").onclick = async () => {
       const cpu = capValue("cpu");
       const memory = capValue("mem");
@@ -307,7 +290,7 @@
     };
 
     (async () => {
-      try { await loadRegions(); await loadState(); }
+      try { await loadState(); }
       catch (e) { toast("Failed to load: " + e.message, true); }
     })();
   </script>

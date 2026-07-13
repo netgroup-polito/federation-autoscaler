@@ -14,10 +14,10 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 
-// Command mock-geo is a standalone HTTP stand-in for a region→coordinates geo
-// API, used by the latency placement strategy demo. It serves
-// GET /latlon?region=<code> with that region's lat/lon. Deployed on the
-// dedicated mock cluster; both agent roles call it via --mock-geo-url.
+// Command mock-geo is a standalone HTTP stand-in for an ip-api.com-style geo-IP
+// API, used by automatic location discovery. It serves GET /json/<ip> with that
+// IP's location, resolved by longest-prefix CIDR match. Deployed on the dedicated
+// mock cluster; both agent roles geolocate their own node IP via --mock-geo-url.
 package main
 
 import (

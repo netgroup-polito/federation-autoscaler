@@ -35,7 +35,7 @@ func TestConsumerRegistry(t *testing.T) {
 	}
 
 	before := time.Now()
-	r.Touch(consumerCluster, "liqo-a-1", autoscalingv1alpha1.PlacementPolicy{}, "", nil, nil)
+	r.Touch(consumerCluster, "liqo-a-1", autoscalingv1alpha1.PlacementPolicy{}, "", "", nil, nil)
 
 	got, ok := r.Lookup(consumerCluster)
 	if !ok {
@@ -56,7 +56,7 @@ func TestConsumerRegistry(t *testing.T) {
 	lat, lon := 45.5, -73.5
 	r.Touch(consumerCluster, "liqo-a-2",
 		autoscalingv1alpha1.PlacementPolicy{Type: autoscalingv1alpha1.PlacementStrategyPrice},
-		"QC", &lat, &lon)
+		"QC", "", &lat, &lon)
 	got, _ = r.Lookup(consumerCluster)
 	if got.LiqoClusterID != "liqo-a-2" {
 		t.Errorf("Touch must overwrite; got %q", got.LiqoClusterID)
@@ -70,7 +70,7 @@ func TestConsumerRegistry(t *testing.T) {
 	}
 
 	// A Touch with nil coordinates clears HasLocation (no stale location).
-	r.Touch(consumerCluster, "liqo-a-3", autoscalingv1alpha1.PlacementPolicy{}, "QC", nil, nil)
+	r.Touch(consumerCluster, "liqo-a-3", autoscalingv1alpha1.PlacementPolicy{}, "QC", "", nil, nil)
 	if got, _ = r.Lookup(consumerCluster); got.HasLocation {
 		t.Errorf("Touch with nil coords must leave HasLocation=false; got %+v", got)
 	}
@@ -82,7 +82,7 @@ func TestConsumerRegistry(t *testing.T) {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			r.Touch("consumer-b", "liqo-b", autoscalingv1alpha1.PlacementPolicy{}, "", nil, nil)
+			r.Touch("consumer-b", "liqo-b", autoscalingv1alpha1.PlacementPolicy{}, "", "", nil, nil)
 			_, _ = r.Lookup(consumerCluster)
 		}()
 	}
@@ -104,9 +104,9 @@ func TestConsumerRegistrySnapshot(t *testing.T) {
 	}
 
 	// Insert out of order; Snapshot must return them sorted.
-	r.Touch("consumer-c", "liqo-c", autoscalingv1alpha1.PlacementPolicy{}, "", nil, nil)
-	r.Touch(consumerCluster, "liqo-a", autoscalingv1alpha1.PlacementPolicy{}, "", nil, nil)
-	r.Touch("consumer-b", "liqo-b", autoscalingv1alpha1.PlacementPolicy{}, "", nil, nil)
+	r.Touch("consumer-c", "liqo-c", autoscalingv1alpha1.PlacementPolicy{}, "", "", nil, nil)
+	r.Touch(consumerCluster, "liqo-a", autoscalingv1alpha1.PlacementPolicy{}, "", "", nil, nil)
+	r.Touch("consumer-b", "liqo-b", autoscalingv1alpha1.PlacementPolicy{}, "", "", nil, nil)
 
 	got := r.Snapshot()
 	if len(got) != 3 {
@@ -128,7 +128,7 @@ func TestConsumerRegistrySnapshot(t *testing.T) {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			r.Touch("consumer-x", "liqo-x", autoscalingv1alpha1.PlacementPolicy{}, "", nil, nil)
+			r.Touch("consumer-x", "liqo-x", autoscalingv1alpha1.PlacementPolicy{}, "", "", nil, nil)
 			_ = r.Snapshot()
 		}()
 	}

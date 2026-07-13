@@ -164,7 +164,7 @@ func headroomByProvider(resp NodeGroupListResponse) map[string]int32 {
 func withPricePolicy(s *Server) {
 	s.consumers.Touch(consumerCluster, "liqo-c",
 		autoscalingv1alpha1.PlacementPolicy{Type: autoscalingv1alpha1.PlacementStrategyPrice},
-		"", nil, nil)
+		"", "", nil, nil)
 }
 
 // TestNodeGroupsPricePreference asserts the strictly-additive 4-case matrix

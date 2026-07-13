@@ -41,6 +41,10 @@ type ConsumerEntry struct {
 	// informational, surfaced on the dashboard.
 	Region string
 
+	// City is the consumer's most recently heartbeated city (may be empty);
+	// informational, surfaced on the dashboard alongside Region.
+	City string
+
 	// Latitude/Longitude are the consumer's coordinates (decimal degrees), valid
 	// only when HasLocation is true. Used by the latency placement strategy to
 	// rank providers by great-circle distance to this consumer. Stored as values
@@ -76,7 +80,7 @@ func NewConsumerRegistry() *ConsumerRegistry {
 // overwrite earlier ones, which is fine because the most recent heartbeat is by
 // definition the most accurate. lat/lon are accepted as pointers (the heartbeat
 // wire shape) and stored by value with HasLocation set only when both arrive.
-func (r *ConsumerRegistry) Touch(clusterID, liqoClusterID string, placement autoscalingv1alpha1.PlacementPolicy, region string, lat, lon *float64) {
+func (r *ConsumerRegistry) Touch(clusterID, liqoClusterID string, placement autoscalingv1alpha1.PlacementPolicy, region, city string, lat, lon *float64) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	entry := ConsumerEntry{
@@ -85,6 +89,7 @@ func (r *ConsumerRegistry) Touch(clusterID, liqoClusterID string, placement auto
 		LastSeen:      time.Now(),
 		Placement:     placement,
 		Region:        region,
+		City:          city,
 	}
 	if lat != nil && lon != nil {
 		entry.Latitude = *lat

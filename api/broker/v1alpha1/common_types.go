@@ -145,6 +145,13 @@ type Topology struct {
 	// +optional
 	Region string `json:"region,omitempty"`
 
+	// City is the human-readable city name of the provider's discovered location
+	// (e.g. "Frankfurt"). Informational only — surfaced on the Broker dashboard so
+	// operators can see the auto-discovered location; not a decision-engine input
+	// and not a node label.
+	// +optional
+	City string `json:"city,omitempty"`
+
 	// Latitude is the provider's geographic latitude in decimal degrees. It is
 	// a decision-engine input only (used by the latency placement strategy to
 	// compute great-circle distance to the consumer) and is NOT surfaced as a

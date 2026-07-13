@@ -56,20 +56,19 @@
         '{"data":{"brokerUrl":"https://{{ broker_address }}:{{ broker_node_port }}","clusterId":"{{ cluster_id }}","liqoClusterId":"{{ cluster_id }}","mockEcoUrl":"{{ fa_mock_eco_url }}","mockGeoUrl":"{{ fa_mock_geo_url }}"}}'
   changed_when: true
 
-# The consumer's region for the latency strategy (the origin point the Broker
-# measures provider distances from). Define `fa_cluster_region` in inventory; the
-# eco strategy ignores it (carbon is per-provider). Unset ⇒ no location ⇒ the
-# latency strategy applies no preference for this consumer (all providers exposed).
-- name: Set this consumer's region (latency placement origin)
+# The consumer's location (the origin point the Broker measures provider
+# distances from under the latency strategy) is AUTO-DISCOVERED from its node IP.
+# Optionally define `fa_advertised_ip` in inventory to OVERRIDE the node IP — set
+# it to an IP inside a mock-geo /26 block to place the consumer in a specific
+# city. Unset ⇒ the agent geolocates its own node IP.
+- name: Set this consumer's advertised-ip override (location discovery)
   delegate_to: localhost
-  when: fa_cluster_region is defined and (fa_cluster_region | length) > 0
+  when: fa_advertised_ip is defined and (fa_advertised_ip | length) > 0
   ansible.builtin.shell:
     cmd: |
       kubectl --kubeconfig {{ cluster_kubeconfig }} -n {{ fa_namespace }} \
-        create configmap agent-location \
-        --from-literal=location.yaml='region: "{{ fa_cluster_region }}"' \
-        --dry-run=client -o yaml | \
-        kubectl --kubeconfig {{ cluster_kubeconfig }} apply -f -
+        patch configmap agent-config --type merge -p \
+        '{"data":{"advertisedIp":"{{ fa_advertised_ip }}"}}'
   changed_when: true
 
 # Declare this consumer's placement policy. With type=Price the Broker, on each

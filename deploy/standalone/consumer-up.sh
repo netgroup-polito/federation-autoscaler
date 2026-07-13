@@ -11,8 +11,9 @@
 #   - Cluster Autoscaler <-> gRPC server: an in-cluster mTLS pair signed by a
 #     CONSUMER-LOCAL CA generated on the fly (unrelated to the federation CA).
 #
-# Placement policy + region are set afterwards from the consumer CONSOLE
-# (NodePort 30445), not by this script; the workload can be applied from there too.
+# Placement policy is set afterwards from the consumer CONSOLE (NodePort 30445),
+# not by this script; the workload can be applied from there too. Location is
+# auto-discovered from the node IP (no region to set).
 #
 # Usage:
 #   consumer-up.sh --bundle <file.tgz> --cluster-id <id>
@@ -231,8 +232,9 @@ Drive it from the consumer config console:
 
   http://${ep}:30445/
 
-  - pick the placement policy (No policy / Price / Eco / Latency) and a region
+  - pick the placement policy (Standard / Price / Eco / Latency)
   - flip the workload switch ON to scale up / OFF to scale down
+  (location is auto-discovered from the node IP, shown read-only)
 
 Watch the broker dashboard (http://<central-ip>:30444/) to see which provider
 each policy selects.

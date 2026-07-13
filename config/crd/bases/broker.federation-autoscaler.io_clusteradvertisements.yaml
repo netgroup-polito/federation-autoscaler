@@ -164,6 +164,13 @@ spec:
                   Topology is optional and is used by the Broker's decision engine and by
                   the gRPC server when stamping Liqo virtual-node labels.
                 properties:
+                  city:
+                    description: |-
+                      City is the human-readable city name of the provider's discovered location
+                      (e.g. "Frankfurt"). Informational only — surfaced on the Broker dashboard so
+                      operators can see the auto-discovered location; not a decision-engine input
+                      and not a node label.
+                    type: string
                   latitude:
                     description: |-
                       Latitude is the provider's geographic latitude in decimal degrees. It is

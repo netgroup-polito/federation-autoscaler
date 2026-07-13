@@ -4,9 +4,10 @@
 # Certificate: consumer-up.sh instead creates the `agent-client-cert` Secret
 # directly from the central-issued join bundle (client cert with CN=cluster-id,
 # signed by the federation CA). Everything else — the agent Deployment
-# (--role=consumer), agent-config, agent-location ConfigMap, the localapi
-# Service (:9090), the agent-console NodePort (30445), and the default-namespace
-# workload Role/RoleBinding — is inherited unchanged.
+# (--role=consumer), agent-config, the localapi Service (:9090), the agent-console
+# NodePort (30445), and the default-namespace workload Role/RoleBinding — is
+# inherited unchanged. (Location is auto-discovered from the node IP; there is no
+# location ConfigMap.)
 apiVersion: kustomize.config.k8s.io/v1beta1
 kind: Kustomization
 

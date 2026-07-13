@@ -34,8 +34,9 @@
 #   --mocks <ip> adds ONE extra single-node VM as the dedicated mock cluster
 #   (option A) hosting mock-eco + mock-geo for the eco/latency placement
 #   strategies. Its address is auto-wired into every agent. Omit it to run the
-#   price-only demo (eco/latency stay inert). Regions are still applied by hand,
-#   per cluster, via samples/*-location.yaml after bring-up.
+#   price-only demo (eco/latency stay inert). Each cluster's location is
+#   auto-discovered from its node IP (mock-geo maps IP → region + coords); set a
+#   per-host fa_advertised_ip to steer a cluster to a specific city.
 #
 # Example (the verified 1+1+2 demo topology):
 #   demo-up.sh --central 172.23.6.90 --consumers 172.23.6.91 \
@@ -349,15 +350,16 @@ Next steps — drive the demo from the browser in this order
  1) BROKER  (central) — watch the federation decide
 ──────────────────────────────────────────────────────────────────────────
   Read-only dashboard:  http://${CENTRAL}:30444/
-  Shows every provider advertisement (cost · carbon · region), live
-  reservations, the instruction phase machine, and chunk capacity. Keep it
+  Shows every provider advertisement (cost · carbon · auto-discovered location),
+  live reservations, the instruction phase machine, and chunk capacity. Keep it
   open — it is where you SEE which provider the broker picks for each policy.
 
 ──────────────────────────────────────────────────────────────────────────
  2) PROVIDERS — advertise what each one offers
 ──────────────────────────────────────────────────────────────────────────
-  Config console (set unit prices, region, advertised CPU/RAM %, then Submit;
-  changes reach the broker on the next advertisement ~30 s):
+  Config console (set unit prices, advertised CPU/RAM %, renewable flag, then
+  Submit; changes reach the broker on the next advertisement ~30 s. The console
+  also shows this provider's auto-discovered location read-only):
 EOF
 j=0
 for ip in "${PROVIDER_IPS[@]}"; do
@@ -367,7 +369,7 @@ done
 if [[ -z "$MOCKS" ]]; then
   cat <<EOF
   NOTE: eco/latency need the mock cluster — re-run with --mocks <ip>. Without
-  it, region/carbon are inert and only the Price policy is meaningful.
+  it, location/carbon are inert and only the Price policy is meaningful.
 EOF
 fi
 
@@ -381,9 +383,9 @@ cat <<EOF
       ${CONSUMER_IPS[0]} liqo-dashboard.local
     then browse:  http://liqo-dashboard.local
 
-  Config console (pick the placement policy — No policy / Price / Eco /
-  Latency — and a region, then flip the workload switch ON to scale up /
-  OFF to scale down; watch the broker dashboard react):
+  Config console (pick the placement policy — Standard / Price / Eco /
+  Latency — then flip the workload switch ON to scale up / OFF to scale down;
+  watch the broker dashboard react. Location is auto-discovered, shown read-only):
 EOF
 i=0
 for ip in "${CONSUMER_IPS[@]}"; do

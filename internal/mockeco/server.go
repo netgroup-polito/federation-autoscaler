@@ -32,8 +32,9 @@ import (
 
 // regionData holds a 24-hour carbon-intensity profile (gCO2eq/kWh) per region,
 // indexed by UTC hour. Values are realistic estimates by energy mix: hydro and
-// nuclear regions are low (Quebec, Ile-de-France ~20-80), coal-heavy regions are
-// high (New South Wales ~600-700). Region codes match the geo service.
+// nuclear regions are low (Quebec, Ile-de-France, Stockholm ~20-80), coal-heavy
+// regions are high (New South Wales, Mumbai ~600-780). Region codes match the geo
+// service (mock-geo maps IP→region→coords; this service maps that same region→carbon).
 var regionData = map[string][24]int{
 	"QC":  {25, 22, 20, 19, 18, 18, 20, 24, 30, 35, 38, 40, 42, 43, 41, 38, 35, 33, 30, 28, 27, 26, 25, 24},
 	"LOM": {320, 310, 300, 290, 285, 280, 290, 310, 340, 350, 330, 300, 270, 250, 240, 245, 260, 290, 320, 340, 350, 345, 335, 325},
@@ -45,6 +46,10 @@ var regionData = map[string][24]int{
 	"SP":  {90, 85, 80, 78, 75, 74, 78, 85, 100, 110, 115, 112, 105, 98, 92, 88, 90, 95, 105, 112, 115, 110, 100, 95},
 	"SG":  {420, 415, 410, 405, 400, 398, 400, 410, 430, 450, 460, 455, 445, 435, 428, 425, 430, 440, 450, 458, 460, 455, 445, 430},
 	"ENG": {250, 240, 230, 225, 220, 215, 220, 240, 270, 290, 285, 260, 240, 225, 215, 220, 235, 260, 280, 295, 300, 290, 275, 260},
+	// AB (Stockholm, Sweden): hydro + nuclear, among the cleanest grids — very low.
+	"AB": {20, 18, 16, 15, 14, 14, 16, 20, 26, 30, 32, 33, 34, 35, 33, 30, 28, 26, 24, 22, 21, 20, 19, 18},
+	// MH (Mumbai, India): coal-heavy grid — among the highest.
+	"MH": {680, 670, 660, 650, 645, 640, 650, 670, 700, 720, 740, 750, 745, 735, 720, 710, 715, 730, 750, 770, 780, 770, 750, 720},
 }
 
 // carbonResponse is the JSON shape consumed by the agent's eco client.

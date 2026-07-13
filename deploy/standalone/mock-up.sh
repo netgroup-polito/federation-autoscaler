@@ -4,7 +4,7 @@
 # dedicated mock cluster. Standalone (no Ansible); run by the mock-cluster admin.
 #
 # The mocks stand in for real carbon-intensity (mock-eco, GET /carbon?region=)
-# and geo-coordinate (mock-geo, GET /latlon?region=) APIs that feed the eco and
+# and geo-IP (mock-geo, GET /json/<ip>) APIs that feed the eco and
 # latency placement strategies. Provider/consumer agents fetch from them over
 # the network; the broker never calls them. In production you would skip this
 # script and instead point the agents' --mock-eco-url/--mock-geo-url at real

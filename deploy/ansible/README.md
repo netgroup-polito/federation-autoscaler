@@ -206,10 +206,12 @@ unauthenticated.
 Each consumer and provider cluster also serves a small **config console** — a
 plain-HTTP web UI (no login) at `http://<cluster-ip>:30445/` for setting that
 cluster's federation knobs from the browser instead of `kubectl apply`-ing YAML:
-the **consumer** console sets the placement policy (No policy / Price / Eco /
-Latency), the region, and applies/deletes the demo workload; the **provider**
-console sets unit prices, region, and advertised CPU/RAM capacity. It writes the
-same `ConsumerPolicy` / `agent-location` / `agent-prices` / `agent-capacity`
+the **consumer** console sets the placement policy (Standard / Price / Eco /
+Latency) and applies/deletes the demo workload; the **provider** console sets
+unit prices, advertised CPU/RAM capacity, and the renewable flag. Both consoles
+also show each cluster's **auto-discovered location** read-only (location is no
+longer operator-set — it is geolocated from the node IP). The console writes the
+same `ConsumerPolicy` / `agent-prices` / `agent-capacity` / `agent-renewable`
 resources the samples do, so changes take effect on the next heartbeat (~15 s) /
 advertisement (~30 s). It is unauthenticated AND write-capable — keep it on a
 trusted network (demo-grade only).

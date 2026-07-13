@@ -22,3 +22,7 @@ data:
   # mockEcoUrl is consumed by providers only; mockGeoUrl by both roles.
   mockEcoUrl: ""
   mockGeoUrl: ""
+  # Optional --advertised-ip override for automatic location discovery (the demo
+  # steering lever). Empty ⇒ the agent geolocates its own node IP. Set to a value
+  # inside a mock-geo CIDR to force this cluster's discovered location.
+  advertisedIp: ""

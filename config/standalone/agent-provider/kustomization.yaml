@@ -5,8 +5,9 @@
 # directly from the central-issued join bundle (a client cert with CN=cluster-id,
 # already signed by the federation CA). So this overlay applies cleanly on a
 # cluster with NO cert-manager CRDs. Everything else — the agent Deployment
-# (--role=provider), agent-config, agent-location / agent-prices / agent-capacity
-# ConfigMaps, and the agent-console NodePort (30445) — is inherited unchanged.
+# (--role=provider), agent-config, agent-prices / agent-capacity ConfigMaps, and
+# the agent-console NodePort (30445) — is inherited unchanged. (Location is
+# auto-discovered from the node IP; there is no location ConfigMap.)
 apiVersion: kustomize.config.k8s.io/v1beta1
 kind: Kustomization
 

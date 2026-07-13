@@ -92,7 +92,7 @@ func main() {
 		priceFile       string
 		capacityFile    string
 		renewableFile   string
-		regionFile      string
+		advertisedIP    string
 		mockEcoURL      string
 		mockGeoURL      string
 	)
@@ -141,19 +141,20 @@ func main() {
 			"declared renewable-energy flag (e.g. {\"renewable\":true}). Re-read every "+
 			"cycle so it can toggle without a restart. The standard composite default "+
 			"policy gives renewable providers a placement bonus. Empty/false ⇒ no bonus.")
-	flag.StringVar(&regionFile, "region-file", "",
-		"Path to a YAML/JSON file holding this cluster's region (e.g. {\"region\":\"QC\"}). "+
-			"Re-read every cycle so the region can change without a restart. Used by the "+
-			"eco strategy (providers advertise carbon for this region) and the latency "+
-			"strategy (providers and the consumer advertise this region's coordinates). "+
-			"Empty ⇒ no region, so this cluster opts out of the eco/latency strategies.")
+	flag.StringVar(&advertisedIP, "advertised-ip", "",
+		"Optional IP override for automatic location discovery (the demo/steering "+
+			"lever). When set, this IP is geolocated instead of the agent's own node "+
+			"IP. Empty ⇒ discover the node IP from v1.Node (ExternalIP, then "+
+			"InternalIP) using the NODE_NAME env.")
 	flag.StringVar(&mockEcoURL, "mock-eco-url", "",
 		"(provider role only) Base URL of the carbon-intensity service, e.g. "+
-			"http://mock-eco:8081. Empty ⇒ advertise no carbon intensity.")
+			"http://mock-eco:8081. Keyed by the discovered region code. Empty ⇒ "+
+			"advertise no carbon intensity.")
 	flag.StringVar(&mockGeoURL, "mock-geo-url", "",
-		"Base URL of the geo-coordinates service, e.g. http://mock-geo:8080. Used by "+
-			"both roles to resolve --region-file to coordinates. Empty ⇒ advertise a "+
-			"region without coordinates (the latency strategy then has no effect).")
+		"Base URL of the geo-IP service, e.g. http://mock-geo:8080. Used by both "+
+			"roles to resolve this cluster's node IP to a region + coordinates. "+
+			"Empty ⇒ advertise no location (the eco/latency strategies then have no "+
+			"effect for this cluster).")
 
 	opts := zap.Options{Development: true}
 	opts.BindFlags(flag.CommandLine)
@@ -167,12 +168,19 @@ func main() {
 		os.Exit(1)
 	}
 
+	// The node this pod runs on, injected via the NODE_NAME downward-API env
+	// (spec.nodeName). Its IP is auto-discovered and geolocated for the eco/
+	// latency placement strategies; --advertised-ip overrides it.
+	nodeName := os.Getenv("NODE_NAME")
+
 	setupLog.Info("starting agent",
 		"role", role,
 		"clusterID", clusterID,
 		"liqoClusterID", liqoClusterID,
 		"brokerURL", brokerURL,
-		"pollInterval", pollInterval)
+		"pollInterval", pollInterval,
+		"nodeName", nodeName,
+		"advertisedIP", advertisedIP)
 
 	// Local-cluster client is used by the poll loop and the local REST API to
 	// interact with the Kubernetes API of this cluster (create ResourceSlices
@@ -247,7 +255,8 @@ func main() {
 			LocalAPIAddr:  localAPIAddr,
 			ConsoleAddr:   consoleAddr,
 			Namespace:     namespace,
-			RegionFile:    regionFile,
+			NodeName:      nodeName,
+			AdvertisedIP:  advertisedIP,
 			MockGeoURL:    mockGeoURL,
 			Logger:        ctrl.Log.WithName("consumer"),
 			Probe:         probe,
@@ -265,7 +274,8 @@ func main() {
 			PriceFile:     priceFile,
 			CapacityFile:  capacityFile,
 			RenewableFile: renewableFile,
-			RegionFile:    regionFile,
+			NodeName:      nodeName,
+			AdvertisedIP:  advertisedIP,
 			MockEcoURL:    mockEcoURL,
 			MockGeoURL:    mockGeoURL,
 			ConsoleAddr:   consoleAddr,

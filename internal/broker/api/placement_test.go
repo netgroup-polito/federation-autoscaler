@@ -56,26 +56,26 @@ func stdAdvRenewable(name string, reserved int32, renewable bool) *brokerv1alpha
 // withStandardPolicy records an explicit Standard-preferring heartbeat.
 func withStandardPolicy(s *Server) {
 	s.consumers.Touch(consumerCluster, "liqo-c",
-		autoscalingv1alpha1.PlacementPolicy{Type: autoscalingv1alpha1.PlacementStrategyStandard}, "", nil, nil)
+		autoscalingv1alpha1.PlacementPolicy{Type: autoscalingv1alpha1.PlacementStrategyStandard}, "", "", nil, nil)
 }
 
 func withEcoPolicy(s *Server) {
 	s.consumers.Touch(consumerCluster, "liqo-c",
-		autoscalingv1alpha1.PlacementPolicy{Type: autoscalingv1alpha1.PlacementStrategyEco}, "", nil, nil)
+		autoscalingv1alpha1.PlacementPolicy{Type: autoscalingv1alpha1.PlacementStrategyEco}, "", "", nil, nil)
 }
 
 // withLatencyPolicy records a Latency-preferring heartbeat WITH a consumer location.
 func withLatencyPolicy(s *Server, lat, lon float64) {
 	la, lo := lat, lon
 	s.consumers.Touch(consumerCluster, "liqo-c",
-		autoscalingv1alpha1.PlacementPolicy{Type: autoscalingv1alpha1.PlacementStrategyLatency}, "QC", &la, &lo)
+		autoscalingv1alpha1.PlacementPolicy{Type: autoscalingv1alpha1.PlacementStrategyLatency}, "QC", "", &la, &lo)
 }
 
 // withLatencyPolicyNoLocation records a Latency-preferring heartbeat with NO
 // consumer location — the no-op case (R2).
 func withLatencyPolicyNoLocation(s *Server) {
 	s.consumers.Touch(consumerCluster, "liqo-c",
-		autoscalingv1alpha1.PlacementPolicy{Type: autoscalingv1alpha1.PlacementStrategyLatency}, "", nil, nil)
+		autoscalingv1alpha1.PlacementPolicy{Type: autoscalingv1alpha1.PlacementStrategyLatency}, "", "", nil, nil)
 }
 
 // TestNodeGroupsEcoPreference mirrors the price matrix: masking happens only

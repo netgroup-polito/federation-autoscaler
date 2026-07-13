@@ -3,8 +3,9 @@
  Federation-Autoscaler Consumer Console.
 
  Self-contained single page (no build step, no external assets) embedded into the
- agent binary via //go:embed. It reads GET /api/state + GET /api/regions on load
- and POSTs to /api/policy, /api/region, /api/workload.
+ agent binary via //go:embed. It reads GET /api/state on load (which includes the
+ auto-discovered location, shown read-only) and POSTs to /api/policy,
+ /api/workload, /api/reservation.
 
  Security note: served on a plain-HTTP, unauthenticated listener that WRITES
  cluster state. Demo-grade only. Every dynamic value is set via textContent
@@ -122,14 +123,11 @@
       </div>
     </section>
 
-    <!-- Region -->
+    <!-- Location (auto-discovered, read-only) -->
     <section>
-      <h2>Region</h2>
-      <p class="hint">Your cluster's location (the latency strategy's origin). Applied via the agent-location ConfigMap; takes effect within ~60&nbsp;s.</p>
-      <div class="row">
-        <select id="regionSelect"></select>
-        <button id="regionSubmit" disabled>Apply region</button>
-      </div>
+      <h2>Location</h2>
+      <p class="hint">Auto-discovered from this cluster's node IP — the latency strategy's origin. Read-only; set the demo override with the agent's <code>--advertised-ip</code> flag.</p>
+      <div id="locationBox" class="hint">discovering…</div>
     </section>
 
     <!-- Workload -->
@@ -177,7 +175,7 @@
       { value: "Latency", t: "Latency",   d: "Prefer the closest provider." },
     ];
 
-    let current = { policy: "", region: "", workloadPresent: false };
+    let current = { policy: "", workloadPresent: false };
     let selectedPolicy = "";
 
     function toast(msg, isErr) {
@@ -225,22 +223,19 @@
       return p ? p.t : value;
     }
 
-    async function loadRegions() {
-      const res = await fetch("/api/regions");
-      const data = await res.json();
-      const sel = document.getElementById("regionSelect");
-      sel.textContent = "";
-      const none = document.createElement("option");
-      none.value = ""; none.textContent = "— none —";
-      sel.appendChild(none);
-      for (const r of (data.regions || [])) {
-        const o = document.createElement("option");
-        o.value = r.code; o.textContent = r.code + " — " + r.city;
-        sel.appendChild(o);
-      }
-      sel.onchange = () => {
-        document.getElementById("regionSubmit").disabled = (sel.value === current.region);
-      };
+    // renderLocation shows the auto-discovered location (read-only). loc is null
+    // when discovery is off; when the IP matched no known subnet the place line
+    // says so but the IP is still shown.
+    function renderLocation(loc) {
+      const box = document.getElementById("locationBox");
+      if (!loc) { box.textContent = "not configured (no node IP / mock-geo URL)"; return; }
+      const place = [loc.city, loc.region, loc.country].filter(Boolean).join(", ")
+        || "IP not in any known subnet";
+      const meta = [];
+      if (loc.lat || loc.lon) meta.push((loc.lat || 0).toFixed(4) + ", " + (loc.lon || 0).toFixed(4));
+      if (loc.ip) meta.push("IP " + loc.ip + (loc.source === "advertised-ip" ? " (override)" : ""));
+      box.innerHTML = "<strong>" + place + "</strong>" +
+        (meta.length ? ' <span class="ns">— ' + meta.join(" · ") + "</span>" : "");
     }
 
     function fmtRes(m) {
@@ -257,15 +252,12 @@
       document.getElementById("clusterId").textContent = "cluster: " + (st.clusterId || "—");
       document.getElementById("liqoId").textContent = st.liqoClusterId ? "liqo: " + st.liqoClusterId : "";
       current.policy = st.policy || "";
-      current.region = st.region || "";
       selectedPolicy = current.policy;
       renderPolicyCards();
       refreshPolicySubmit();
       document.getElementById("policyCurrent").textContent = "current: " + labelFor(current.policy);
 
-      const sel = document.getElementById("regionSelect");
-      sel.value = current.region;
-      document.getElementById("regionSubmit").disabled = true;
+      renderLocation(st.location);
 
       const wl = st.workload || {};
       current.workloadPresent = !!wl.present;
@@ -310,14 +302,6 @@
         await loadState();
       } catch (e) { toast(e.message, true); }
     };
-    document.getElementById("regionSubmit").onclick = async () => {
-      const region = document.getElementById("regionSelect").value;
-      try {
-        await postJSON("/api/region", { region });
-        toast("Region set to “" + (region || "none") + "” — takes effect within ~60 s");
-        await loadState();
-      } catch (e) { toast(e.message, true); }
-    };
     document.getElementById("wlToggle").onchange = async (ev) => {
       const action = ev.target.checked ? "apply" : "delete";
       try {
@@ -350,7 +334,7 @@
     };
 
     (async () => {
-      try { await loadRegions(); await loadState(); }
+      try { await loadState(); }
       catch (e) { toast("Failed to load: " + e.message, true); }
     })();
   </script>

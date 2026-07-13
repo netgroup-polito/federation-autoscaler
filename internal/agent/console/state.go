@@ -31,18 +31,35 @@ import (
 	"sigs.k8s.io/yaml"
 
 	autoscalingv1alpha1 "github.com/netgroup-polito/federation-autoscaler/api/autoscaling/v1alpha1"
+	"github.com/netgroup-polito/federation-autoscaler/internal/agent/nodeip"
 )
 
 // consumerState is the GET /api/state body on a consumer; it lets the UI
-// pre-select the current policy/region and reflect the workload switch.
+// pre-select the current policy, show the auto-discovered location, and reflect
+// the workload switch.
 type consumerState struct {
 	Role               string                  `json:"role"`
 	ClusterID          string                  `json:"clusterId"`
 	LiqoClusterID      string                  `json:"liqoClusterId"`
 	Policy             string                  `json:"policy"`
-	Region             string                  `json:"region"`
+	Location           *discoveredLocation     `json:"location,omitempty"`
 	Workload           workloadInfo            `json:"workload"`
 	ManualReservations []manualReservationInfo `json:"manualReservations"`
+}
+
+// discoveredLocation is this cluster's auto-discovered location, shown read-only
+// in the console (location is no longer operator-set). Region/City/Country/Lat/Lon
+// are populated when the geo lookup succeeds; IP/Source are always set when
+// discovery is enabled so an operator can see which IP was geolocated and whether
+// it came from the node or an --advertised-ip override.
+type discoveredLocation struct {
+	IP      string  `json:"ip,omitempty"`
+	Source  string  `json:"source,omitempty"` // "node" | "advertised-ip"
+	Region  string  `json:"region,omitempty"`
+	City    string  `json:"city,omitempty"`
+	Country string  `json:"country,omitempty"`
+	Lat     float64 `json:"lat,omitempty"`
+	Lon     float64 `json:"lon,omitempty"`
 }
 
 // manualReservationInfo is one console-managed ResourceRequest (manual
@@ -61,19 +78,19 @@ type manualReservationInfo struct {
 
 // providerState is the GET /api/state body on a provider.
 type providerState struct {
-	Role          string            `json:"role"`
-	ClusterID     string            `json:"clusterId"`
-	LiqoClusterID string            `json:"liqoClusterId"`
-	Prices        map[string]string `json:"prices"`
-	Region        string            `json:"region"`
-	Capacity      map[string]string `json:"capacity"`
-	Renewable     bool              `json:"renewable"`
+	Role          string              `json:"role"`
+	ClusterID     string              `json:"clusterId"`
+	LiqoClusterID string              `json:"liqoClusterId"`
+	Prices        map[string]string   `json:"prices"`
+	Location      *discoveredLocation `json:"location,omitempty"`
+	Capacity      map[string]string   `json:"capacity"`
+	Renewable     bool                `json:"renewable"`
 }
 
 // handleState returns the current settings so the UI can pre-fill its controls.
 func (s *Server) handleState(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
-	region := s.readRegion(ctx)
+	location := s.discoverLocation(ctx)
 	if s.role == RoleConsumer {
 		info, err := staticWorkloadInfo()
 		if err != nil {
@@ -86,7 +103,7 @@ func (s *Server) handleState(w http.ResponseWriter, r *http.Request) {
 			ClusterID:          s.clusterID,
 			LiqoClusterID:      s.liqoClusterID,
 			Policy:             s.readPolicy(ctx),
-			Region:             region,
+			Location:           location,
 			Workload:           info,
 			ManualReservations: s.listManualReservations(ctx),
 		})
@@ -97,10 +114,45 @@ func (s *Server) handleState(w http.ResponseWriter, r *http.Request) {
 		ClusterID:     s.clusterID,
 		LiqoClusterID: s.liqoClusterID,
 		Prices:        s.readPrices(ctx),
-		Region:        region,
+		Location:      location,
 		Capacity:      s.readCapacity(ctx),
 		Renewable:     s.readRenewable(ctx),
 	})
+}
+
+// discoverLocation resolves this cluster's node IP (or the --advertised-ip
+// override) and geolocates it (mock-geo), returning a read-only view for the UI.
+// It mirrors exactly what the agent's poller advertises. Returns nil when
+// discovery is off (no node/IP) so the UI shows "not configured". A geo failure
+// still returns the IP/Source (the location fields stay empty) so an operator can
+// see which IP was resolved.
+func (s *Server) discoverLocation(ctx context.Context) *discoveredLocation {
+	ip, err := nodeip.Resolve(ctx, s.local, s.nodeName, s.advertisedIP)
+	if err != nil {
+		s.log.V(1).Info("console: node IP discovery failed", "err", err.Error())
+		return nil
+	}
+	if ip == "" {
+		return nil
+	}
+	source := "node"
+	if s.advertisedIP != "" {
+		source = "advertised-ip"
+	}
+	dl := &discoveredLocation{IP: ip, Source: source}
+	loc, ok, err := s.geoClient.Lookup(ctx, s.mockGeoURL, ip)
+	if err != nil {
+		s.log.V(1).Info("console: geo lookup failed", "ip", ip, "err", err.Error())
+		return dl
+	}
+	if ok {
+		dl.Region = loc.Region
+		dl.City = loc.City
+		dl.Country = loc.CountryCode
+		dl.Lat = loc.Lat
+		dl.Lon = loc.Lon
+	}
+	return dl
 }
 
 // listManualReservations returns all console-managed ResourceRequests in the
@@ -165,23 +217,6 @@ func (s *Server) readPolicy(ctx context.Context) string {
 		return ""
 	}
 	return string(cp.Spec.Placement.Type)
-}
-
-// readRegion returns the region currently in the agent-location ConfigMap, or
-// "" when unset/absent.
-func (s *Server) readRegion(ctx context.Context) string {
-	raw := s.readConfigMapKey(ctx, locationConfigMap, locationKey)
-	if raw == "" {
-		return ""
-	}
-	var loc struct {
-		Region string `json:"region"`
-	}
-	if err := yaml.Unmarshal([]byte(raw), &loc); err != nil {
-		s.log.V(1).Info("agent-location unparseable", "err", err.Error())
-		return ""
-	}
-	return strings.TrimSpace(loc.Region)
 }
 
 // readPrices returns the cpu/memory unit prices in the agent-prices ConfigMap as

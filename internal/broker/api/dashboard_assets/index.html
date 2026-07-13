@@ -136,7 +136,7 @@
         <th>Provider</th><th>Type</th><th>Total</th><th>Reserved</th><th>Available</th>
         <th>Cost/chunk</th>
         <th>Carbon</th>
-        <th>Region</th>
+        <th>Location</th>
         <th>Custom</th>
         <th>Renew</th>
         <th>Ready</th><th>Last seen</th><th>Alloc. CPU</th><th>Alloc. Mem</th>
@@ -182,7 +182,7 @@
   <section>
     <h2>Registered Consumers <span class="count" id="consCount">0</span></h2>
     <div class="table-wrap"><table>
-      <thead><tr><th>Consumer cluster</th><th>Liqo cluster ID</th><th>Policy</th><th>Region</th><th>Last heartbeat</th></tr></thead>
+      <thead><tr><th>Consumer cluster</th><th>Liqo cluster ID</th><th>Policy</th><th>Location</th><th>Last heartbeat</th></tr></thead>
       <tbody id="consBody"></tbody>
     </table></div>
   </section>
@@ -323,6 +323,14 @@
       return v.toFixed(0) + arrow;
     }
 
+    // fmtLocation renders the auto-discovered location as "City (REGION)", or just
+    // whichever is present; "—" when neither is. city/region come straight from
+    // the advertisement topology or the consumer heartbeat.
+    function fmtLocation(city, region) {
+      if (city && region) return city + " (" + region + ")";
+      return city || region || "—";
+    }
+
     function fmtCapacityCustom(pct, fixed) {
       const parts = [];
       for (const k of Object.keys(pct || {}).sort()) {
@@ -354,9 +362,9 @@
         // Carbon: the broker's 6-hour weighted value (what the eco strategy ranks
         // on) with a rising/falling arrow from the forecast; "—" when none. Lowest wins.
         tr.appendChild(td(fmtCarbon(a), { mono: true }));
-        // Advertised region (topology.region); "—" when unset. Drives the eco
-        // (carbon) + latency (distance) strategies.
-        tr.appendChild(td(a.topology && a.topology.region ? a.topology.region : "—", { mono: true }));
+        // Auto-discovered location (topology.city + region); "—" when unset.
+        // Drives the eco (carbon) + latency (distance) strategies.
+        tr.appendChild(td(fmtLocation(a.topology && a.topology.city, a.topology && a.topology.region), { mono: true }));
         // Per-resource advertised-capacity customization (e.g. "mem 50%" or
         // "mem 8Gi"); "—" when the provider advertises its full allocatable.
         tr.appendChild(td(fmtCapacityCustom(a.capacityScalePercent, a.capacityFixed), { mono: true }));
@@ -429,8 +437,8 @@
         // Placement policy the consumer pushed on its heartbeat ("Price"/"Eco"/
         // "Latency"; blank = no preference / Broker default).
         tr.appendChild(pill(c.placement || "Standard", "blue"));
-        // Consumer's pushed region (latency origin); "—" when unset.
-        tr.appendChild(td(c.region ? c.region : "—", { mono: true }));
+        // Consumer's auto-discovered location (latency origin); "—" when unset.
+        tr.appendChild(td(fmtLocation(c.city, c.region), { mono: true }));
         tr.appendChild(td(fmtTime(c.lastSeen)));
         tbody.appendChild(tr);
       }

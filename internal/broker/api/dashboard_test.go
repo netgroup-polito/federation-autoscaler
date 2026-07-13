@@ -140,8 +140,8 @@ func dashboardSeed() []client.Object {
 // exposes kubeconfig material.
 func TestDashboardBuildOverview(t *testing.T) {
 	s := newDashboardTestServer(t, dashboardSeed()...)
-	s.consumers.Touch(consumerCluster, "liqo-ca", autoscalingv1alpha1.PlacementPolicy{}, "", nil, nil)
-	s.consumers.Touch("consumer-b", "liqo-cb", autoscalingv1alpha1.PlacementPolicy{}, "", nil, nil)
+	s.consumers.Touch(consumerCluster, "liqo-ca", autoscalingv1alpha1.PlacementPolicy{}, "", "", nil, nil)
+	s.consumers.Touch("consumer-b", "liqo-cb", autoscalingv1alpha1.PlacementPolicy{}, "", "", nil, nil)
 
 	ov, err := s.buildOverview(context.Background())
 	if err != nil {

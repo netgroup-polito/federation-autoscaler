@@ -7,8 +7,9 @@
 #
 # It installs Liqo (control plane only — peering happens at runtime), creates
 # the agent's mTLS client Secret from the bundle, deploys the provider agent,
-# and points it at the broker. Prices / region / advertised-capacity are set
+# and points it at the broker. Prices / advertised-capacity / renewable are set
 # afterwards from the provider CONSOLE (NodePort 30445), not by this script.
+# Location is auto-discovered from the node IP (no region to set).
 #
 # Usage:
 #   provider-up.sh --bundle <file.tgz> --cluster-id <id>
@@ -122,9 +123,9 @@ echo
 ok "Provider '${CLUSTER_ID}' is up and advertising to the broker."
 cat <<EOF
 
-Set this provider's unit prices, region, and advertised CPU/RAM % from its
-config console (or apply the agent-prices / agent-location / agent-capacity
-ConfigMaps by hand):
+Set this provider's unit prices, advertised CPU/RAM %, and renewable flag from
+its config console (or apply the agent-prices / agent-capacity / agent-renewable
+ConfigMaps by hand). Location is auto-discovered from the node IP:
 
   http://${ep}:30445/
 

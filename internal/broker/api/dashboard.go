@@ -143,7 +143,9 @@ type ConsumerView struct {
 	Placement string `json:"placement,omitempty"`
 	// Region is the consumer's pushed region (may be empty); the latency strategy
 	// measures provider distances from this consumer's coordinates.
-	Region   string      `json:"region,omitempty"`
+	Region string `json:"region,omitempty"`
+	// City is the consumer's auto-discovered city (may be empty); informational.
+	City     string      `json:"city,omitempty"`
 	LastSeen metav1.Time `json:"lastSeen"`
 }
 
@@ -247,6 +249,7 @@ func (s *Server) buildOverview(ctx context.Context) (Overview, error) {
 			LiqoClusterID: e.LiqoClusterID,
 			Placement:     string(e.Placement.Type),
 			Region:        e.Region,
+			City:          e.City,
 			LastSeen:      metav1.NewTime(e.LastSeen),
 		})
 	}

@@ -80,14 +80,15 @@ type Options struct {
 	// "liqoctl" (resolved via $PATH).
 	LiqoctlPath string
 
-	// RegionFile is an optional path to this consumer's region file, re-read on
-	// every heartbeat (see heartbeat.Options). Empty ⇒ the consumer pushes no
-	// location, so the latency strategy has no effect for it.
-	RegionFile string
+	// NodeName is the node this agent pod runs on (NODE_NAME downward API); its IP
+	// is auto-discovered and geolocated (see heartbeat.Options). AdvertisedIP
+	// optionally overrides it (--advertised-ip). Empty NodeName + empty
+	// AdvertisedIP ⇒ the consumer pushes no location.
+	NodeName     string
+	AdvertisedIP string
 
-	// MockGeoURL is the base URL of the geo-coordinates service (see
-	// heartbeat.Options). Empty ⇒ the consumer pushes its region without
-	// coordinates.
+	// MockGeoURL is the base URL of the geo-IP service (see heartbeat.Options).
+	// Empty ⇒ the consumer pushes no location.
 	MockGeoURL string
 
 	// LocalAPIAddr is the address the loopback REST server (substep
@@ -190,7 +191,8 @@ func Run(ctx context.Context, opts Options) error {
 		LiqoClusterID: opts.LiqoClusterID,
 		LocalClient:   opts.LocalClient,
 		Namespace:     namespace,
-		RegionFile:    opts.RegionFile,
+		NodeName:      opts.NodeName,
+		AdvertisedIP:  opts.AdvertisedIP,
 		MockGeoURL:    opts.MockGeoURL,
 		Logger:        logger.WithName("heartbeat"),
 		// Same semantics as the provider's advertisement publisher:
@@ -227,6 +229,9 @@ func Run(ctx context.Context, opts Options) error {
 			Namespace:     namespace,
 			ClusterID:     opts.ClusterID,
 			LiqoClusterID: opts.LiqoClusterID,
+			NodeName:      opts.NodeName,
+			AdvertisedIP:  opts.AdvertisedIP,
+			MockGeoURL:    opts.MockGeoURL,
 			Logger:        logger.WithName("console"),
 		})
 		if err != nil {

@@ -92,46 +92,6 @@ func wantStatus(t *testing.T, got, want int) {
 	}
 }
 
-// --- Region (ConfigMap upsert: create + update paths) ------------------------
-
-func TestRegionUpsertCreatesConfigMap(t *testing.T) {
-	fc, ts := newTestServer(t, RoleConsumer)
-	wantStatus(t, post(t, ts, "/api/region", `{"region":"QC"}`), http.StatusOK)
-
-	var cm corev1.ConfigMap
-	if err := fc.Get(context.Background(), types.NamespacedName{Namespace: testNS, Name: locationConfigMap}, &cm); err != nil {
-		t.Fatalf("get agent-location: %v", err)
-	}
-	if got := cm.Data[locationKey]; !strings.Contains(got, `region: "QC"`) {
-		t.Errorf("location.yaml = %q, want region QC", got)
-	}
-}
-
-func TestRegionUpsertUpdatesAndPreservesOtherKeys(t *testing.T) {
-	existing := &corev1.ConfigMap{
-		ObjectMeta: metav1.ObjectMeta{Name: locationConfigMap, Namespace: testNS},
-		Data:       map[string]string{locationKey: "region: \"NSW\"\n", "extra": "keep-me"},
-	}
-	fc, ts := newTestServer(t, RoleProvider, existing)
-	wantStatus(t, post(t, ts, "/api/region", `{"region":"IDF"}`), http.StatusOK)
-
-	var cm corev1.ConfigMap
-	if err := fc.Get(context.Background(), types.NamespacedName{Namespace: testNS, Name: locationConfigMap}, &cm); err != nil {
-		t.Fatalf("get: %v", err)
-	}
-	if !strings.Contains(cm.Data[locationKey], `region: "IDF"`) {
-		t.Errorf("region not updated: %q", cm.Data[locationKey])
-	}
-	if cm.Data["extra"] != "keep-me" {
-		t.Errorf("unrelated key clobbered: %q", cm.Data["extra"])
-	}
-}
-
-func TestRegionRejectsUnknownCode(t *testing.T) {
-	_, ts := newTestServer(t, RoleConsumer)
-	wantStatus(t, post(t, ts, "/api/region", `{"region":"ZZ"}`), http.StatusBadRequest)
-}
-
 // --- ConsumerPolicy (create / update / delete) -------------------------------
 
 func TestPolicyCreateUpdateDelete(t *testing.T) {
@@ -314,7 +274,7 @@ func TestReservationApplyDelete(t *testing.T) {
 
 	// the state endpoint lists the remaining reservation.
 	var st consumerState
-	getJSON(t, ts, "/api/state", &st)
+	getState(t, ts, &st)
 	if len(st.ManualReservations) != 1 {
 		t.Errorf("state manualReservations = %d, want 1", len(st.ManualReservations))
 	}
@@ -331,16 +291,17 @@ func TestStateConsumer(t *testing.T) {
 		ObjectMeta: metav1.ObjectMeta{Name: consumerPolicyName, Namespace: testNS},
 		Spec:       autoscalingv1alpha1.ConsumerPolicySpec{Placement: autoscalingv1alpha1.PlacementPolicy{Type: autoscalingv1alpha1.PlacementStrategyLatency}},
 	}
-	loc := &corev1.ConfigMap{
-		ObjectMeta: metav1.ObjectMeta{Name: locationConfigMap, Namespace: testNS},
-		Data:       map[string]string{locationKey: "region: \"QC\"\n"},
-	}
-	_, ts := newTestServer(t, RoleConsumer, cp, loc)
+	_, ts := newTestServer(t, RoleConsumer, cp)
 
 	var st consumerState
-	getJSON(t, ts, "/api/state", &st)
-	if st.Role != RoleConsumer || st.Policy != "Latency" || st.Region != "QC" {
+	getState(t, ts, &st)
+	if st.Role != RoleConsumer || st.Policy != "Latency" {
 		t.Errorf("state = %+v", st)
+	}
+	// No NodeName / MockGeoURL configured on the test server ⇒ location discovery
+	// is off and the state carries no location.
+	if st.Location != nil {
+		t.Errorf("location = %+v, want nil (discovery disabled)", st.Location)
 	}
 	if st.ClusterID != testClusterID || st.LiqoClusterID != testLiqoID {
 		t.Errorf("identity = %q / %q, want %q / %q", st.ClusterID, st.LiqoClusterID, testClusterID, testLiqoID)
@@ -368,7 +329,7 @@ func TestStateProvider(t *testing.T) {
 	_, ts := newTestServer(t, RoleProvider, prices, capacity)
 
 	var st providerState
-	getJSON(t, ts, "/api/state", &st)
+	getState(t, ts, &st)
 	if st.Role != RoleProvider {
 		t.Fatalf("role = %q", st.Role)
 	}
@@ -380,34 +341,6 @@ func TestStateProvider(t *testing.T) {
 	}
 	if st.Capacity["cpu"] != "80" || st.Capacity["memory"] != "8Gi" {
 		t.Errorf("capacity = %+v (want raw literals: percent \"80\", fixed \"8Gi\")", st.Capacity)
-	}
-}
-
-// --- GET /api/regions --------------------------------------------------------
-
-func TestRegionsEndpoint(t *testing.T) {
-	_, ts := newTestServer(t, RoleConsumer)
-	var out struct {
-		Regions []struct {
-			Code string `json:"code"`
-			City string `json:"city"`
-		} `json:"regions"`
-	}
-	getJSON(t, ts, "/api/regions", &out)
-	if len(out.Regions) != 10 {
-		t.Fatalf("want 10 regions, got %d", len(out.Regions))
-	}
-	seen := map[string]bool{}
-	for _, r := range out.Regions {
-		if r.Code == "" || r.City == "" {
-			t.Errorf("incomplete region: %+v", r)
-		}
-		seen[r.Code] = true
-	}
-	for _, code := range []string{"QC", "IDF", "ENG", "NSW", "13"} {
-		if !seen[code] {
-			t.Errorf("missing region %q", code)
-		}
 	}
 }
 
@@ -462,16 +395,18 @@ func TestEmbeddedWorkloadSizing(t *testing.T) {
 
 // --- helpers -----------------------------------------------------------------
 
-func getJSON(t *testing.T, ts *httptest.Server, path string, dst any) {
+// getState fetches GET /api/state and decodes it into dst (the only JSON GET the
+// console now exposes; region listing was removed with the region selector).
+func getState(t *testing.T, ts *httptest.Server, dst any) {
 	t.Helper()
-	resp, err := http.Get(ts.URL + path)
+	resp, err := http.Get(ts.URL + "/api/state")
 	if err != nil {
-		t.Fatalf("GET %s: %v", path, err)
+		t.Fatalf("GET /api/state: %v", err)
 	}
 	defer func() { _ = resp.Body.Close() }()
 	wantStatus(t, resp.StatusCode, http.StatusOK)
 	if err := json.NewDecoder(resp.Body).Decode(dst); err != nil {
-		t.Fatalf("decode %s: %v", path, err)
+		t.Fatalf("decode /api/state: %v", err)
 	}
 }
 
@@ -501,14 +436,14 @@ func TestRenewableToggle(t *testing.T) {
 		t.Errorf("want renewable: true, got %q", cm.Data[renewableKey])
 	}
 	var st providerState
-	getJSON(t, ts, "/api/state", &st)
+	getState(t, ts, &st)
 	if !st.Renewable {
 		t.Error("state.renewable should be true")
 	}
 
 	// Clearing it flips the state back.
 	wantStatus(t, post(t, ts, "/api/renewable", `{"renewable":false}`), http.StatusOK)
-	getJSON(t, ts, "/api/state", &st)
+	getState(t, ts, &st)
 	if st.Renewable {
 		t.Error("state.renewable should be false after clearing")
 	}

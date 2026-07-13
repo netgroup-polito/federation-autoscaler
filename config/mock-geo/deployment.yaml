@@ -1,7 +1,8 @@
-# mock-geo Deployment — a demo-only HTTP stand-in for a region→coordinates geo
-# API, deployed on the dedicated mock cluster. Both agent roles fetch their own
-# region's coordinates from it (GET /latlon?region=<code>) and advertise them so
-# the Broker can rank providers by distance under the latency strategy.
+# mock-geo Deployment — a demo-only HTTP stand-in for an ip-api.com-style geo-IP
+# API, deployed on the dedicated mock cluster. Both agent roles geolocate their
+# own node IP against it (GET /json/<ip>, longest-prefix CIDR match) and advertise
+# the resulting coordinates so the Broker can rank providers by distance under the
+# latency strategy.
 apiVersion: apps/v1
 kind: Deployment
 metadata:

@@ -260,17 +260,21 @@ type HeartbeatRequest struct {
 	// (no preference).
 	Placement *autoscalingv1alpha1.PlacementPolicy `json:"placement,omitempty"`
 
-	// Region is the consumer's region identifier (optional). Read from the
-	// agent-location ConfigMap and pushed every heartbeat; surfaced on the
-	// dashboard. Informational alongside the latency strategy.
+	// Region is the consumer's region identifier (optional). Auto-discovered by
+	// the Consumer Agent (its node IP → geo service) and pushed every heartbeat;
+	// surfaced on the dashboard. Informational alongside the latency strategy.
 	Region string `json:"region,omitempty"`
 
+	// City is the human-readable city of the consumer's discovered location
+	// (optional). Informational only, surfaced on the dashboard.
+	City string `json:"city,omitempty"`
+
 	// Latitude/Longitude are the consumer's geographic coordinates in decimal
-	// degrees (optional). The Consumer Agent fetches them from a geo service
-	// (mock-geo in the demo) keyed by Region. The Broker uses them for the
-	// latency placement strategy (great-circle distance to each provider). nil
-	// means the consumer advertised no location, in which case the latency
-	// strategy applies no preference.
+	// degrees (optional). The Consumer Agent auto-discovers them from a geo
+	// service (mock-geo in the demo) keyed by its node IP. The Broker uses them
+	// for the latency placement strategy (great-circle distance to each
+	// provider). nil means the consumer advertised no location, in which case the
+	// latency strategy applies no preference.
 	Latitude  *float64 `json:"latitude,omitempty"`
 	Longitude *float64 `json:"longitude,omitempty"`
 }

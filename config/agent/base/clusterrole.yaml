@@ -25,7 +25,9 @@
 #                                              even though we never use them
 #
 # Provider role uses:
-#   - core/nodes                               snapshot for advertisements
+#   - core/nodes                               snapshot for advertisements +
+#                                              node-IP read for auto-location
+#                                              (both roles: geo discovery)
 #   - core/namespaces                          liqoctl creates a tenant ns
 #                                              (default name liqo-tenant-<id>)
 #                                              and listNamespaces filters by
@@ -82,10 +84,10 @@ rules:
 # us read configmaps ourselves.
 #
 # create/update/patch are additionally required by the config console
-# (internal/agent/console): it upserts the agent-location (both roles) and
-# agent-prices / agent-capacity (provider) ConfigMaps in the agent namespace so
-# an operator can set region/prices/capacity from the browser instead of
-# `kubectl apply`.
+# (internal/agent/console): it upserts the agent-prices / agent-capacity /
+# agent-renewable (provider) ConfigMaps in the agent namespace so an operator can
+# set prices/capacity/renewable from the browser instead of `kubectl apply`.
+# (Location is auto-discovered, not console-set; the console reads nodes/geo.)
 - apiGroups:
   - ""
   resources:

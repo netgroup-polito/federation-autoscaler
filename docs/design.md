@@ -84,7 +84,7 @@ The system consists of three deployment domains connected by a strict asymmetric
 | gRPC Server ↔ Consumer Agent | gRPC Server | REST, in-cluster, **push-synchronous** | fast, low-latency local loop |
 | Consumer Agent ↔ Broker | **Consumer Agent only** | REST over mTLS, **5 s polling + sync POSTs** (heartbeat, reservations) | works from any NATed consumer cluster with egress to the Broker |
 | Provider Agent ↔ Broker | **Provider Agent only** | REST over mTLS, **5 s polling + sync POSTs** (30 s advertisements) | works from any NATed provider cluster with egress to the Broker |
-| Agent → Mock services | **Agent only** | plain HTTP, **agent-initiated**, region-keyed GETs | providers fetch carbon (mock-eco) + coordinates (mock-geo); the consumer fetches coordinates (mock-geo). Feeds the eco/latency strategies; the Broker never dials the mocks (§4.7) |
+| Agent → Mock services | **Agent only** | plain HTTP, **agent-initiated** GETs (mock-geo IP-keyed, mock-eco region-keyed) | each agent geolocates its own node IP (mock-geo `/json/<ip>`); providers additionally fetch carbon (mock-eco) keyed by the discovered region. Feeds the eco/latency strategies; the Broker never dials the mocks (§4.7) |
 | Broker → any Agent | **never happens** | — | enables unreachable consumer/provider clusters |
 
 ### 3.1 Central Cluster
@@ -260,7 +260,7 @@ No Ingress, LoadBalancer, NodePort, or public DNS is required.
 |---|---|
 | Serve local API | Handle `/local/*` requests from the in-cluster gRPC server |
 | Heartbeat | Every 15 s `POST /api/v1/heartbeat` — single liveness signal to the Broker; also carries the consumer's `ConsumerPolicy` placement type (§5.6) |
-| Advertise placement inputs | On each heartbeat, reads its region from the `agent-location` ConfigMap (`--region-file`, re-read every beat) and, when a region is set and `--mock-geo-url` is configured, fetches the region's coordinates from mock-geo (`GET /latlon?region=`); sends `region` / `latitude` / `longitude` — the consumer's input to the **Latency** strategy. No region ⇒ the consumer opts out of Latency. |
+| Advertise placement inputs | On each heartbeat, **auto-discovers its location**: resolves its own node IP (`NODE_NAME` downward API, or the `--advertised-ip` override) and, when `--mock-geo-url` is configured, geolocates it via mock-geo (`GET /json/<ip>`); sends the discovered `region` / `city` / `latitude` / `longitude` — the consumer's input to the **Latency** strategy. No resolvable IP / no mock-geo ⇒ the consumer opts out of Latency. |
 | Forward reservations | Translate `/local/reservations` calls into Broker calls synchronously; maintain a local cache of results for the gRPC server |
 | Execute `Peer` | On `ReservationInstruction{Kind: Peer}` (kubeconfig **inlined** in the polling response): store the kubeconfig as a Secret on the consumer cluster, run `liqoctl peer --gw-server-service-type NodePort` if not already peered with this provider (the `NodePort` flag is required because Liqo defaults to `LoadBalancer`, which sits at `<pending>` forever on Kind / on-prem clusters without an LB provisioner). Then create one per-Reservation `ResourceSlice` CRD per chunk, ensure the per-namespace **singleton** `NamespaceOffloading` named literally `offloading` exists (Liqo's `nsoff.validate.liqo.io` admission webhook hardcodes this name — one offloading CR per consumer namespace, shared by every Reservation that targets it), wait for Liqo to materialize the virtual nodes, then POST result with `virtualNodeNames` |
 | Execute `Unpeer` | On `ReservationInstruction{Kind: Unpeer}`: delete the specified `ResourceSlice`s; if `lastChunk == true`, run full `liqoctl unpeer`; report result |
@@ -269,7 +269,7 @@ No Ingress, LoadBalancer, NodePort, or public DNS is required.
 | Idempotency cache | Keyed by `reservationId + instruction kind`, TTL = `idempotency-cache-ttl` (10 min). Duplicate instructions return the cached result instead of re-executing. |
 | Local cache population | Merge polling results + synchronous Broker responses into a single in-memory view served to the gRPC server |
 
-> **Implemented in:** `cmd/agent/`, `internal/agent/consumer/` (orchestration), `internal/agent/consumer/heartbeat/` (15 s POST + per-beat `--region-file` read and mock-geo coordinate fetch in `heartbeat.go`), `internal/agent/geo/` (region-keyed mock-geo client), `internal/agent/consumer/localapi/` (loopback REST), `internal/agent/consumer/instructions/` (Peer / Unpeer / Cleanup / Reconcile + Liqo CR creation + VirtualNodeState management), `internal/agent/client/` (mTLS HTTP client), `internal/agent/poller/` (5 s GET /instructions loop), `internal/agent/health/`. Deployed via `config/agent/consumer/` (Deployment `--role=consumer`).
+> **Implemented in:** `cmd/agent/`, `internal/agent/consumer/` (orchestration), `internal/agent/consumer/heartbeat/` (15 s POST + per-beat node-IP discovery and mock-geo geolocation in `heartbeat.go`), `internal/agent/nodeip/` (node-IP resolver, `--advertised-ip` override), `internal/agent/geo/` (IP-keyed mock-geo client), `internal/agent/consumer/localapi/` (loopback REST), `internal/agent/consumer/instructions/` (Peer / Unpeer / Cleanup / Reconcile + Liqo CR creation + VirtualNodeState management), `internal/agent/client/` (mTLS HTTP client), `internal/agent/poller/` (5 s GET /instructions loop), `internal/agent/health/`. Deployed via `config/agent/consumer/` (Deployment `--role=consumer`).
 
 ---
 
@@ -300,7 +300,7 @@ Advertisement doubles as heartbeat — providers never call `/api/v1/heartbeat`.
 | Advertise capacity | Every 30 s `POST /api/v1/advertisements` — also acts as heartbeat; response carries piggybacked `ProviderInstruction`s |
 | Advertise prices (optional) | Reads its per-resource `unitPrices` from a mounted file (`--price-file`) on **every** advertisement cycle, so an operator can reprice without a restart, and includes them in the POST. A missing/empty/unparseable file ⇒ no price advertised (the provider is simply not eligible for price-preferring consumers) |
 | Advertise capacity % (optional) | Reads a per-resource percentage of allocatable to donate from `--capacity-file` (`agent-capacity` ConfigMap) every cycle and sends it as `capacityScalePercent`; the Broker scales the advertised allocatable before chunking. A value in (0,100) donates that fraction; 100 / >100 / ≤0 / unset ⇒ full allocatable. Lets a provider hold back capacity without a restart |
-| Advertise region, carbon & coordinates (optional) | Reads its region from `--region-file` (`agent-location` ConfigMap) every cycle. When set, fetches the region's current carbon intensity from mock-eco (`GET /carbon?region=`, `--mock-eco-url`) → `carbonIntensity` (the **Eco** input) and its coordinates from mock-geo (`GET /latlon?region=`, `--mock-geo-url`) → `topology.latitude/longitude` (the **Latency** input), and advertises both alongside `topology.region`. Every fetch is best-effort: a failure omits that field and never fails the publish. No region ⇒ the provider opts out of Eco/Latency |
+| Advertise location, carbon & coordinates (optional) | **Auto-discovers its location** every cycle: resolves its node IP (`NODE_NAME`, or `--advertised-ip`) and geolocates it via mock-geo (`GET /json/<ip>`, `--mock-geo-url`) → `topology.region` / `topology.city` / `topology.latitude/longitude` (the **Latency** input). The discovered `region` code then keys the carbon lookup from mock-eco (`GET /carbon/forecast?region=` with `/carbon?region=` fallback, `--mock-eco-url`) → `carbonIntensity` + `carbonForecast` (the **Eco** input). Every fetch is best-effort: a failure omits that field and never fails the publish. No resolvable location ⇒ the provider opts out of Eco/Latency |
 | Execute `GenerateKubeconfig` | On receipt of a `ProviderInstruction{Kind: GenerateKubeconfig}` (via poll or piggyback): runs `liqoctl generate peering-user --consumer-cluster-id <id>`; POSTs the resulting kubeconfig as payload of `POST /api/v1/instructions/{id}/result`. **Per-consumer singleton invariant** — `liqoctl generate peering-user` produces one `liqo-peer-user-<consumer>` identity per consumer, not per Reservation; if N Reservations from the same consumer hit the same provider, only the first GK call succeeds and the others return `CSR already exists`. Failed GKs are propagated up; the broker-side fix (v2: de-duplicate GK across (consumer, provider) pairs and reuse the cached kubeconfig) is tracked separately. Handler intentionally does **not** self-heal by re-running `liqoctl delete peering-user` — every regeneration mints a fresh random CN that invalidates any kubeconfig the broker has already captured for the surviving Reservation. |
 | Execute `Cleanup` | On `ProviderInstruction{Kind: Cleanup}`: tears down provider-side artefacts (peering-user kubeconfig, associated state); reports result |
 | Execute `Reconcile` | On `ProviderInstruction{Kind: Reconcile}`: gathers current live advertisement state and active-reservation state; returns it in `POST /instructions/{id}/result` |
@@ -308,7 +308,7 @@ Advertisement doubles as heartbeat — providers never call `/api/v1/heartbeat`.
 
 > **Shared code, separate binaries.** Both agents share the outbound mTLS client, the exponential-backoff retrier, the idempotency cache, and the CRD clients. Role is selected at startup by a CLI flag (`--role=consumer|provider`) that wires in the role-specific instruction executors and the role-specific polling / advertisement loop.
 
-> **Implemented in:** `cmd/agent/`, `internal/agent/provider/` (orchestration), `internal/agent/provider/snapshot/` (allocatable + topology), `internal/agent/provider/advertise/` (30 s POST + per-cycle `--price-file` / `--capacity-file` / `--region-file` reads and mock-eco/mock-geo fetch in `publisher.go` — `loadUnitPrices`, `loadCapacityPercents`, `loadRegion`, `loadPlacementInputs`), `internal/agent/eco/` + `internal/agent/geo/` (region-keyed mock clients), `internal/agent/provider/instructions/` (GenerateKubeconfig via `liqoctl generate peering-user` + Cleanup + Reconcile), `internal/agent/client/`, `internal/agent/poller/`, `internal/agent/health/`. Deployed via `config/agent/provider/` (Deployment `--role=provider`). `liqoctl` is bundled in the agent image — the **host** prefetches `bin/liqoctl-<version>-<os>-<arch>/liqoctl` via the `Makefile`'s `LIQOCTL_BIN` target and the `Dockerfile` `COPY`s it from the build context (not `curl`-ed from inside the build, because some hosts blackhole the docker daemon's egress to `github.com/releases`). Bump `LIQOCTL_VERSION` in the `Makefile` in lock-step with the Liqo CRDs the consumer / provider instruction handlers create.
+> **Implemented in:** `cmd/agent/`, `internal/agent/provider/` (orchestration), `internal/agent/provider/snapshot/` (allocatable + topology), `internal/agent/provider/advertise/` (30 s POST + per-cycle `--price-file` / `--capacity-file` reads and node-IP discovery + mock-eco/mock-geo fetch in `publisher.go` — `loadUnitPrices`, `loadCapacityPercents`, `loadPlacementInputs`, `loadCarbon`), `internal/agent/nodeip/` (node-IP resolver), `internal/agent/eco/` (region-keyed carbon client) + `internal/agent/geo/` (IP-keyed geo client), `internal/agent/provider/instructions/` (GenerateKubeconfig via `liqoctl generate peering-user` + Cleanup + Reconcile), `internal/agent/client/`, `internal/agent/poller/`, `internal/agent/health/`. Deployed via `config/agent/provider/` (Deployment `--role=provider`). `liqoctl` is bundled in the agent image — the **host** prefetches `bin/liqoctl-<version>-<os>-<arch>/liqoctl` via the `Makefile`'s `LIQOCTL_BIN` target and the `Dockerfile` `COPY`s it from the build context (not `curl`-ed from inside the build, because some hosts blackhole the docker daemon's egress to `github.com/releases`). Bump `LIQOCTL_VERSION` in the `Makefile` in lock-step with the Liqo CRDs the consumer / provider instruction handlers create.
 
 ---
 
@@ -360,16 +360,16 @@ address=localhost:50051
 
 ### 4.7 Mock Services (Mock Cluster)
 
-Two tiny in-repo HTTP services that stand in for real external APIs and feed the **Eco** and **Latency** strategies with region-keyed data. They exist so the placement strategies are demonstrable without contracting a live carbon-intensity or geo-IP provider, while preserving the **broker-dial-out-free** invariant: only **agents** fetch from the mocks (during their normal advertisement / heartbeat cycle), and they advertise the resulting numbers to the Broker — the Broker never calls the mocks.
+Two tiny in-repo HTTP services that stand in for real external APIs and feed the **Eco** and **Latency** strategies with carbon + location data. They exist so the placement strategies are demonstrable without contracting a live carbon-intensity or geo-IP provider, while preserving the **broker-dial-out-free** invariant: only **agents** fetch from the mocks (during their normal advertisement / heartbeat cycle), and they advertise the resulting numbers to the Broker — the Broker never calls the mocks.
 
 | Service | Endpoint | Returns | Consumed by |
 |---|---|---|---|
-| `mock-eco` | `GET /carbon?region=<code>` | `{"region", "carbonIntensity"}` — the region's current-hour value from a built-in 24-hour gCO2eq/kWh profile | Provider Agent (Eco) |
-| `mock-geo` | `GET /latlon?region=<code>` | `{"region", "lat", "lon"}` — the region's coordinates | Provider **and** Consumer Agents (Latency) |
+| `mock-eco` | `GET /carbon?region=<code>` (+ `GET /carbon/forecast?region=`) | `{"region", "carbonIntensity"}` — the region's current-hour value (the forecast endpoint returns the next 24 h) from a built-in 24-hour gCO2eq/kWh profile | Provider Agent (Eco) |
+| `mock-geo` | `GET /json/<ip>` | an ip-api.com-style location `{"query","status","region","regionName","city","countryCode","continentCode","lat","lon","isp","org","as"}` resolved by **longest-prefix CIDR match** | Provider **and** Consumer Agents (Latency + auto-location) |
 
-Both are **region-keyed** (not pseudo-IP-hashed), unauthenticated plain HTTP, and also serve `GET /healthz`; an unknown region returns `404`. They run on a **dedicated mock cluster** (the demo's "option A" topology — a separate single-node VM) so they do not perturb the federation clusters; agents reach them via `--mock-eco-url` / `--mock-geo-url` (provider) and `--mock-geo-url` (consumer), wired by the deploy. Omitting the URLs disables the lookups and the eco/latency strategies stay inert.
+**mock-geo is IP-keyed** (a real geo-IP service works by prefix, not by hashing or by an operator-chosen region code): each agent reads its own node IP and looks it up, and the returned `region` code is what keys the **region-keyed** mock-eco carbon lookup — so one discovered location drives both strategies. Both are unauthenticated plain HTTP and also serve `GET /healthz`; mock-eco returns `404` for an unknown region, mock-geo returns an ip-api `"fail"` envelope for an unparseable IP and a no-location default row for an IP outside every known subnet. They run on a **dedicated mock cluster** (the demo's "option A" topology — a separate single-node VM) so they do not perturb the federation clusters; agents reach them via `--mock-eco-url` / `--mock-geo-url` (provider) and `--mock-geo-url` (consumer), wired by the deploy. Omitting the URLs disables the lookups and the eco/latency strategies stay inert.
 
-> **Implemented in:** `cmd/mock-eco/`, `cmd/mock-geo/`, `internal/mockeco/server.go`, `internal/mockgeo/server.go` (region tables + handlers). Deployed via `config/mock-eco/`, `config/mock-geo/` and the Ansible `fa_mocks` role; `deploy/ansible/scripts/demo-up.sh --mocks <ip>` adds the mock cluster and auto-wires the URLs into every agent's `agent-config`. The canonical selectable region list lives in `internal/regions/`.
+> **Implemented in:** `cmd/mock-eco/`, `cmd/mock-geo/`, `internal/mockeco/server.go` (region → 24 h carbon profile), `internal/mockgeo/server.go` (CIDR → real-city table + longest-prefix `/json/{ip}` handler; the demo's private `/24`s are carved into `/26` blocks so co-located clusters land in distinct cities). Deployed via `config/mock-eco/`, `config/mock-geo/` and the Ansible `fa_mocks` role; `deploy/ansible/scripts/demo-up.sh --mocks <ip>` adds the mock cluster and auto-wires the URLs into every agent's `agent-config`.
 
 ---
 
@@ -385,9 +385,9 @@ Three browser UIs surface and drive the system. None is on the agents' critical 
 
 > **Implemented in:** deployed by `deploy/ansible` (`02-deploy`, consumer role) — not part of the Go codebase.
 
-**(c) Agent config consoles — read/write.** Each consumer and provider agent serves a small **role-aware** config console on a NodePort (`30445`) so an operator can set that cluster's federation knobs from a browser instead of `kubectl apply`-ing YAML. The **consumer** console sets the placement policy (No policy / Price / Eco / Latency) and region, and applies/deletes the demo workload; the **provider** console sets unit prices, region, and advertised CPU/RAM capacity %. It writes the same resources the samples do — `ConsumerPolicy`, the `agent-location` / `agent-prices` / `agent-capacity` ConfigMaps, and the workload Deployment — so changes take effect on the next heartbeat (~15 s) / advertisement (~30 s); each header shows the cluster's federation ID + Liqo ID. It is **plain-HTTP, unauthenticated, and write-capable** — demo-grade, intended for a trusted/management network — and is a **separate listener** from the consumer's loopback `localapi` (which stays loopback-only as the gRPC server's trust boundary). Enabled via `--console-bind-address` (empty ⇒ disabled; overlays set `:9095`).
+**(c) Agent config consoles — read/write.** Each consumer and provider agent serves a small **role-aware** config console on a NodePort (`30445`) so an operator can set that cluster's federation knobs from a browser instead of `kubectl apply`-ing YAML. The **consumer** console sets the placement policy (Standard / Price / Eco / Latency) and applies/deletes the demo workload; the **provider** console sets unit prices, advertised CPU/RAM capacity %, and the renewable flag. Both also show each cluster's **auto-discovered location** read-only (location is geolocated from the node IP, not operator-set). It writes the same resources the samples do — `ConsumerPolicy`, the `agent-prices` / `agent-capacity` / `agent-renewable` ConfigMaps, and the workload Deployment — so changes take effect on the next heartbeat (~15 s) / advertisement (~30 s); each header shows the cluster's federation ID + Liqo ID. It is **plain-HTTP, unauthenticated, and write-capable** — demo-grade, intended for a trusted/management network — and is a **separate listener** from the consumer's loopback `localapi` (which stays loopback-only as the gRPC server's trust boundary). Enabled via `--console-bind-address` (empty ⇒ disabled; overlays set `:9095`).
 
-> **Implemented in:** `internal/agent/console/` (`server.go` role-gated routes + ConfigMap upsert, `state.go` current-state projection, `workload.go` embedded burst workload, `assets/{consumer,provider}.html`), started from `internal/agent/{consumer,provider}/`. Exposed via `config/agent/{consumer,provider}/console-service.yaml` (NodePort `30445`); write RBAC in `config/agent/base/clusterrole.yaml` (configmaps + consumerpolicies) and `config/agent/consumer/workload_role.yaml` (the `default`-namespace Deployment). Region list from `internal/regions/`.
+> **Implemented in:** `internal/agent/console/` (`server.go` role-gated routes + ConfigMap upsert, `state.go` current-state projection, `workload.go` embedded burst workload, `assets/{consumer,provider}.html`), started from `internal/agent/{consumer,provider}/`. Exposed via `config/agent/{consumer,provider}/console-service.yaml` (NodePort `30445`); write RBAC in `config/agent/base/clusterrole.yaml` (configmaps + consumerpolicies + nodes-read) and `config/agent/consumer/workload_role.yaml` (the `default`-namespace Deployment). The read-only discovered-location card reuses `internal/agent/nodeip/` + `internal/agent/geo/`.
 
 ---
 
@@ -456,7 +456,8 @@ spec:
       nvidia.com/gpu: "0"
   topology:
     zone:      "qc-a"
-    region:    "QC"                    # also the region key the agent uses for mock-eco / mock-geo lookups
+    region:    "QC"                    # auto-discovered; also the region key for the mock-eco carbon lookup
+    city:      "Montreal"              # auto-discovered; informational (dashboard display)
     latitude:  45.6085                 # optional; decision-engine input only (Latency), NOT surfaced as a node label
     longitude: -73.5493
   unitPrices:                         # optional, per-resource price-per-unit-per-hour
@@ -474,7 +475,7 @@ status:
   availableChunks: 3
 ```
 
-> **Implemented in:** `api/broker/v1alpha1/clusteradvertisement_types.go` (CRD — incl. `CarbonIntensity *float64`) and `api/broker/v1alpha1/common_types.go` (`Topology.Latitude` / `Topology.Longitude`), `internal/controller/broker/clusteradvertisement_controller.go` (`StaleAfter` freshness check flipping `Available`), `internal/broker/api/advertisement.go` (`POST /api/v1/advertisements` handler + chunk decoration; maps carbon/topology onto the CR).
+> **Implemented in:** `api/broker/v1alpha1/clusteradvertisement_types.go` (CRD — incl. `CarbonIntensity *float64` / `CarbonForecast []float64`) and `api/broker/v1alpha1/common_types.go` (`Topology.Region` / `Topology.City` / `Topology.Latitude` / `Topology.Longitude`), `internal/controller/broker/clusteradvertisement_controller.go` (`StaleAfter` freshness check flipping `Available`), `internal/broker/api/advertisement.go` (`POST /api/v1/advertisements` handler + chunk decoration; maps carbon/topology onto the CR).
 
 ### 5.3 Reservation (Broker)
 
@@ -641,13 +642,13 @@ data:
 
 | ConfigMap | Key (shape) | Read by | Drives |
 |---|---|---|---|
-| `agent-location` | `location.yaml` → `region: "<code>"` | both roles (`--region-file`) | the region key for mock-eco / mock-geo lookups → Eco + Latency |
 | `agent-prices` | `prices.yaml` → `cpu` / `memory` unit prices | provider (`--price-file`) | `unitPrices` → Price |
-| `agent-capacity` | `capacity.yaml` → `cpu` / `memory` integer % | provider (`--capacity-file`) | `capacityScalePercent` → donated fraction of allocatable |
+| `agent-capacity` | `capacity.yaml` → `cpu` / `memory` % or fixed quantity | provider (`--capacity-file`) | `capacityScalePercent` / `capacityFixed` → donated fraction of allocatable |
+| `agent-renewable` | `renewable.yaml` → `renewable: <bool>` | provider (`--renewable-file`) | `renewable` flag → the Standard composite bonus |
 
-The mock-service base URLs are deploy-time infrastructure, injected via the `agent-config` ConfigMap (`mockEcoUrl`, `mockGeoUrl`) → `--mock-eco-url` / `--mock-geo-url`.
+Location is **not** a ConfigMap — it is auto-discovered from the node IP (§4.7). The mock-service base URLs and the optional `--advertised-ip` override are deploy-time infrastructure, injected via the `agent-config` ConfigMap (`mockEcoUrl`, `mockGeoUrl`, `advertisedIp`) → `--mock-eco-url` / `--mock-geo-url` / `--advertised-ip`; the node name arrives via the `NODE_NAME` downward-API env.
 
-> **Implemented in:** read by `internal/agent/provider/advertise/publisher.go` (`loadUnitPrices` / `loadCapacityPercents` / `loadRegion`) and `internal/agent/consumer/heartbeat/heartbeat.go` (`loadRegion`). ConfigMap bases + volume mounts in `config/agent/base/location-configmap.yaml` and `config/agent/provider/{prices,capacity}-configmap.yaml`; samples in `deploy/ansible/samples/{*-location,*-prices,provider-capacity}.yaml`. The consoles (§4.8) upsert these same ConfigMaps.
+> **Implemented in:** read by `internal/agent/provider/advertise/publisher.go` (`loadUnitPrices` / `loadCapacityPercents` / `loadRenewable`). ConfigMap bases + volume mounts in `config/agent/provider/{prices,capacity,renewable}-configmap.yaml`; samples in `deploy/ansible/samples/{*-prices,provider-capacity}.yaml`. The provider console (§4.8) upserts these same ConfigMaps. Location is auto-discovered (§4.7), not a ConfigMap.
 
 ---
 
@@ -860,14 +861,15 @@ Response 200:
 Returns the Broker's current view of this provider's advertisement, including `Reserved` chunks. Used by the agent to preserve the Broker-managed `Reserved` field across advertisement re-submissions (same protocol as upstream `k8s-resource-brokering`).
 
 #### 7.3.3 `POST /api/v1/heartbeat`   *(consumer, every 15 s)*
-The body carries the consumer's current placement policy, read fresh from its `ConsumerPolicy` CRD each beat (§5.6), plus its region and (when resolvable via mock-geo) coordinates — the origin the **Latency** strategy measures distance from. All are optional: an omitted `placement` is the Broker default (no preference); omitted coordinates make Latency a no-op for this consumer.
+The body carries the consumer's current placement policy, read fresh from its `ConsumerPolicy` CRD each beat (§5.6), plus its **auto-discovered** location (its node IP geolocated via mock-geo) — the origin the **Latency** strategy measures distance from. All are optional: an omitted `placement` is the Broker default (no preference); omitted coordinates make Latency a no-op for this consumer.
 ```
 POST /api/v1/heartbeat
 Body: {
   "clusterId":     "consumer-1",
   "liqoClusterId": "liqo-consumer-1-xxxx",
   "placement":     {"type": "Latency"},     // optional; Price | Eco | Latency; omitted = Broker default
-  "region":        "ENG",                   // optional; the consumer's region
+  "region":        "ENG",                   // optional; auto-discovered region code
+  "city":          "London",                // optional; auto-discovered city (informational)
   "latitude":      51.5074,                 // optional; from mock-geo — the Latency origin
   "longitude":     -0.1278
 }
@@ -1069,8 +1071,8 @@ Response 202:
 | Surface | Method & Path | Direction | Purpose |
 |---|---|---|---|
 | §4.8a | `GET /` · `GET /api/v1/overview` | browser → Broker (NodePort 30444) | read-only dashboard |
-| §4.8c | `GET /` · `GET /api/state` · `GET /api/regions` · `POST /api/{policy,region,workload}` (consumer) / `POST /api/{prices,region,capacity}` (provider) | browser → Agent console (NodePort 30445) | set per-cluster knobs |
-| §4.7 | `GET /carbon?region=` (mock-eco) · `GET /latlon?region=` (mock-geo) | Agent → Mock services | carbon + coordinates |
+| §4.8c | `GET /` · `GET /api/state` · `POST /api/{policy,workload,reservation}` (consumer) / `POST /api/{prices,capacity,renewable}` (provider) | browser → Agent console (NodePort 30445) | set per-cluster knobs (location is auto-discovered, shown read-only) |
+| §4.7 | `GET /carbon?region=` + `GET /carbon/forecast?region=` (mock-eco) · `GET /json/<ip>` (mock-geo) | Agent → Mock services | carbon + auto-discovered location |
 
 ---
 
