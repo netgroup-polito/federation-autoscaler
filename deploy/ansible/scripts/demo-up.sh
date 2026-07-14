@@ -23,13 +23,17 @@
 #
 # Usage:
 #   demo-up.sh --central <ip> --consumers <ip[,ip...]> --providers <ip[,ip...]>
-#              [--mocks <ip>] [--tag <image-tag>] [--user <ssh-user>]
-#              [--ssh-key <path>] [--skip-ssh-copy-id] [--repo <git-url>]
-#              [--dir <clone-dir>]
+#              [--mocks <ip>] [--tag <image-tag>] [--reeval-interval <dur>]
+#              [--user <ssh-user>] [--ssh-key <path>] [--skip-ssh-copy-id]
+#              [--repo <git-url>] [--dir <clone-dir>]
 #
 #   --tag overrides the federation-autoscaler image tag the deploy pulls
 #   (broker/agent/grpc-server/mock-eco/mock-geo), e.g. --tag v0.2.7. Omit it to
 #   use the repo default (group_vars/all.yaml: fa_tag).
+#
+#   --reeval-interval sets how often an active MANUAL reservation is re-evaluated
+#   for a better provider (feature 7), e.g. --reeval-interval 5m. Omit it for the
+#   1h default; lower it to watch a migration during the demo.
 #
 #   --mocks <ip> adds ONE extra single-node VM as the dedicated mock cluster
 #   (option A) hosting mock-eco + mock-geo for the eco/latency placement
@@ -63,6 +67,7 @@ CONSUMERS=""
 PROVIDERS=""
 MOCKS=""    # optional single mock-cluster IP (eco/latency strategies, option A)
 FA_TAG=""   # empty ⇒ use the repo default (group_vars/all.yaml: fa_tag)
+REEVAL_INTERVAL=""  # optional feature-7 re-eval interval, e.g. "5m"; empty ⇒ 1h default
 
 # Tool versions — keep in lock-step with deploy/ansible/README.md.
 KUBECTL_VERSION="v1.32.5"
@@ -89,6 +94,7 @@ while [[ $# -gt 0 ]]; do
     --providers) PROVIDERS="$2"; shift 2 ;;
     --mocks)     MOCKS="$2"; shift 2 ;;
     --tag)       FA_TAG="$2"; shift 2 ;;
+    --reeval-interval) REEVAL_INTERVAL="$2"; shift 2 ;;
     --user)      SSH_USER="$2"; shift 2 ;;
     --ssh-key)   SSH_KEY="$2"; shift 2 ;;
     --skip-ssh-copy-id) SKIP_SSH_COPY=1; shift ;;
@@ -321,6 +327,10 @@ EXTRA_VARS=()
 if [[ -n "$FA_TAG" ]]; then
   EXTRA_VARS+=(-e "fa_tag=${FA_TAG}")
   log "Using federation-autoscaler image tag: ${FA_TAG}"
+fi
+if [[ -n "$REEVAL_INTERVAL" ]]; then
+  EXTRA_VARS+=(-e "fa_reeval_interval=${REEVAL_INTERVAL}")
+  log "Manual-reservation re-eval interval (feature 7): ${REEVAL_INTERVAL}"
 fi
 
 run_play() {

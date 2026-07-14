@@ -106,8 +106,10 @@ func (s *Server) handleNodeGroupsList(w http.ResponseWriter, r *http.Request) {
 	switch entry.Placement.Type {
 	case autoscalingv1alpha1.PlacementStrategyPrice:
 		applyPricePreference(views, costs, priced, inflight)
+		setPlacementMetric(views, costs, priced)
 	case autoscalingv1alpha1.PlacementStrategyEco:
 		applyEcoPreference(views, carbons, hasCarbon, inflight)
+		setPlacementMetric(views, carbons, hasCarbon)
 	case autoscalingv1alpha1.PlacementStrategyLatency:
 		// Latency is a consumer↔provider PAIR metric: distance depends on the
 		// calling consumer's own location (from its heartbeat). Unlike the other
@@ -117,8 +119,11 @@ func (s *Server) handleNodeGroupsList(w http.ResponseWriter, r *http.Request) {
 		// a no-op (all providers stay exposed) and no shortlist is signalled.
 		distances, hasDist := consumerProviderDistances(entry, avail)
 		latencyShortlist = applyLatencyTopN(views, distances, hasDist, inflight, latencyShortlistSize)
+		setPlacementMetric(views, distances, hasDist)
 	default:
-		// Empty (no ConsumerPolicy) or "Standard" → the composite default.
+		// Empty (no ConsumerPolicy) or "Standard" → the composite default. No stable
+		// per-provider metric is exposed (Standard's most-free score wanders as
+		// capacity fills), so the re-eval loop never migrates a Standard reservation.
 		applyStandardPreference(views, avail, inflight)
 	}
 
@@ -132,10 +137,26 @@ func (s *Server) handleNodeGroupsList(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, NodeGroupListResponse{
 		NodeGroups:       views,
 		LatencyShortlist: latencyShortlist,
+		AppliedPlacement: entry.Placement.Type,
 		Generation:       0, // step 5b will surface a real revision once the reconciler watches CRs.
 		ServedAt:         metav1.Now(),
 		CacheAgeSeconds:  0,
 	})
+}
+
+// setPlacementMetric records, on each view, the value the applied policy ranked it
+// on (lower = better) so the Consumer Agent's manual-reservation re-eval can tell a
+// genuinely-better provider from one that is merely full of its OWN reservation.
+// values[i]/has[i] align with views[i] (both indexed by the advertisement order);
+// has[i]==false leaves the view metric-less (HasMetric stays false). It runs BEFORE
+// the final sort, so the metric travels with each view as the slice is reordered.
+func setPlacementMetric(views []NodeGroupView, values []float64, has []bool) {
+	for i := range views {
+		if has[i] {
+			views[i].PlacementMetric = values[i]
+			views[i].HasMetric = true
+		}
+	}
 }
 
 // applyPricePreference masks the node-group view for a price-preferring

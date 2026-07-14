@@ -153,6 +153,68 @@ func TestNodeGroupsEcoPreference(t *testing.T) {
 	})
 }
 
+// TestNodeGroupsAppliedPlacement asserts the response echoes the consumer's
+// applied policy (feature 7's re-eval loop reads it to migrate only under a
+// stable-metric policy, never Standard).
+func TestNodeGroupsAppliedPlacement(t *testing.T) {
+	s := newDashboardTestServer(t, stdAdv("p1", 0, nil))
+	withPricePolicy(s)
+	if got := callNodeGroups(t, s).AppliedPlacement; got != autoscalingv1alpha1.PlacementStrategyPrice {
+		t.Errorf("appliedPlacement = %q, want Price", got)
+	}
+
+	s2 := newDashboardTestServer(t, stdAdv("p1", 0, nil))
+	// No policy set ⇒ empty applied placement (the Standard default is not a
+	// stable metric for migration).
+	if got := callNodeGroups(t, s2).AppliedPlacement; got != "" {
+		t.Errorf("appliedPlacement with no policy = %q, want empty", got)
+	}
+}
+
+// viewByProvider maps providerClusterID → its full node-group view.
+func viewByProvider(resp NodeGroupListResponse) map[string]NodeGroupView {
+	out := map[string]NodeGroupView{}
+	for _, v := range resp.NodeGroups {
+		out[v.ProviderClusterID] = v
+	}
+	return out
+}
+
+// TestNodeGroupsPlacementMetric asserts the Broker stamps the applied policy's
+// ranking metric (lower = better) onto EVERY view — the growable winner and the
+// masked losers alike — so feature 7's re-eval can tell a genuinely-better provider
+// from one that is merely full of the consumer's own reservation.
+func TestNodeGroupsPlacementMetric(t *testing.T) {
+	t.Run("price: the full-but-cheaper provider still carries the lower metric", func(t *testing.T) {
+		// p-cheap is fully reserved (masked, no head-room) yet must keep its low cost;
+		// p-dear is the growable spill target with a higher cost.
+		s := newDashboardTestServer(t,
+			stdAdv("p-cheap", stdAdvChunks, cpuMemPrices("0.01")), // full
+			stdAdv("p-dear", 0, cpuMemPrices("0.05")))
+		withPricePolicy(s)
+		views := viewByProvider(callNodeGroups(t, s))
+		cheap, dear := views["p-cheap"], views["p-dear"]
+		if !cheap.HasMetric || !dear.HasMetric {
+			t.Fatalf("both providers must carry a price metric; cheap=%+v dear=%+v", cheap, dear)
+		}
+		if cheap.PlacementMetric >= dear.PlacementMetric {
+			t.Errorf("cheaper provider must have the lower metric; cheap=%v dear=%v", cheap.PlacementMetric, dear.PlacementMetric)
+		}
+		if cheap.MaxSize-cheap.CurrentReserved != 0 {
+			t.Errorf("the full cheaper provider must be masked (this is what blocks a spurious migration); headroom=%d", cheap.MaxSize-cheap.CurrentReserved)
+		}
+	})
+
+	t.Run("standard / no policy exposes no stable metric", func(t *testing.T) {
+		s := newDashboardTestServer(t, stdAdv("p1", 0, nil), stdAdv("p2", 0, nil))
+		for _, v := range callNodeGroups(t, s).NodeGroups {
+			if v.HasMetric {
+				t.Errorf("no policy must expose no placement metric; %s has %v", v.ProviderClusterID, v.PlacementMetric)
+			}
+		}
+	})
+}
+
 // TestNodeGroupsLatencyPreference covers feature 6: the Broker exposes the top-3
 // NEAREST providers-with-capacity as a shortlist (LatencyShortlist=true) — the
 // consumer then UDP-probes them — instead of narrowing to the single closest.

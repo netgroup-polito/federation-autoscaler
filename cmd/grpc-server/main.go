@@ -32,6 +32,7 @@ package main
 import (
 	"flag"
 	"os"
+	"time"
 
 	_ "k8s.io/client-go/plugin/pkg/client/auth"
 
@@ -67,6 +68,7 @@ func main() {
 		grpcBindAddress                                     string
 		grpcCertPath, grpcCertName, grpcKeyName, grpcCAName string
 		agentLocalAPIURL                                    string
+		reEvalInterval                                      time.Duration
 	)
 	// externalgrpc listener used by Cluster Autoscaler (see CA's
 	// --cloud-provider=externalgrpc flag and --cloud-config pointing to it).
@@ -82,6 +84,11 @@ func main() {
 		"File name (under --grpc-cert-path) of the CA bundle that signs CA's client cert.")
 	flag.StringVar(&agentLocalAPIURL, "agent-local-api-url", "http://127.0.0.1:9090",
 		"Base URL of the co-located Consumer Agent's loopback REST API.")
+	flag.DurationVar(&reEvalInterval, "re-eval-interval", time.Hour,
+		"How often an active MANUAL reservation is re-evaluated for a better provider "+
+			"(and the minimum gap between two migrations of the same reservation). Only "+
+			"stable-metric policies (Price/Eco/Latency) migrate; Standard never does. "+
+			"0 disables re-evaluation. Lower it for a live demo.")
 
 	flag.Parse()
 	ctrl.SetLogger(zap.New(zap.UseFlagOptions(&zapOpts)))
@@ -119,9 +126,10 @@ func main() {
 	// the same broker reservation + Liqo peering the autoscaler path drives, via
 	// the agent loopback (feature: manual reservations).
 	if err := (&autoscalingcontroller.ResourceRequestReconciler{
-		Client: mgr.GetClient(),
-		Scheme: mgr.GetScheme(),
-		Agent:  agent,
+		Client:         mgr.GetClient(),
+		Scheme:         mgr.GetScheme(),
+		Agent:          agent,
+		ReEvalInterval: reEvalInterval,
 	}).SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "unable to create controller", "controller", "ResourceRequest")
 		os.Exit(1)

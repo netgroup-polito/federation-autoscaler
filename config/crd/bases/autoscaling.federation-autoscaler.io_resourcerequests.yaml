@@ -105,6 +105,13 @@ spec:
                 description: Message is a human-readable status detail (e.g. why it
                   is still Pending).
                 type: string
+              migrationCount:
+                description: |-
+                  MigrationCount is how many times this reservation has been migrated to a
+                  better provider (feature 7). 0 for a reservation that never moved. It seeds
+                  the fresh reservation id on each migration ("mr-<uid>-m<MigrationCount>").
+                format: int32
+                type: integer
               phase:
                 description: Phase is the coarse lifecycle state.
                 type: string
@@ -114,8 +121,11 @@ spec:
                 type: string
               reservationId:
                 description: |-
-                  ReservationID is the broker reservation this request created (deterministic:
-                  "mr-<uid>"), used to release it on delete.
+                  ReservationID is the broker reservation this request currently holds. The
+                  first reservation is "mr-<uid>" (deterministic); each migration to a better
+                  provider (feature 7) uses a FRESH id "mr-<uid>-m<MigrationCount>" so the new
+                  provider's reservation + consumer artifacts don't collide with the old one.
+                  Used to release the current reservation on delete.
                 type: string
             type: object
         required:

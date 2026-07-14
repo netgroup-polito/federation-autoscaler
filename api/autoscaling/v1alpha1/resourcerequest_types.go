@@ -67,6 +67,13 @@ const (
 	// reservation is held until the ResourceRequest is deleted.
 	ResourceRequestActive ResourceRequestPhase = "Active"
 
+	// ResourceRequestMigrating means periodic re-evaluation found a better provider
+	// and the reservation is being moved there (break-before-make): the old
+	// reservation has been released and a new one (a fresh id) is being created on
+	// the better provider. Only manual reservations under a stable-metric policy
+	// (Price/Eco/Latency) ever enter this phase.
+	ResourceRequestMigrating ResourceRequestPhase = "Migrating"
+
 	// ResourceRequestFailed means the reservation could not be created; Message
 	// carries the reason.
 	ResourceRequestFailed ResourceRequestPhase = "Failed"
@@ -78,8 +85,11 @@ type ResourceRequestStatus struct {
 	// +optional
 	Phase ResourceRequestPhase `json:"phase,omitempty"`
 
-	// ReservationID is the broker reservation this request created (deterministic:
-	// "mr-<uid>"), used to release it on delete.
+	// ReservationID is the broker reservation this request currently holds. The
+	// first reservation is "mr-<uid>" (deterministic); each migration to a better
+	// provider (feature 7) uses a FRESH id "mr-<uid>-m<MigrationCount>" so the new
+	// provider's reservation + consumer artifacts don't collide with the old one.
+	// Used to release the current reservation on delete.
 	// +optional
 	ReservationID string `json:"reservationId,omitempty"`
 
@@ -90,6 +100,12 @@ type ResourceRequestStatus struct {
 	// ChunkCount is the number of node-sized chunks reserved.
 	// +optional
 	ChunkCount int32 `json:"chunkCount,omitempty"`
+
+	// MigrationCount is how many times this reservation has been migrated to a
+	// better provider (feature 7). 0 for a reservation that never moved. It seeds
+	// the fresh reservation id on each migration ("mr-<uid>-m<MigrationCount>").
+	// +optional
+	MigrationCount int32 `json:"migrationCount,omitempty"`
 
 	// Message is a human-readable status detail (e.g. why it is still Pending).
 	// +optional

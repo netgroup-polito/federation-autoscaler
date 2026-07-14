@@ -322,9 +322,22 @@ type NodeGroupView struct {
 	// measured-latency strategy; empty when the provider advertised none. Set on
 	// every view (not only the shortlist) so the Consumer Agent can probe the
 	// growable candidates.
-	ProbeEndpoint string            `json:"probeEndpoint,omitempty"`
-	Labels        map[string]string `json:"labels,omitempty"`
-	Taints        []corev1.Taint    `json:"taints,omitempty"`
+	ProbeEndpoint string `json:"probeEndpoint,omitempty"`
+	// PlacementMetric is the value the applied placement policy ranked THIS
+	// provider on — per-chunk cost (Price), 6-hour weighted carbon (Eco), or
+	// great-circle distance in km (Latency); LOWER is better. HasMetric is false
+	// when the applied policy has no metric for this provider (Standard / no policy,
+	// or an unpriced/coordless provider). It is set on EVERY view — winner and
+	// masked losers alike — so the manual-reservation re-eval (feature 7) can
+	// compare its current provider's metric against the growable winner's and
+	// migrate ONLY when the winner is strictly better. This defeats the
+	// self-occupancy confound: a provider masked merely because THIS consumer's own
+	// reservation filled it is still the best (lower metric), so no spurious
+	// same-provider migration fires.
+	PlacementMetric float64           `json:"placementMetric,omitempty"`
+	HasMetric       bool              `json:"hasMetric,omitempty"`
+	Labels          map[string]string `json:"labels,omitempty"`
+	Taints          []corev1.Taint    `json:"taints,omitempty"`
 }
 
 type NodeGroupListResponse struct {
@@ -335,10 +348,16 @@ type NodeGroupListResponse struct {
 	// (by ProbeEndpoint) and re-mask locally to the lowest-RTT one. False for every
 	// other policy (the Broker already masked to a single provider) and for
 	// latency with no consumer location (a full no-op).
-	LatencyShortlist bool        `json:"latencyShortlist,omitempty"`
-	Generation       int64       `json:"generation"`
-	ServedAt         metav1.Time `json:"servedAt"`
-	CacheAgeSeconds  int32       `json:"cacheAgeSeconds"`
+	LatencyShortlist bool `json:"latencyShortlist,omitempty"`
+	// AppliedPlacement is the placement strategy the Broker masked this list with —
+	// the calling consumer's last-heartbeated ConsumerPolicy type ("Price"/"Eco"/
+	// "Latency"/"Standard"), or empty when no policy is set. Informational; the
+	// manual-reservation re-eval loop (feature 7) reads it to migrate only under a
+	// stable-metric policy (Price/Eco/Latency), never Standard.
+	AppliedPlacement autoscalingv1alpha1.PlacementStrategy `json:"appliedPlacement,omitempty"`
+	Generation       int64                                 `json:"generation"`
+	ServedAt         metav1.Time                           `json:"servedAt"`
+	CacheAgeSeconds  int32                                 `json:"cacheAgeSeconds"`
 }
 
 // -----------------------------------------------------------------------------

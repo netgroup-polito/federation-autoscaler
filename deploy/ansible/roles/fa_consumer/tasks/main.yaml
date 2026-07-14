@@ -47,6 +47,18 @@
           kustomize edit set image federation-autoscaler/grpc-server=federation-autoscaler/grpc-server:latest
       changed_when: true
 
+# Feature 7: manual reservations are re-evaluated for a better provider every
+# --re-eval-interval (default 1h). For a live demo, define `fa_reeval_interval`
+# (e.g. "2m") in inventory to see a migration quickly. Unset ⇒ the 1h default.
+- name: Set the manual-reservation re-eval interval (feature 7)
+  delegate_to: localhost
+  when: fa_reeval_interval is defined and (fa_reeval_interval | length) > 0
+  ansible.builtin.shell:
+    cmd: |
+      kubectl --kubeconfig {{ cluster_kubeconfig }} -n {{ fa_namespace }} \
+        set env deployment/grpc-server FA_REEVAL_INTERVAL={{ fa_reeval_interval }}
+  changed_when: true
+
 - name: Patch agent-config ConfigMap with the resolved broker URL + mock URLs
   delegate_to: localhost
   ansible.builtin.shell:

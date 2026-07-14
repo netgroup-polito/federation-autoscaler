@@ -87,6 +87,11 @@ type ResourceRequestReconciler struct {
 	client.Client
 	Scheme *runtime.Scheme
 	Agent  ReservationClient
+
+	// ReEvalInterval is how often an active manual reservation is re-evaluated for
+	// a better provider (feature 7), and the minimum gap between two migrations of
+	// the same reservation (the anti-flap debounce). 0 disables re-evaluation.
+	ReEvalInterval time.Duration
 }
 
 // +kubebuilder:rbac:groups=autoscaling.federation-autoscaler.io,resources=resourcerequests,verbs=get;list;watch;create;update;patch;delete
@@ -143,9 +148,17 @@ func (r *ResourceRequestReconciler) Reconcile(ctx context.Context, req ctrl.Requ
 		return ctrl.Result{Requeue: true}, nil
 	}
 
-	// Already reserved — keep the borrowed node(s) protected from CA scale-down.
-	// Release is delete-driven; this branch only holds the capacity.
+	// Already reserved. Complete an in-flight migration, else periodically
+	// re-evaluate for a better provider (feature 7 — manual reservations only),
+	// else keep the borrowed node(s) protected from CA scale-down. Release is
+	// delete-driven; this branch never releases on its own except to migrate.
 	if rr.Status.ReservationID != "" {
+		if rr.Status.Phase == autoscalingv1alpha1.ResourceRequestMigrating {
+			return r.completeMigration(ctx, &rr)
+		}
+		if res, migrated, err := r.maybeStartMigration(ctx, &rr); err != nil || migrated {
+			return res, err
+		}
 		return r.holdReservation(ctx, &rr)
 	}
 
@@ -260,6 +273,172 @@ func (r *ResourceRequestReconciler) setReserved(ctx context.Context, rr *autosca
 	}
 	// Requeue so we can protect the node(s) once Liqo materialises them.
 	return ctrl.Result{RequeueAfter: pendingRequeue}, nil
+}
+
+// -----------------------------------------------------------------------------
+// re-evaluation + migration (feature 7)
+// -----------------------------------------------------------------------------
+
+// isStableMetricPolicy reports whether a placement policy migrates a placed
+// reservation on a MEANINGFUL, stable metric change (cheaper / greener / lower
+// measured RTT). Standard (most-free-capacity) and no-policy are excluded: their
+// winner shifts as capacity fills, which would make a placed reservation wander.
+func isStableMetricPolicy(p autoscalingv1alpha1.PlacementStrategy) bool {
+	switch p {
+	case autoscalingv1alpha1.PlacementStrategyPrice,
+		autoscalingv1alpha1.PlacementStrategyEco,
+		autoscalingv1alpha1.PlacementStrategyLatency:
+		return true
+	default:
+		return false
+	}
+}
+
+// migrationMetricMargin is the minimum RELATIVE improvement a candidate provider
+// must show over the current one to justify migrating a placed reservation. It
+// guards against equal-metric / floating-point ping-pong; genuine flap is
+// additionally bounded by ReEvalInterval. Placement metrics are non-negative
+// (per-chunk cost, weighted carbon, distance in km).
+const migrationMetricMargin = 1e-6
+
+// metricStrictlyBetter reports whether candidate is better (lower) than current by
+// more than migrationMetricMargin. When current is 0 (e.g. co-located, distance 0)
+// nothing can beat it, so a placed reservation there never migrates on that metric.
+func metricStrictlyBetter(candidate, current float64) bool {
+	return candidate < current-current*migrationMetricMargin
+}
+
+// findProviderView returns the view for the given provider + chunk type, or nil
+// when that provider is no longer in the advertised (masked) list.
+func findProviderView(groups []brokerapi.NodeGroupView, providerID string, t brokerv1alpha1.ChunkType) *brokerapi.NodeGroupView {
+	for i := range groups {
+		if groups[i].ProviderClusterID == providerID && groups[i].Type == t {
+			return &groups[i]
+		}
+	}
+	return nil
+}
+
+// nextReservationID returns the reservation id for the request's NEXT migration
+// attempt: a FRESH id ("mr-<uid>-m<n>") so the new provider's broker reservation
+// and consumer artifacts (vns-/rs-/kubeconfig-<id>) never collide with the old,
+// still-terminating ones. The first (never-migrated) reservation keeps "mr-<uid>".
+func (r *ResourceRequestReconciler) nextReservationID(rr *autoscalingv1alpha1.ResourceRequest) string {
+	return fmt.Sprintf("mr-%s-m%d", rr.UID, rr.Status.MigrationCount+1)
+}
+
+// maybeStartMigration re-evaluates an active manual reservation against the
+// current best provider and, when a strictly-different provider wins under a
+// stable-metric policy (Price/Eco/Latency), begins a break-before-make migration:
+// it releases the current reservation (unpeer old → pods evicted) and moves the
+// request into the Migrating phase with a fresh reservation id. The next reconcile
+// peers the new provider (completeMigration). Returns migrated=true when a
+// migration was started (the caller returns immediately); migrated=false means
+// "no change — keep holding".
+//
+// Re-eval is gated by ReEvalInterval, which doubles as the debounce / anti-flap
+// floor: a reservation is re-evaluated (and can migrate) at most once per interval.
+func (r *ResourceRequestReconciler) maybeStartMigration(ctx context.Context, rr *autoscalingv1alpha1.ResourceRequest) (ctrl.Result, bool, error) {
+	log := ctrl.LoggerFrom(ctx)
+	if r.ReEvalInterval <= 0 {
+		return ctrl.Result{}, false, nil // re-eval disabled
+	}
+	if rr.Status.LastTransitionTime != nil && time.Since(rr.Status.LastTransitionTime.Time) < r.ReEvalInterval {
+		return ctrl.Result{}, false, nil // debounced: too soon since the last transition
+	}
+
+	resp, err := r.Agent.GetNodeGroups(ctx)
+	if err != nil {
+		log.V(1).Info("re-eval: node groups unavailable; holding", "err", err.Error())
+		return ctrl.Result{}, false, nil // transient — keep holding, try next tick
+	}
+	// Only migrate under a stable-metric policy — never Standard / no policy.
+	if !isStableMetricPolicy(resp.AppliedPlacement) {
+		return ctrl.Result{}, false, nil
+	}
+	// The masked, growable survivor within the request's chunk type is the current
+	// best provider with head-room (for Latency this re-probed live via GetNodeGroups).
+	group, _, ok := pickProviderAndSize(resp.NodeGroups, rr.Spec.Resources)
+	if !ok || group.ProviderClusterID == rr.Status.ProviderClusterID {
+		return ctrl.Result{}, false, nil // no growable alternative, or already the winner
+	}
+
+	// Guard against the self-occupancy confound. When THIS reservation fills its
+	// (still-best) provider, that provider is masked as non-growable and the Broker
+	// exposes the next-best one as the only survivor — so the growable "winner" above
+	// is a spill target, not a genuine improvement. Migrating to it and back would
+	// churn the peering every interval. Only migrate when the current provider has
+	// left the advertised list, or the winner is STRICTLY better by the applied
+	// policy's metric. The metric is occupancy-independent, so a merely-full current
+	// provider (lower/equal metric) blocks the move.
+	if cur := findProviderView(resp.NodeGroups, rr.Status.ProviderClusterID, group.Type); cur != nil {
+		if !cur.HasMetric || !group.HasMetric || !metricStrictlyBetter(group.PlacementMetric, cur.PlacementMetric) {
+			return ctrl.Result{}, false, nil // current provider still ≥ as good — it's just full
+		}
+	}
+
+	// Genuinely better provider → break-before-make. Release the current reservation first.
+	oldID := rr.Status.ReservationID
+	if _, err := r.Agent.DeleteReservation(ctx, oldID); err != nil && !agentclient.IsNotFound(err) {
+		log.Error(err, "re-eval: releasing old reservation failed; will retry", "reservationId", oldID)
+		return ctrl.Result{}, false, err
+	}
+	newID := r.nextReservationID(rr)
+	msg := fmt.Sprintf("migrating from %s to %s", rr.Status.ProviderClusterID, group.ProviderClusterID)
+	log.Info("re-eval: migrating manual reservation",
+		"from", rr.Status.ProviderClusterID, "to", group.ProviderClusterID, "newReservationId", newID)
+	if err := r.setMigrating(ctx, rr, newID, msg); err != nil {
+		return ctrl.Result{}, false, err
+	}
+	// Short drain gap before peering the new provider (break-before-make).
+	return ctrl.Result{RequeueAfter: pendingRequeue}, true, nil
+}
+
+// completeMigration finishes a break-before-make migration. The old reservation
+// was already released in maybeStartMigration, so it re-ranks fresh (self-
+// correcting if the intended provider filled during the drain gap) and peers the
+// best provider under the request's already-assigned fresh reservation id.
+func (r *ResourceRequestReconciler) completeMigration(ctx context.Context, rr *autoscalingv1alpha1.ResourceRequest) (ctrl.Result, error) {
+	log := ctrl.LoggerFrom(ctx)
+	resp, err := r.Agent.GetNodeGroups(ctx)
+	if err != nil {
+		return ctrl.Result{RequeueAfter: pendingRequeue}, nil // retry the peer
+	}
+	group, count, ok := pickProviderAndSize(resp.NodeGroups, rr.Spec.Resources)
+	if !ok {
+		// The old reservation is already gone; wait for a provider with capacity.
+		if err := r.writePhase(ctx, rr, autoscalingv1alpha1.ResourceRequestMigrating,
+			"migrating — waiting for a provider with capacity", "", "", 0); err != nil {
+			return ctrl.Result{}, err
+		}
+		return ctrl.Result{RequeueAfter: pendingRequeue}, nil
+	}
+	resReq := &brokerapi.ReservationRequest{
+		ProviderClusterID: group.ProviderClusterID,
+		NodeGroupID:       group.ID,
+		ChunkCount:        count,
+		ChunkType:         group.Type,
+	}
+	if _, err := r.Agent.PostReservation(ctx, rr.Status.ReservationID, resReq); err != nil {
+		return r.setFailed(ctx, rr, "migration reservation failed: "+err.Error())
+	}
+	log.Info("re-eval: migration complete",
+		"provider", group.ProviderClusterID, "reservationId", rr.Status.ReservationID, "chunks", count)
+	return r.setReserved(ctx, rr, rr.Status.ReservationID, group.ProviderClusterID, count)
+}
+
+// setMigrating records the start of a migration: the fresh reservation id, the
+// incremented MigrationCount, and the Migrating phase. Unlike writePhase it also
+// bumps MigrationCount; the provider is left unchanged until completeMigration
+// peers the new one.
+func (r *ResourceRequestReconciler) setMigrating(ctx context.Context, rr *autoscalingv1alpha1.ResourceRequest, newID, msg string) error {
+	now := metav1.Now()
+	rr.Status.Phase = autoscalingv1alpha1.ResourceRequestMigrating
+	rr.Status.Message = msg
+	rr.Status.ReservationID = newID
+	rr.Status.MigrationCount++
+	rr.Status.LastTransitionTime = &now
+	return r.Status().Update(ctx, rr)
 }
 
 // -----------------------------------------------------------------------------

@@ -287,6 +287,9 @@
           const bits = [rvn.phase || "—"];
           if (rvn.provider) bits.push(rvn.provider);
           if (rvn.chunks) bits.push(rvn.chunks + " chunk" + (rvn.chunks === 1 ? "" : "s"));
+          // During a re-eval migration (feature 7) the message tells the story
+          // ("migrating from p1 to p2") while the provider still shows the old one.
+          if (rvn.phase === "Migrating" && rvn.message) bits.push(rvn.message);
           o.textContent = size + "  ·  " + bits.join(" · ");
           mrSel.appendChild(o);
         }

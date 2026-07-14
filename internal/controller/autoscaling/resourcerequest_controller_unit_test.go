@@ -20,6 +20,7 @@ import (
 	"context"
 	"errors"
 	"testing"
+	"time"
 
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
@@ -40,10 +41,11 @@ import (
 // --- fake ReservationClient --------------------------------------------------
 
 type fakeReservationClient struct {
-	nodeGroups []brokerapi.NodeGroupView
-	getErr     error
-	postErr    error
-	deleteErr  error
+	nodeGroups       []brokerapi.NodeGroupView
+	appliedPlacement autoscalingv1alpha1.PlacementStrategy
+	getErr           error
+	postErr          error
+	deleteErr        error
 
 	postCalls   int
 	lastPostID  string
@@ -57,7 +59,7 @@ func (f *fakeReservationClient) GetNodeGroups(context.Context) (*brokerapi.NodeG
 	if f.getErr != nil {
 		return nil, f.getErr
 	}
-	return &brokerapi.NodeGroupListResponse{NodeGroups: f.nodeGroups}, nil
+	return &brokerapi.NodeGroupListResponse{NodeGroups: f.nodeGroups, AppliedPlacement: f.appliedPlacement}, nil
 }
 
 func (f *fakeReservationClient) PostReservation(_ context.Context, id string, req *brokerapi.ReservationRequest) (*brokerapi.ReservationResponse, error) {
@@ -168,6 +170,9 @@ func newReconcileFixture(t *testing.T, agent *fakeReservationClient, objs ...cli
 // wantResID is the deterministic reservation id for the fixture below
 // (mr-<uid>); centralised so the assertions share one literal.
 const wantResID = "mr-abc123"
+
+// wantMigratedResID is the fresh id minted for the first migration (mr-<uid>-m1).
+const wantMigratedResID = "mr-abc123-m1"
 
 func TestResourceRequestReserveAndRelease(t *testing.T) {
 	ctx := context.Background()
@@ -298,7 +303,7 @@ func TestResourceRequestHoldProtectsNode(t *testing.T) {
 	}}}
 	r, cl := newReconcileFixture(t, agent, rr, vns, node)
 	key := types.NamespacedName{Namespace: "default", Name: "held"}
-	for i := 0; i < 3; i++ { // finalize, reserve, hold
+	for i := range 3 { // finalize, reserve, hold
 		if _, err := r.Reconcile(ctx, ctrl.Request{NamespacedName: key}); err != nil {
 			t.Fatalf("reconcile %d: %v", i, err)
 		}
@@ -390,5 +395,249 @@ func TestResourceRequestFailsOnReserveError(t *testing.T) {
 	}
 	if rr.Status.Phase != autoscalingv1alpha1.ResourceRequestFailed {
 		t.Errorf("phase = %q, want Failed", rr.Status.Phase)
+	}
+}
+
+// --- reconcile: periodic re-evaluation + migration (feature 7) ----------------
+
+// reservedRR builds an already-reserved manual request bound to provider-1 with
+// reservation id "mr-abc123", whose last transition was `ago` in the past (to
+// drive the re-eval debounce).
+func reservedRR(ago time.Duration) *autoscalingv1alpha1.ResourceRequest {
+	lt := metav1.NewTime(time.Now().Add(-ago))
+	return &autoscalingv1alpha1.ResourceRequest{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: "job", Namespace: "default", UID: types.UID("abc123"),
+			Finalizers: []string{resourceRequestFinalizer},
+		},
+		Spec: autoscalingv1alpha1.ResourceRequestSpec{
+			Resources: corev1.ResourceList{corev1.ResourceCPU: resource.MustParse("3"), corev1.ResourceMemory: resource.MustParse("6Gi")},
+		},
+		Status: autoscalingv1alpha1.ResourceRequestStatus{
+			Phase:              autoscalingv1alpha1.ResourceRequestActive,
+			ReservationID:      wantResID,
+			ProviderClusterID:  "provider-1",
+			ChunkCount:         1,
+			LastTransitionTime: &lt,
+		},
+	}
+}
+
+// growable is a node group the masking left growable (the policy winner).
+func growable(provider string) brokerapi.NodeGroupView {
+	return brokerapi.NodeGroupView{
+		ID: "ng-" + provider, ProviderClusterID: provider, Type: brokerv1alpha1.ChunkTypeStandard,
+		MaxSize: 10, CurrentReserved: 0,
+		ChunkResources: corev1.ResourceList{corev1.ResourceCPU: resource.MustParse("2"), corev1.ResourceMemory: resource.MustParse("4Gi")},
+	}
+}
+
+// metered is a node group carrying an explicit placement metric (lower = better),
+// as the Broker now stamps on every view. maxSize/reserved set its head-room, so a
+// full provider (avail 0) can still carry its true metric — the input the re-eval
+// guard uses to avoid a spurious same-provider migration.
+func metered(provider string, maxSize, reserved int32, metric float64) brokerapi.NodeGroupView {
+	g := growable(provider)
+	g.MaxSize, g.CurrentReserved = maxSize, reserved
+	g.PlacementMetric, g.HasMetric = metric, true
+	return g
+}
+
+// TestReEvalNoMigrationWhenCurrentFullButStillBest is the regression for the
+// self-occupancy confound: the current provider is masked as non-growable only
+// because THIS reservation filled it, so the Broker exposes the next-best provider
+// as the growable survivor. The old guard ("a different provider is growable")
+// migrated there and back every interval; the metric guard must recognise the
+// current provider is still the best (lower metric) and NOT migrate.
+func TestReEvalNoMigrationWhenCurrentFullButStillBest(t *testing.T) {
+	ctx := context.Background()
+	rr := reservedRR(2 * time.Hour) // current = provider-1
+	agent := &fakeReservationClient{
+		nodeGroups: []brokerapi.NodeGroupView{
+			metered("provider-1", 1, 1, 1.0),  // current: FULL (avail 0) but the lowest metric
+			metered("provider-2", 10, 0, 2.0), // spill target: growable but a WORSE metric
+		},
+		appliedPlacement: autoscalingv1alpha1.PlacementStrategyPrice,
+	}
+	r, cl := newReconcileFixture(t, agent, rr)
+	r.ReEvalInterval = time.Hour
+	key := types.NamespacedName{Namespace: "default", Name: "job"}
+
+	if _, err := r.Reconcile(ctx, ctrl.Request{NamespacedName: key}); err != nil {
+		t.Fatal(err)
+	}
+	if agent.deleteCalls != 0 {
+		t.Fatalf("must not migrate off a full-but-still-best provider; delete=%d", agent.deleteCalls)
+	}
+	if err := cl.Get(ctx, key, rr); err != nil {
+		t.Fatal(err)
+	}
+	if rr.Status.ReservationID != wantResID || rr.Status.MigrationCount != 0 {
+		t.Fatalf("reservation must be untouched: id=%q count=%d", rr.Status.ReservationID, rr.Status.MigrationCount)
+	}
+}
+
+// TestReEvalMigratesWhenCandidateStrictlyBetter confirms the guard still lets a
+// GENUINE improvement through: the current provider is present but its metric got
+// worse, so a strictly-better provider must trigger the break-before-make.
+func TestReEvalMigratesWhenCandidateStrictlyBetter(t *testing.T) {
+	ctx := context.Background()
+	rr := reservedRR(2 * time.Hour) // current = provider-1
+	agent := &fakeReservationClient{
+		nodeGroups: []brokerapi.NodeGroupView{
+			metered("provider-1", 1, 1, 5.0),  // current: now the WORSE metric
+			metered("provider-2", 10, 0, 1.0), // growable AND strictly better
+		},
+		appliedPlacement: autoscalingv1alpha1.PlacementStrategyPrice,
+	}
+	r, cl := newReconcileFixture(t, agent, rr)
+	r.ReEvalInterval = time.Hour
+	key := types.NamespacedName{Namespace: "default", Name: "job"}
+
+	if _, err := r.Reconcile(ctx, ctrl.Request{NamespacedName: key}); err != nil {
+		t.Fatal(err)
+	}
+	if agent.deleteCalls != 1 || agent.lastDeleteID != wantResID {
+		t.Fatalf("a strictly-better provider must start a migration; delete=%d id=%q", agent.deleteCalls, agent.lastDeleteID)
+	}
+	if err := cl.Get(ctx, key, rr); err != nil {
+		t.Fatal(err)
+	}
+	if rr.Status.Phase != autoscalingv1alpha1.ResourceRequestMigrating ||
+		rr.Status.ReservationID != wantMigratedResID || rr.Status.MigrationCount != 1 {
+		t.Fatalf("want Migrating with fresh id mr-abc123-m1 (count 1); got %+v", rr.Status)
+	}
+}
+
+func TestReEvalMigratesToBetterProvider(t *testing.T) {
+	ctx := context.Background()
+	rr := reservedRR(2 * time.Hour)
+	agent := &fakeReservationClient{
+		nodeGroups:       []brokerapi.NodeGroupView{growable("provider-2")}, // broker masked to p2
+		appliedPlacement: autoscalingv1alpha1.PlacementStrategyLatency,
+	}
+	r, cl := newReconcileFixture(t, agent, rr)
+	r.ReEvalInterval = time.Hour
+	key := types.NamespacedName{Namespace: "default", Name: "job"}
+
+	// Step 1: release the old reservation and enter Migrating with a fresh id.
+	if _, err := r.Reconcile(ctx, ctrl.Request{NamespacedName: key}); err != nil {
+		t.Fatalf("step 1: %v", err)
+	}
+	if agent.deleteCalls != 1 || agent.lastDeleteID != wantResID {
+		t.Fatalf("step 1 must release the old reservation; delete=%d id=%q", agent.deleteCalls, agent.lastDeleteID)
+	}
+	if agent.postCalls != 0 {
+		t.Fatal("step 1 must NOT create the new reservation yet (break-before-make)")
+	}
+	if err := cl.Get(ctx, key, rr); err != nil {
+		t.Fatal(err)
+	}
+	if rr.Status.Phase != autoscalingv1alpha1.ResourceRequestMigrating {
+		t.Fatalf("phase = %q, want Migrating", rr.Status.Phase)
+	}
+	if rr.Status.ReservationID != wantMigratedResID || rr.Status.MigrationCount != 1 {
+		t.Fatalf("fresh id/count wrong: id=%q count=%d", rr.Status.ReservationID, rr.Status.MigrationCount)
+	}
+
+	// Step 2: peer the new provider under the fresh id.
+	if _, err := r.Reconcile(ctx, ctrl.Request{NamespacedName: key}); err != nil {
+		t.Fatalf("step 2: %v", err)
+	}
+	if agent.postCalls != 1 || agent.lastPostID != wantMigratedResID {
+		t.Fatalf("step 2 must create the new reservation; post=%d id=%q", agent.postCalls, agent.lastPostID)
+	}
+	if agent.lastPostReq.ProviderClusterID != "provider-2" {
+		t.Fatalf("new reservation provider = %q, want provider-2", agent.lastPostReq.ProviderClusterID)
+	}
+	if err := cl.Get(ctx, key, rr); err != nil {
+		t.Fatal(err)
+	}
+	if rr.Status.ProviderClusterID != "provider-2" {
+		t.Fatalf("provider after migration = %q, want provider-2", rr.Status.ProviderClusterID)
+	}
+	if rr.Status.Phase == autoscalingv1alpha1.ResourceRequestMigrating {
+		t.Fatal("should have left Migrating after step 2")
+	}
+}
+
+func TestReEvalSkipsStandardPolicy(t *testing.T) {
+	ctx := context.Background()
+	rr := reservedRR(2 * time.Hour)
+	agent := &fakeReservationClient{
+		nodeGroups:       []brokerapi.NodeGroupView{growable("provider-2")}, // p2 is "better"...
+		appliedPlacement: autoscalingv1alpha1.PlacementStrategyStandard,     // ...but Standard never migrates
+	}
+	r, cl := newReconcileFixture(t, agent, rr)
+	r.ReEvalInterval = time.Hour
+	key := types.NamespacedName{Namespace: "default", Name: "job"}
+
+	if _, err := r.Reconcile(ctx, ctrl.Request{NamespacedName: key}); err != nil {
+		t.Fatal(err)
+	}
+	if agent.deleteCalls != 0 {
+		t.Fatalf("Standard policy must not migrate; delete=%d", agent.deleteCalls)
+	}
+	if err := cl.Get(ctx, key, rr); err != nil {
+		t.Fatal(err)
+	}
+	if rr.Status.ReservationID != wantResID || rr.Status.MigrationCount != 0 {
+		t.Fatalf("reservation must be untouched: id=%q count=%d", rr.Status.ReservationID, rr.Status.MigrationCount)
+	}
+}
+
+func TestReEvalDebouncedWithinInterval(t *testing.T) {
+	ctx := context.Background()
+	rr := reservedRR(time.Minute) // transitioned recently
+	agent := &fakeReservationClient{
+		nodeGroups:       []brokerapi.NodeGroupView{growable("provider-2")},
+		appliedPlacement: autoscalingv1alpha1.PlacementStrategyLatency,
+	}
+	r, _ := newReconcileFixture(t, agent, rr)
+	r.ReEvalInterval = time.Hour // 1m < 1h → debounced
+	key := types.NamespacedName{Namespace: "default", Name: "job"}
+
+	if _, err := r.Reconcile(ctx, ctrl.Request{NamespacedName: key}); err != nil {
+		t.Fatal(err)
+	}
+	if agent.deleteCalls != 0 {
+		t.Fatalf("debounce must block a migration within the interval; delete=%d", agent.deleteCalls)
+	}
+}
+
+func TestReEvalNoOpWhenCurrentIsBest(t *testing.T) {
+	ctx := context.Background()
+	rr := reservedRR(2 * time.Hour)
+	agent := &fakeReservationClient{
+		nodeGroups:       []brokerapi.NodeGroupView{growable("provider-1")}, // current is still the winner
+		appliedPlacement: autoscalingv1alpha1.PlacementStrategyLatency,
+	}
+	r, _ := newReconcileFixture(t, agent, rr)
+	r.ReEvalInterval = time.Hour
+	key := types.NamespacedName{Namespace: "default", Name: "job"}
+
+	if _, err := r.Reconcile(ctx, ctrl.Request{NamespacedName: key}); err != nil {
+		t.Fatal(err)
+	}
+	if agent.deleteCalls != 0 {
+		t.Fatalf("no migration when the current provider is still best; delete=%d", agent.deleteCalls)
+	}
+}
+
+func TestReEvalDisabledByZeroInterval(t *testing.T) {
+	ctx := context.Background()
+	rr := reservedRR(2 * time.Hour)
+	agent := &fakeReservationClient{
+		nodeGroups:       []brokerapi.NodeGroupView{growable("provider-2")},
+		appliedPlacement: autoscalingv1alpha1.PlacementStrategyLatency,
+	}
+	r, _ := newReconcileFixture(t, agent, rr) // ReEvalInterval defaults to 0 (disabled)
+	key := types.NamespacedName{Namespace: "default", Name: "job"}
+
+	if _, err := r.Reconcile(ctx, ctrl.Request{NamespacedName: key}); err != nil {
+		t.Fatal(err)
+	}
+	if agent.deleteCalls != 0 {
+		t.Fatalf("re-eval disabled (interval 0) must not migrate; delete=%d", agent.deleteCalls)
 	}
 }

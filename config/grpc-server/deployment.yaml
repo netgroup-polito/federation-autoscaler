@@ -49,6 +49,14 @@ spec:
         - --grpc-key-name=tls.key
         - --grpc-ca-name=ca.crt
         - --agent-local-api-url=http://agent.federation-autoscaler-system.svc.cluster.local:9090
+        # Feature 7: how often an active MANUAL reservation is re-evaluated for a
+        # better provider (and the min gap between migrations). Default 1h; lower it
+        # for a live demo, e.g. `kubectl set env deploy/grpc-server FA_REEVAL_INTERVAL=2m`.
+        # 0 disables re-evaluation.
+        - --re-eval-interval=$(FA_REEVAL_INTERVAL)
+        env:
+        - name: FA_REEVAL_INTERVAL
+          value: "1h"
         ports:
         - name: grpc
           containerPort: 9443
