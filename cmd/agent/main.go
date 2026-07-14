@@ -95,6 +95,7 @@ func main() {
 		advertisedIP    string
 		mockEcoURL      string
 		mockGeoURL      string
+		probeUDPPort    int
 	)
 
 	flag.StringVar(&role, "role", "",
@@ -155,6 +156,11 @@ func main() {
 			"roles to resolve this cluster's node IP to a region + coordinates. "+
 			"Empty ⇒ advertise no location (the eco/latency strategies then have no "+
 			"effect for this cluster).")
+	flag.IntVar(&probeUDPPort, "probe-udp-port", 0,
+		"(provider role only) The always-on UDP NodePort the udpecho responder is "+
+			"exposed on; the provider advertises <nodeIP>:<port> as its measured-"+
+			"latency probe endpoint. Must match the agent-probe Service's nodePort. "+
+			"0 ⇒ advertise no probe endpoint (latency falls back to distance).")
 
 	opts := zap.Options{Development: true}
 	opts.BindFlags(flag.CommandLine)
@@ -278,6 +284,7 @@ func main() {
 			AdvertisedIP:  advertisedIP,
 			MockEcoURL:    mockEcoURL,
 			MockGeoURL:    mockGeoURL,
+			ProbeUDPPort:  probeUDPPort,
 			ConsoleAddr:   consoleAddr,
 			Logger:        ctrl.Log.WithName("provider"),
 			Probe:         probe,

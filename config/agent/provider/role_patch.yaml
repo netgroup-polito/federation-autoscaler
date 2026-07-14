@@ -25,6 +25,12 @@
 - op: add
   path: /spec/template/spec/containers/0/args/-
   value: --renewable-file=/etc/federation-autoscaler/renewable/renewable.yaml
+# Advertise the udpecho probe endpoint <nodeIP>:<port> for the measured-latency
+# strategy. This port MUST match the nodePort of the agent-probe Service in
+# udpecho.yaml (30100) — the consumer probes <advertised nodeIP>:30100.
+- op: add
+  path: /spec/template/spec/containers/0/args/-
+  value: --probe-udp-port=30100
 - op: add
   path: /spec/template/spec/containers/0/volumeMounts/-
   value:

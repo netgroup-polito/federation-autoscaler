@@ -22,12 +22,12 @@ import "math"
 const earthRadiusKm = 6371.0
 
 // haversineKm returns the great-circle distance, in kilometres, between two
-// points given in decimal degrees. It is the estimation the latency placement
-// strategy ranks providers by: distance is monotonic with network round-trip
-// time for the demo's purposes, and (unlike a measured RTT) it can be computed
-// by the Broker from advertised coordinates alone — no probing, no Broker
-// dial-out. A real measured-latency refinement is intentionally deferred (see
-// the project memory note); this keeps v1 self-contained.
+// points given in decimal degrees. For the latency strategy the Broker ranks
+// providers by this distance to build the top-N nearest SHORTLIST (it can be
+// computed from advertised coordinates alone — no probing, no Broker dial-out).
+// The Consumer Agent then UDP-probes the shortlist to make the final,
+// measured-RTT choice (applyLatencyTopN + internal/agent/consumer/latency);
+// distance is the coarse pre-filter, real RTT is the tiebreak.
 func haversineKm(lat1, lon1, lat2, lon2 float64) float64 {
 	toRad := func(deg float64) float64 { return deg * math.Pi / 180.0 }
 

@@ -2,27 +2,25 @@
 # Deploys the provider agent on a provider cluster. Mirrors
 # test/e2e/bootstrap/overlays.go's ApplyOverlay for config/agent/provider.
 
-- name: Render provider-agent overlay with Docker Hub image, apply, then reset
+# Pin the agent image with a STREAM edit (sed over the built manifest) instead of
+# `kustomize edit set image` on config/agent/base. The old approach mutated that
+# SHARED base kustomization once per provider host; because Ansible runs the
+# provider hosts in parallel, the concurrent `kustomize edit` writes raced and
+# could truncate config/agent/base/kustomization.yaml down to just its `images:`
+# block — stripping the `resources:` list, so the overlay silently applied without
+# agent-config or the agent Deployment. This stream edit never touches the repo,
+# so parallel hosts are safe. `pipefail` also surfaces a kustomize-build failure
+# instead of masking it as an empty apply.
+- name: Apply provider agent overlay (agent image pinned via stream edit — race-free)
   delegate_to: localhost
-  block:
-    - name: Set agent image
-      ansible.builtin.shell:
-        cmd: |
-          cd {{ fa_repo_root }}/config/agent/base
-          kustomize edit set image federation-autoscaler/agent={{ fa_image_agent }}
-      changed_when: true
-    - name: Apply provider agent overlay
-      ansible.builtin.shell:
-        cmd: |
-          kubectl --kubeconfig {{ cluster_kubeconfig }} apply -k {{ fa_repo_root }}/config/agent/provider
-      changed_when: true
-  always:
-    - name: Reset agent image override
-      ansible.builtin.shell:
-        cmd: |
-          cd {{ fa_repo_root }}/config/agent/base
-          kustomize edit set image federation-autoscaler/agent=federation-autoscaler/agent:latest
-      changed_when: true
+  ansible.builtin.shell:
+    executable: /bin/bash
+    cmd: |
+      set -o pipefail
+      kustomize build {{ fa_repo_root }}/config/agent/provider \
+        | sed 's#image: federation-autoscaler/agent:latest#image: {{ fa_image_agent }}#' \
+        | kubectl --kubeconfig {{ cluster_kubeconfig }} apply -f -
+  changed_when: true
 
 - name: Patch agent-config ConfigMap with this cluster's identity, broker URL, and mock URLs
   delegate_to: localhost

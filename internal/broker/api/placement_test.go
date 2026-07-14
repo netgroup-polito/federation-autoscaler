@@ -24,10 +24,13 @@ import (
 	brokerv1alpha1 "github.com/netgroup-polito/federation-autoscaler/api/broker/v1alpha1"
 )
 
-// Representative coordinates reused across the latency cases.
+// Representative coordinates reused across the latency cases, ordered by distance
+// from the Montreal consumer: Montreal(0) < San Jose < London < Sydney.
 const (
 	montrealLat, montrealLon = 45.6085, -73.5493  // consumer + the "near" provider
-	sydneyLat, sydneyLon     = -33.8688, 151.2093 // the "far" provider
+	sanJoseLat, sanJoseLon   = 37.3382, -121.8863 // 2nd-nearest
+	londonLat, londonLon     = 51.5074, -0.1278   // 3rd-nearest
+	sydneyLat, sydneyLon     = -33.8688, 151.2093 // farthest
 )
 
 // stdAdvCarbon is stdAdv with an advertised current carbon intensity (gCO2/kWh).
@@ -43,6 +46,22 @@ func stdAdvAt(name string, reserved int32, lat, lon float64) *brokerv1alpha1.Clu
 	a := stdAdv(name, reserved, nil)
 	a.Spec.Topology = &brokerv1alpha1.Topology{Region: name, Latitude: lat, Longitude: lon}
 	return a
+}
+
+// stdAdvAtProbe is stdAdvAt with an advertised UDP probe endpoint (feature 6).
+func stdAdvAtProbe(name string, reserved int32, lat, lon float64, probe string) *brokerv1alpha1.ClusterAdvertisement {
+	a := stdAdvAt(name, reserved, lat, lon)
+	a.Spec.ProbeEndpoint = probe
+	return a
+}
+
+// probeByProvider maps providerClusterID → advertised probe endpoint on the view.
+func probeByProvider(resp NodeGroupListResponse) map[string]string {
+	out := map[string]string{}
+	for _, v := range resp.NodeGroups {
+		out[v.ProviderClusterID] = v.ProbeEndpoint
+	}
+	return out
 }
 
 // stdAdvRenewable is stdAdv with the provider's self-declared renewable flag set
@@ -134,46 +153,70 @@ func TestNodeGroupsEcoPreference(t *testing.T) {
 	})
 }
 
-// TestNodeGroupsLatencyPreference covers the closest-first greedy plus the
-// genuinely-new branch: a consumer with no location yields NO masking (R2).
+// TestNodeGroupsLatencyPreference covers feature 6: the Broker exposes the top-3
+// NEAREST providers-with-capacity as a shortlist (LatencyShortlist=true) — the
+// consumer then UDP-probes them — instead of narrowing to the single closest.
 func TestNodeGroupsLatencyPreference(t *testing.T) {
-	t.Run("policy + coords -> only closest grows; far + coordless masked", func(t *testing.T) {
+	t.Run("top-3 nearest-with-capacity stay growable; 4th + coordless masked", func(t *testing.T) {
+		// Distances from Montreal: p1(0) < p2 < p3 < p4; p-nocoords has no distance.
 		s := newDashboardTestServer(t,
-			stdAdvAt("p-near", 0, montrealLat, montrealLon),
-			stdAdvAt("p-far", 0, sydneyLat, sydneyLon),
+			stdAdvAtProbe("p1", 0, montrealLat, montrealLon, "10.0.0.1:30100"),
+			stdAdvAt("p2", 0, sanJoseLat, sanJoseLon),
+			stdAdvAt("p3", 0, londonLat, londonLon),
+			stdAdvAt("p4", 0, sydneyLat, sydneyLon),
 			stdAdv("p-nocoords", 0, nil))
 		withLatencyPolicy(s, montrealLat, montrealLon)
-		hr := headroomByProvider(callNodeGroups(t, s))
-		if hr["p-near"] != 3 {
-			t.Errorf("closest provider must keep head-room; got %+v", hr)
+		resp := callNodeGroups(t, s)
+
+		if !resp.LatencyShortlist {
+			t.Error("expected LatencyShortlist=true when a distance shortlist is produced")
 		}
-		if hr["p-far"] != 0 || hr["p-nocoords"] != 0 {
-			t.Errorf("farther and coordless providers must be masked; got %+v", hr)
+		hr := headroomByProvider(resp)
+		for _, near := range []string{"p1", "p2", "p3"} {
+			if hr[near] != 3 {
+				t.Errorf("nearest-3 must stay growable; %s got %+v", near, hr)
+			}
+		}
+		if hr["p4"] != 0 || hr["p-nocoords"] != 0 {
+			t.Errorf("the 4th-nearest and coordless providers must be masked; got %+v", hr)
+		}
+		// The probe endpoint round-trips onto the view.
+		if pe := probeByProvider(resp)["p1"]; pe != "10.0.0.1:30100" {
+			t.Errorf("probe endpoint not surfaced on the view; got %q", pe)
 		}
 	})
 
-	t.Run("consumer has NO location -> no masking (all exposed)", func(t *testing.T) {
+	t.Run("consumer has NO location -> no masking, no shortlist", func(t *testing.T) {
 		s := newDashboardTestServer(t,
 			stdAdvAt("p-near", 0, montrealLat, montrealLon),
 			stdAdvAt("p-far", 0, sydneyLat, sydneyLon))
 		withLatencyPolicyNoLocation(s)
-		hr := headroomByProvider(callNodeGroups(t, s))
+		resp := callNodeGroups(t, s)
+		if resp.LatencyShortlist {
+			t.Error("no consumer location must not signal a shortlist")
+		}
+		hr := headroomByProvider(resp)
 		if hr["p-near"] != 3 || hr["p-far"] != 3 {
 			t.Errorf("no consumer location must leave all providers exposed; got %+v", hr)
 		}
 	})
 
-	t.Run("greedy spill: closest full -> next-closest grows", func(t *testing.T) {
+	t.Run("nearest full -> next-nearest fills the shortlist slot", func(t *testing.T) {
+		// p1 (nearest) fully reserved; the shortlist is the 3 nearest WITH head-room.
 		s := newDashboardTestServer(t,
-			stdAdvAt("p-near", 3, montrealLat, montrealLon), // fully reserved
-			stdAdvAt("p-far", 0, sydneyLat, sydneyLon))
+			stdAdvAt("p1", 3, montrealLat, montrealLon), // full
+			stdAdvAt("p2", 0, sanJoseLat, sanJoseLon),
+			stdAdvAt("p3", 0, londonLat, londonLon),
+			stdAdvAt("p4", 0, sydneyLat, sydneyLon))
 		withLatencyPolicy(s, montrealLat, montrealLon)
 		hr := headroomByProvider(callNodeGroups(t, s))
-		if hr["p-near"] != 0 {
-			t.Errorf("exhausted closest must have no head-room; got %+v", hr)
+		if hr["p1"] != 0 {
+			t.Errorf("exhausted nearest must have no head-room; got %+v", hr)
 		}
-		if hr["p-far"] != 3 {
-			t.Errorf("next-closest must be promoted to growable; got %+v", hr)
+		for _, p := range []string{"p2", "p3", "p4"} {
+			if hr[p] != 3 {
+				t.Errorf("the 3 nearest-with-head-room must stay growable; %s got %+v", p, hr)
+			}
 		}
 	})
 }

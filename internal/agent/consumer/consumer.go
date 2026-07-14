@@ -41,6 +41,7 @@ import (
 	"github.com/netgroup-polito/federation-autoscaler/internal/agent/console"
 	"github.com/netgroup-polito/federation-autoscaler/internal/agent/consumer/heartbeat"
 	"github.com/netgroup-polito/federation-autoscaler/internal/agent/consumer/instructions"
+	"github.com/netgroup-polito/federation-autoscaler/internal/agent/consumer/latency"
 	"github.com/netgroup-polito/federation-autoscaler/internal/agent/consumer/localapi"
 	"github.com/netgroup-polito/federation-autoscaler/internal/agent/health"
 	"github.com/netgroup-polito/federation-autoscaler/internal/agent/poller"
@@ -185,6 +186,11 @@ func Run(ctx context.Context, opts Options) error {
 		}),
 	)
 
+	// One measured-latency prober shared by the loopback API (which probes +
+	// re-masks the latency shortlist) and the heartbeat (which reports the last
+	// measurement for the dashboard).
+	prober := latency.New(latency.Options{Logger: logger.WithName("latency-prober")})
+
 	beater, err := heartbeat.New(heartbeat.Options{
 		Client:        opts.Client,
 		ClusterID:     opts.ClusterID,
@@ -194,6 +200,7 @@ func Run(ctx context.Context, opts Options) error {
 		NodeName:      opts.NodeName,
 		AdvertisedIP:  opts.AdvertisedIP,
 		MockGeoURL:    opts.MockGeoURL,
+		Prober:        prober,
 		Logger:        logger.WithName("heartbeat"),
 		// Same semantics as the provider's advertisement publisher:
 		// any successful broker contact refreshes the readiness gate.
@@ -209,6 +216,7 @@ func Run(ctx context.Context, opts Options) error {
 		Client:      opts.Client,
 		LocalClient: opts.LocalClient,
 		Namespace:   namespace,
+		Prober:      prober,
 		Logger:      logger.WithName("localapi"),
 	})
 	if err != nil {

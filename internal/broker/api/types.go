@@ -162,6 +162,12 @@ type AdvertisementRequest struct {
 	// a placement bonus. Omitted/false ⇒ no bonus.
 	Renewable bool `json:"renewable,omitempty"`
 
+	// ProbeEndpoint is this provider's always-on UDP echo address (<nodeIP>:port)
+	// for the measured-latency strategy (optional). The Broker carries it onto the
+	// latency shortlist so the Consumer Agent can probe real round-trip time before
+	// choosing. Omitted ⇒ this provider is not probeable (falls back to distance).
+	ProbeEndpoint string `json:"probeEndpoint,omitempty"`
+
 	// LiqoLabels are stamped on the virtual nodes Liqo creates on each
 	// peering consumer, e.g. liqo.io/type=virtual-node.
 	LiqoLabels map[string]string `json:"liqoLabels,omitempty"`
@@ -236,7 +242,10 @@ type AdvertisementSnapshot struct {
 	CapacityFixed corev1.ResourceList `json:"capacityFixed,omitempty"`
 	// Renewable mirrors the provider's self-declared renewable-energy flag,
 	// surfaced on the dashboard and used by the standard composite policy.
-	Renewable       bool              `json:"renewable,omitempty"`
+	Renewable bool `json:"renewable,omitempty"`
+	// ProbeEndpoint mirrors the provider's advertised UDP probe endpoint
+	// (<nodeIP>:port) for the measured-latency strategy; surfaced on the dashboard.
+	ProbeEndpoint   string            `json:"probeEndpoint,omitempty"`
 	LiqoLabels      map[string]string `json:"liqoLabels,omitempty"`
 	LiqoTaints      []corev1.Taint    `json:"liqoTaints,omitempty"`
 	ChunkCount      int32             `json:"chunkCount"`
@@ -277,6 +286,14 @@ type HeartbeatRequest struct {
 	// latency strategy applies no preference.
 	Latitude  *float64 `json:"latitude,omitempty"`
 	Longitude *float64 `json:"longitude,omitempty"`
+
+	// MeasuredLatencies is the consumer's most recent measured RTT (milliseconds)
+	// per provider cluster ID, from UDP-probing the latency shortlist (optional,
+	// finite values only). ChosenProvider is the lowest-RTT provider it grew. Both
+	// are informational — the consumer already re-masked locally — surfaced on the
+	// dashboard so an operator can see the measured decision.
+	MeasuredLatencies map[string]float64 `json:"measuredLatencies,omitempty"`
+	ChosenProvider    string             `json:"chosenProvider,omitempty"`
 }
 
 type HeartbeatResponse struct {
@@ -301,15 +318,27 @@ type NodeGroupView struct {
 	ChunkResources        corev1.ResourceList      `json:"chunkResources"`
 	Cost                  *resource.Quantity       `json:"cost,omitempty"`
 	Topology              *brokerv1alpha1.Topology `json:"topology,omitempty"`
-	Labels                map[string]string        `json:"labels,omitempty"`
-	Taints                []corev1.Taint           `json:"taints,omitempty"`
+	// ProbeEndpoint is the provider's UDP echo address (<nodeIP>:port) for the
+	// measured-latency strategy; empty when the provider advertised none. Set on
+	// every view (not only the shortlist) so the Consumer Agent can probe the
+	// growable candidates.
+	ProbeEndpoint string            `json:"probeEndpoint,omitempty"`
+	Labels        map[string]string `json:"labels,omitempty"`
+	Taints        []corev1.Taint    `json:"taints,omitempty"`
 }
 
 type NodeGroupListResponse struct {
-	NodeGroups      []NodeGroupView `json:"nodeGroups"`
-	Generation      int64           `json:"generation"`
-	ServedAt        metav1.Time     `json:"servedAt"`
-	CacheAgeSeconds int32           `json:"cacheAgeSeconds"`
+	NodeGroups []NodeGroupView `json:"nodeGroups"`
+	// LatencyShortlist is true when the Broker applied the measured-latency
+	// strategy and left more than one provider growable (the top-3 nearest with
+	// capacity). It tells the Consumer Agent to UDP-probe the growable candidates
+	// (by ProbeEndpoint) and re-mask locally to the lowest-RTT one. False for every
+	// other policy (the Broker already masked to a single provider) and for
+	// latency with no consumer location (a full no-op).
+	LatencyShortlist bool        `json:"latencyShortlist,omitempty"`
+	Generation       int64       `json:"generation"`
+	ServedAt         metav1.Time `json:"servedAt"`
+	CacheAgeSeconds  int32       `json:"cacheAgeSeconds"`
 }
 
 // -----------------------------------------------------------------------------

@@ -48,13 +48,13 @@ const (
 	// intensity are reached only as a last resort. Mirrors the Price greedy.
 	PlacementStrategyEco PlacementStrategy = "Eco"
 
-	// PlacementStrategyLatency makes the Broker prefer, for this consumer, the
-	// geographically closest provider(s) with capacity — ranked by the
-	// great-circle (Haversine) distance between the consumer's advertised
-	// location and each provider's advertised location (closest-first greedy).
-	// If the consumer has not advertised a location, the Broker applies no
-	// preference (all providers stay exposed). v1 is estimation-only; no
-	// measured RTT is used.
+	// PlacementStrategyLatency makes the Broker expose, for this consumer, a
+	// SHORTLIST of the top-N geographically nearest providers with capacity —
+	// ranked by great-circle (Haversine) distance from the consumer's advertised
+	// location. The Consumer Agent then UDP-probes that shortlist and grows the
+	// provider with the lowest MEASURED round-trip time (real network path, not
+	// just distance). If the consumer has not advertised a location, the Broker
+	// applies no preference (all providers stay exposed).
 	PlacementStrategyLatency PlacementStrategy = "Latency"
 )
 

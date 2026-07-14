@@ -42,8 +42,135 @@ import (
 	autoscalingv1alpha1 "github.com/netgroup-polito/federation-autoscaler/api/autoscaling/v1alpha1"
 	brokerv1alpha1 "github.com/netgroup-polito/federation-autoscaler/api/broker/v1alpha1"
 	agentclient "github.com/netgroup-polito/federation-autoscaler/internal/agent/client"
+	"github.com/netgroup-polito/federation-autoscaler/internal/agent/consumer/latency"
 	brokerapi "github.com/netgroup-polito/federation-autoscaler/internal/broker/api"
 )
+
+// fakeProber is a deterministic Prober for the latency-masking tests. It records
+// the candidates it was asked to measure and returns a preset result.
+type fakeProber struct {
+	chosen string
+	rtts   map[string]float64
+	called bool
+	cands  []latency.Candidate
+}
+
+func (f *fakeProber) MeasureAndPick(_ context.Context, cands []latency.Candidate) latency.Result {
+	f.called = true
+	f.cands = cands
+	return latency.Result{Chosen: f.chosen, RTTs: f.rtts}
+}
+
+// localTestServerProber builds a localapi.Server with a measured-latency Prober.
+func localTestServerProber(t *testing.T, fb *fakeBroker, p Prober) *httptest.Server {
+	t.Helper()
+	s, err := New(Options{
+		BindAddress: "127.0.0.1:0",
+		Client:      fb.buildClient(t),
+		LocalClient: newFakeKubeClient(),
+		Prober:      p,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ts := httptest.NewServer(s.Handler())
+	t.Cleanup(ts.Close)
+	return ts
+}
+
+// getNodeGroups issues GET /local/nodegroups and decodes the response.
+func getNodeGroups(t *testing.T, ts *httptest.Server) brokerapi.NodeGroupListResponse {
+	t.Helper()
+	resp, err := ts.Client().Get(ts.URL + "/local/nodegroups")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(resp.Body)
+		t.Fatalf("status %d, body %s", resp.StatusCode, body)
+	}
+	var out brokerapi.NodeGroupListResponse
+	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
+		t.Fatal(err)
+	}
+	return out
+}
+
+func headroom(resp brokerapi.NodeGroupListResponse) map[string]int32 {
+	out := map[string]int32{}
+	for _, v := range resp.NodeGroups {
+		out[v.ProviderClusterID] = v.MaxSize - v.CurrentReserved
+	}
+	return out
+}
+
+func shortlistResp() brokerapi.NodeGroupListResponse {
+	return brokerapi.NodeGroupListResponse{
+		LatencyShortlist: true,
+		NodeGroups: []brokerapi.NodeGroupView{
+			{ID: "p1/standard", ProviderClusterID: "p1", Type: brokerv1alpha1.ChunkTypeStandard, MaxSize: 4, ProbeEndpoint: "10.0.0.1:30100"},
+			{ID: "p2/standard", ProviderClusterID: "p2", Type: brokerv1alpha1.ChunkTypeStandard, MaxSize: 4, ProbeEndpoint: "10.0.0.2:30100"},
+		},
+	}
+}
+
+func TestNodeGroups_LatencyShortlist_MasksToMeasuredWinner(t *testing.T) {
+	fb := newFakeBroker(t)
+	fb.setHandler(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", brokerapi.ContentTypeJSON)
+		_ = json.NewEncoder(w).Encode(shortlistResp())
+	})
+	fp := &fakeProber{chosen: "p2", rtts: map[string]float64{"p1": 40, "p2": 12}}
+	ts := localTestServerProber(t, fb, fp)
+
+	hr := headroom(getNodeGroups(t, ts))
+	if hr["p2"] != 4 {
+		t.Errorf("measured winner p2 must stay growable; got %+v", hr)
+	}
+	if hr["p1"] != 0 {
+		t.Errorf("probe loser p1 must be masked (headroom 0); got %+v", hr)
+	}
+	if !fp.called || len(fp.cands) != 2 {
+		t.Errorf("prober must be asked to measure both candidates; called=%v cands=%+v", fp.called, fp.cands)
+	}
+}
+
+func TestNodeGroups_NoShortlist_PassesThrough(t *testing.T) {
+	fb := newFakeBroker(t)
+	fb.setHandler(func(w http.ResponseWriter, _ *http.Request) {
+		r := shortlistResp()
+		r.LatencyShortlist = false // e.g. a non-latency policy the Broker already masked
+		w.Header().Set("Content-Type", brokerapi.ContentTypeJSON)
+		_ = json.NewEncoder(w).Encode(r)
+	})
+	fp := &fakeProber{chosen: "p2", rtts: map[string]float64{"p1": 40, "p2": 12}}
+	ts := localTestServerProber(t, fb, fp)
+
+	hr := headroom(getNodeGroups(t, ts))
+	if hr["p1"] != 4 || hr["p2"] != 4 {
+		t.Errorf("without a shortlist the list must pass through unchanged; got %+v", hr)
+	}
+	if fp.called {
+		t.Error("prober must not be consulted when LatencyShortlist is false")
+	}
+}
+
+func TestNodeGroups_Shortlist_AllUnreachable_NoInterference(t *testing.T) {
+	fb := newFakeBroker(t)
+	fb.setHandler(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", brokerapi.ContentTypeJSON)
+		_ = json.NewEncoder(w).Encode(shortlistResp())
+	})
+	// Prober measures nobody (Chosen empty) → leave the Broker's shortlist as-is.
+	fp := &fakeProber{chosen: ""}
+	ts := localTestServerProber(t, fb, fp)
+
+	hr := headroom(getNodeGroups(t, ts))
+	if hr["p1"] != 4 || hr["p2"] != 4 {
+		t.Errorf("all-unreachable must not mask the shortlist; got %+v", hr)
+	}
+}
 
 // rewriteScheme forwards a request whose URL the test client built
 // with scheme=https to the underlying httptest.Server's actual http URL.

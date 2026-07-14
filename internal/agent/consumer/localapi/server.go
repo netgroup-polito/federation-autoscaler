@@ -51,8 +51,16 @@ import (
 
 	autoscalingv1alpha1 "github.com/netgroup-polito/federation-autoscaler/api/autoscaling/v1alpha1"
 	agentclient "github.com/netgroup-polito/federation-autoscaler/internal/agent/client"
+	"github.com/netgroup-polito/federation-autoscaler/internal/agent/consumer/latency"
 	brokerapi "github.com/netgroup-polito/federation-autoscaler/internal/broker/api"
 )
+
+// Prober measures round-trip time to provider UDP echo endpoints for the
+// measured-latency strategy. Satisfied by *latency.Prober; an interface so tests
+// can inject a deterministic fake.
+type Prober interface {
+	MeasureAndPick(ctx context.Context, cands []latency.Candidate) latency.Result
+}
 
 // Options bundles the construction-time settings of the loopback REST
 // server.
@@ -76,6 +84,12 @@ type Options struct {
 	// so the loopback view stays consistent with the agent's own writes.
 	Namespace string
 
+	// Prober measures RTT to provider echo endpoints for the measured-latency
+	// strategy. When set, GET /local/nodegroups re-masks a latency shortlist to
+	// the lowest-RTT provider before returning it to CA. Nil disables probing
+	// (the broker's shortlist is passed through unchanged).
+	Prober Prober
+
 	// Logger is the structured logger every handler logs through.
 	// Defaults to controller-runtime's logger named "consumer-localapi".
 	Logger logr.Logger
@@ -91,6 +105,7 @@ type Server struct {
 	client   *agentclient.Client
 	local    ctrlclient.Client
 	ns       string
+	prober   Prober
 	log      logr.Logger
 	shutdown time.Duration
 
@@ -121,6 +136,7 @@ func New(opts Options) (*Server, error) {
 		client:   opts.Client,
 		local:    opts.LocalClient,
 		ns:       opts.Namespace,
+		prober:   opts.Prober,
 		log:      logger,
 		shutdown: shutdown,
 	}
@@ -182,7 +198,49 @@ func (s *Server) handleNodeGroups(w http.ResponseWriter, r *http.Request) {
 		s.writeError(w, err)
 		return
 	}
+	// Measured-latency strategy: the Broker exposed the nearest-by-distance
+	// shortlist; probe them and narrow to the lowest-RTT provider so CA grows
+	// exactly it. Covers both CA's read and NodeGroupIncreaseSize's re-fetch
+	// (both hit this handler). No prober / not a shortlist ⇒ pass through.
+	if resp.LatencyShortlist && s.prober != nil {
+		s.maskToMeasuredWinner(r.Context(), resp)
+	}
 	s.writeJSON(w, http.StatusOK, resp)
+}
+
+// maskToMeasuredWinner probes the growable, probeable providers in a latency
+// shortlist and masks every other growable entry (MaxSize = CurrentReserved) so
+// only the lowest-RTT provider stays growable. It mutates resp in place. If no
+// candidate is probeable, or none answers, it leaves the Broker's shortlist as-is
+// (safe degrade to distance-based selection).
+func (s *Server) maskToMeasuredWinner(ctx context.Context, resp *brokerapi.NodeGroupListResponse) {
+	seen := map[string]bool{}
+	var cands []latency.Candidate
+	for i := range resp.NodeGroups {
+		ng := &resp.NodeGroups[i]
+		if ng.MaxSize-ng.CurrentReserved > 0 && ng.ProbeEndpoint != "" && !seen[ng.ProviderClusterID] {
+			seen[ng.ProviderClusterID] = true
+			cands = append(cands, latency.Candidate{
+				ProviderClusterID: ng.ProviderClusterID,
+				Endpoint:          ng.ProbeEndpoint,
+			})
+		}
+	}
+	if len(cands) == 0 {
+		return // nothing measurable → keep the Broker's distance shortlist
+	}
+	res := s.prober.MeasureAndPick(ctx, cands)
+	if res.Chosen == "" {
+		return // every candidate unreachable → don't interfere
+	}
+	for i := range resp.NodeGroups {
+		ng := &resp.NodeGroups[i]
+		if ng.MaxSize-ng.CurrentReserved > 0 && ng.ProviderClusterID != res.Chosen {
+			ng.MaxSize = ng.CurrentReserved
+		}
+	}
+	s.log.V(1).Info("measured-latency: masked shortlist to lowest-RTT provider",
+		"chosen", res.Chosen, "rtts", res.RTTs)
 }
 
 func (s *Server) handleReservationCreate(w http.ResponseWriter, r *http.Request) {

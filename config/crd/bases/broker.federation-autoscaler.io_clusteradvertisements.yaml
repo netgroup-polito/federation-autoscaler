@@ -133,6 +133,13 @@ spec:
                   Agents use this value when executing liqoctl peer.
                 minLength: 1
                 type: string
+              probeEndpoint:
+                description: |-
+                  ProbeEndpoint is this provider's always-on UDP echo address (<nodeIP>:port)
+                  for the measured-latency strategy. The Broker carries it onto the latency
+                  shortlist so the Consumer Agent can probe real round-trip time before
+                  choosing. Empty ⇒ this provider is not probeable (falls back to distance).
+                type: string
               renewable:
                 description: |-
                   Renewable is the provider admin's self-declaration that this cluster runs on

@@ -20,6 +20,7 @@ import (
 	"context"
 	"encoding/json"
 	"io"
+	"math"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -32,8 +33,14 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
 	agentclient "github.com/netgroup-polito/federation-autoscaler/internal/agent/client"
+	"github.com/netgroup-polito/federation-autoscaler/internal/agent/consumer/latency"
 	brokerapi "github.com/netgroup-polito/federation-autoscaler/internal/broker/api"
 )
+
+// fakeLatencyProber returns a preset measured-latency result.
+type fakeLatencyProber struct{ res latency.Result }
+
+func (f fakeLatencyProber) LastMeasurements() latency.Result { return f.res }
 
 // rewriteScheme forwards a request whose URL the test client built
 // with scheme=https to the underlying httptest.Server's actual http URL.
@@ -172,6 +179,39 @@ func TestHeartbeater_BeatsImmediately_AndPostsCorrectBody(t *testing.T) {
 	}
 	if posted[0].ClusterID != "consumer-int" || posted[0].LiqoClusterID != "liqo-consumer-int" {
 		t.Errorf("body mismatch: %+v", posted[0])
+	}
+}
+
+func TestHeartbeater_ReportsMeasuredLatency(t *testing.T) {
+	fb := newFakeBroker(t)
+	h, err := New(Options{
+		Client:        fb.buildClient(t),
+		ClusterID:     "c",
+		LiqoClusterID: "liqo-c",
+		Interval:      time.Hour,
+		Prober: fakeLatencyProber{res: latency.Result{
+			Chosen: "p2",
+			RTTs:   map[string]float64{"p1": 40, "p2": 12, "p3": math.Inf(1)},
+		}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	h.beatOnce(context.Background())
+
+	posted := fb.snapshotPosted()
+	if len(posted) != 1 {
+		t.Fatalf("want 1 heartbeat, got %d", len(posted))
+	}
+	got := posted[0]
+	if got.ChosenProvider != "p2" {
+		t.Errorf("chosenProvider = %q, want p2", got.ChosenProvider)
+	}
+	if got.MeasuredLatencies["p1"] != 40 || got.MeasuredLatencies["p2"] != 12 {
+		t.Errorf("measured latencies = %+v", got.MeasuredLatencies)
+	}
+	if _, ok := got.MeasuredLatencies["p3"]; ok {
+		t.Error("unreachable (+Inf) provider must be dropped from the report")
 	}
 }
 

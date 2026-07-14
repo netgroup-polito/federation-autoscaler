@@ -145,8 +145,13 @@ type ConsumerView struct {
 	// measures provider distances from this consumer's coordinates.
 	Region string `json:"region,omitempty"`
 	// City is the consumer's auto-discovered city (may be empty); informational.
-	City     string      `json:"city,omitempty"`
-	LastSeen metav1.Time `json:"lastSeen"`
+	City string `json:"city,omitempty"`
+	// ChosenProvider / MeasuredRTT are the measured-latency result the consumer
+	// reported: the provider it grew and that provider's median RTT (ms). Empty /
+	// nil when the consumer isn't using the latency strategy or hasn't probed yet.
+	ChosenProvider string      `json:"chosenProvider,omitempty"`
+	MeasuredRTT    *float64    `json:"measuredRtt,omitempty"`
+	LastSeen       metav1.Time `json:"lastSeen"`
 }
 
 // -----------------------------------------------------------------------------
@@ -244,14 +249,19 @@ func (s *Server) buildOverview(ctx context.Context) (Overview, error) {
 	entries := s.consumers.Snapshot()
 	ov.Consumers = make([]ConsumerView, 0, len(entries))
 	for _, e := range entries {
-		ov.Consumers = append(ov.Consumers, ConsumerView{
-			ClusterID:     e.ClusterID,
-			LiqoClusterID: e.LiqoClusterID,
-			Placement:     string(e.Placement.Type),
-			Region:        e.Region,
-			City:          e.City,
-			LastSeen:      metav1.NewTime(e.LastSeen),
-		})
+		cv := ConsumerView{
+			ClusterID:      e.ClusterID,
+			LiqoClusterID:  e.LiqoClusterID,
+			Placement:      string(e.Placement.Type),
+			Region:         e.Region,
+			City:           e.City,
+			ChosenProvider: e.ChosenProvider,
+			LastSeen:       metav1.NewTime(e.LastSeen),
+		}
+		if rtt, ok := e.MeasuredLatencies[e.ChosenProvider]; ok {
+			cv.MeasuredRTT = &rtt
+		}
+		ov.Consumers = append(ov.Consumers, cv)
 	}
 
 	return ov, nil

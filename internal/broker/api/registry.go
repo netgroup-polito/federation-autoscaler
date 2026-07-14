@@ -45,6 +45,14 @@ type ConsumerEntry struct {
 	// informational, surfaced on the dashboard alongside Region.
 	City string
 
+	// MeasuredLatencies is the consumer's most recent measured RTT (ms) per
+	// provider from UDP-probing the latency shortlist; ChosenProvider is the
+	// lowest-RTT provider it grew. Both informational (the consumer already
+	// re-masked locally), surfaced on the dashboard. Empty when the consumer isn't
+	// using the latency strategy or hasn't probed yet.
+	MeasuredLatencies map[string]float64
+	ChosenProvider    string
+
 	// Latitude/Longitude are the consumer's coordinates (decimal degrees), valid
 	// only when HasLocation is true. Used by the latency placement strategy to
 	// rank providers by great-circle distance to this consumer. Stored as values
@@ -96,6 +104,23 @@ func (r *ConsumerRegistry) Touch(clusterID, liqoClusterID string, placement auto
 		entry.Longitude = *lon
 		entry.HasLocation = true
 	}
+	r.entries[clusterID] = entry
+}
+
+// SetMeasuredLatency records the consumer's most recent measured-latency result
+// on its existing entry (informational, for the dashboard). Called right after
+// Touch in the heartbeat handler, so the entry exists; a no-op if it doesn't. The
+// map is stored by reference but never mutated in place (each heartbeat brings a
+// fresh map), so Snapshot copies stay safe.
+func (r *ConsumerRegistry) SetMeasuredLatency(clusterID string, rtts map[string]float64, chosen string) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	entry, ok := r.entries[clusterID]
+	if !ok {
+		return
+	}
+	entry.MeasuredLatencies = rtts
+	entry.ChosenProvider = chosen
 	r.entries[clusterID] = entry
 }
 

@@ -124,6 +124,13 @@ type ClusterAdvertisementSpec struct {
 	// policies ignore it. false/unset ⇒ no bonus.
 	// +optional
 	Renewable bool `json:"renewable,omitempty"`
+
+	// ProbeEndpoint is this provider's always-on UDP echo address (<nodeIP>:port)
+	// for the measured-latency strategy. The Broker carries it onto the latency
+	// shortlist so the Consumer Agent can probe real round-trip time before
+	// choosing. Empty ⇒ this provider is not probeable (falls back to distance).
+	// +optional
+	ProbeEndpoint string `json:"probeEndpoint,omitempty"`
 }
 
 // ClusterAdvertisementStatus is the Broker's observed view of the advertisement.

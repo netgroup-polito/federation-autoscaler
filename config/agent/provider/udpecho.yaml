@@ -1,0 +1,67 @@
+# Always-on UDP echo responder for the measured-latency placement strategy
+# (feature 6). The consumer agent probes this endpoint on every provider BEFORE
+# peering to measure real round-trip time, so it cannot reuse the Liqo gateway
+# port (which does not exist until `liqoctl peer` runs). This is a separate,
+# fixed UDP NodePort that is up as soon as the provider is deployed; it measures
+# the same node / data-plane path the gateway will later use.
+#
+# `ghcr.io/liqotech/udpecho` listens on UDP 5000 and echoes datagrams back
+# (upper-cased). The image name is NOT rewritten by the agent-only image
+# substitution in the deploy paths, so it is pulled directly from ghcr.io.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: echo-server
+  namespace: federation-autoscaler-system
+  labels:
+    app.kubernetes.io/name: federation-autoscaler
+    app.kubernetes.io/component: udpecho
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: federation-autoscaler
+      app.kubernetes.io/component: udpecho
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: federation-autoscaler
+        app.kubernetes.io/component: udpecho
+    spec:
+      containers:
+      - name: echo-server
+        image: ghcr.io/liqotech/udpecho
+        ports:
+        - name: udpecho
+          containerPort: 5000
+          protocol: UDP
+        resources:
+          limits:
+            cpu: 50m
+            memory: 32Mi
+          requests:
+            cpu: 10m
+            memory: 16Mi
+---
+# The probe endpoint each provider advertises as <nodeIP>:30100. The nodePort
+# here MUST match the agent's --probe-udp-port (set in role_patch.yaml) — the
+# provider advertises <nodeIP>:<that port> and the consumer probes it.
+apiVersion: v1
+kind: Service
+metadata:
+  name: agent-probe
+  namespace: federation-autoscaler-system
+  labels:
+    app.kubernetes.io/name: federation-autoscaler
+    app.kubernetes.io/component: udpecho
+spec:
+  type: NodePort
+  selector:
+    app.kubernetes.io/name: federation-autoscaler
+    app.kubernetes.io/component: udpecho
+  ports:
+  - name: udpecho
+    port: 5000
+    targetPort: udpecho
+    nodePort: 30100
+    protocol: UDP

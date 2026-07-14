@@ -30,6 +30,7 @@ package heartbeat
 import (
 	"context"
 	"errors"
+	"math"
 	"time"
 
 	"github.com/go-logr/logr"
@@ -38,10 +39,18 @@ import (
 
 	autoscalingv1alpha1 "github.com/netgroup-polito/federation-autoscaler/api/autoscaling/v1alpha1"
 	agentclient "github.com/netgroup-polito/federation-autoscaler/internal/agent/client"
+	"github.com/netgroup-polito/federation-autoscaler/internal/agent/consumer/latency"
 	"github.com/netgroup-polito/federation-autoscaler/internal/agent/geo"
 	"github.com/netgroup-polito/federation-autoscaler/internal/agent/nodeip"
 	brokerapi "github.com/netgroup-polito/federation-autoscaler/internal/broker/api"
 )
+
+// Prober exposes the consumer's most recent measured-latency result so the
+// heartbeat can report it to the Broker for the dashboard. Satisfied by
+// *latency.Prober; an interface so tests can inject a fake.
+type Prober interface {
+	LastMeasurements() latency.Result
+}
 
 // DefaultInterval is the cadence at which the heartbeater POSTs to
 // /api/v1/heartbeat when Options.Interval is unset (docs/design.md
@@ -84,6 +93,10 @@ type Options struct {
 	// strategy. Empty ⇒ the consumer pushes no location.
 	MockGeoURL string
 
+	// Prober, when set, supplies the consumer's most recent measured RTTs so the
+	// heartbeat reports them to the Broker for the dashboard. Nil ⇒ no report.
+	Prober Prober
+
 	// Interval overrides DefaultInterval. Mainly useful in tests.
 	Interval time.Duration
 
@@ -112,6 +125,7 @@ type Heartbeater struct {
 	advertisedIP  string
 	mockGeoURL    string
 	geoClient     *geo.Client
+	prober        Prober
 	interval      time.Duration
 	log           logr.Logger
 	onResult      func(success bool)
@@ -145,6 +159,7 @@ func New(opts Options) (*Heartbeater, error) {
 		nodeName:      opts.NodeName,
 		advertisedIP:  opts.AdvertisedIP,
 		mockGeoURL:    opts.MockGeoURL,
+		prober:        opts.Prober,
 		geoClient:     geo.NewClient(),
 		interval:      interval,
 		log:           logger,
@@ -176,6 +191,22 @@ func (h *Heartbeater) Run(ctx context.Context) {
 	}
 }
 
+// finiteRTTs drops unreachable (+Inf/NaN) entries so the wire map carries only
+// real measurements — Go's JSON encoder rejects non-finite floats. Returns nil
+// when nothing finite remains (the field is then omitted).
+func finiteRTTs(in map[string]float64) map[string]float64 {
+	out := make(map[string]float64, len(in))
+	for k, v := range in {
+		if !math.IsInf(v, 0) && !math.IsNaN(v) {
+			out[k] = v
+		}
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	return out
+}
+
 // beatOnce executes one POST /api/v1/heartbeat cycle. Errors log at
 // V(1) and notify onResult(false); a successful call notifies
 // onResult(true).
@@ -195,6 +226,13 @@ func (h *Heartbeater) beatOnce(ctx context.Context) {
 		req.Region = loc.Region
 		req.City = loc.City
 		req.Latitude, req.Longitude = &lat, &lon
+	}
+	// Report the last measured-latency result (informational, for the dashboard).
+	if h.prober != nil {
+		if m := h.prober.LastMeasurements(); len(m.RTTs) > 0 {
+			req.MeasuredLatencies = finiteRTTs(m.RTTs)
+			req.ChosenProvider = m.Chosen
+		}
 	}
 	if _, err := h.client.PostHeartbeat(ctx, req); err != nil {
 		if ctx.Err() == nil {

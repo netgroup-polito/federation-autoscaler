@@ -31,6 +31,7 @@ package advertise
 import (
 	"context"
 	"errors"
+	"net"
 	"os"
 	"strconv"
 	"strings"
@@ -117,6 +118,11 @@ type Options struct {
 	// Empty ⇒ the provider advertises no location (neither eco nor latency).
 	MockGeoURL string
 
+	// ProbeUDPPort is the always-on UDP NodePort the udpecho responder is exposed
+	// on (the agent-probe Service). The provider advertises <nodeIP>:ProbeUDPPort
+	// as its measured-latency probe endpoint. 0 ⇒ advertise no probe endpoint.
+	ProbeUDPPort int
+
 	// Interval overrides DefaultInterval. Mainly useful in tests.
 	Interval time.Duration
 
@@ -147,6 +153,7 @@ type Publisher struct {
 	advertisedIP  string
 	mockEcoURL    string
 	mockGeoURL    string
+	probeUDPPort  int
 	ecoClient     *eco.Client
 	geoClient     *geo.Client
 	interval      time.Duration
@@ -187,6 +194,7 @@ func New(opts Options) (*Publisher, error) {
 		advertisedIP:  opts.AdvertisedIP,
 		mockEcoURL:    opts.MockEcoURL,
 		mockGeoURL:    opts.MockGeoURL,
+		probeUDPPort:  opts.ProbeUDPPort,
 		ecoClient:     eco.NewClient(),
 		geoClient:     geo.NewClient(),
 		interval:      interval,
@@ -232,7 +240,22 @@ func (p *Publisher) publishOnce(ctx context.Context) {
 	}
 
 	scaled, pctCustom, fixedCustom := p.applyCapacityScaling(snap.Allocatable)
-	topology, carbon, carbonForecast := p.loadPlacementInputs(ctx)
+
+	// Resolve the node IP once and reuse it for BOTH geo discovery and the
+	// measured-latency probe endpoint (<nodeIP>:probeUDPPort). The probe endpoint
+	// is advertised whenever the IP is known even if geolocation fails — the
+	// consumer only needs a reachable UDP address to measure RTT.
+	ip, err := nodeip.Resolve(ctx, p.localClient, p.nodeName, p.advertisedIP)
+	if err != nil {
+		p.log.V(1).Info("node IP discovery failed; advertising no location/probe", "err", err.Error())
+		ip = ""
+	}
+	topology, carbon, carbonForecast := p.loadPlacementInputs(ctx, ip)
+
+	probeEndpoint := ""
+	if ip != "" && p.probeUDPPort > 0 {
+		probeEndpoint = net.JoinHostPort(ip, strconv.Itoa(p.probeUDPPort))
+	}
 
 	req := &brokerapi.AdvertisementRequest{
 		ClusterID:            p.clusterID,
@@ -245,6 +268,7 @@ func (p *Publisher) publishOnce(ctx context.Context) {
 		CapacityScalePercent: pctCustom,
 		CapacityFixed:        fixedCustom,
 		Renewable:            p.loadRenewable(),
+		ProbeEndpoint:        probeEndpoint,
 	}
 
 	resp, err := p.client.PostAdvertisement(ctx, req)
@@ -371,17 +395,17 @@ func (p *Publisher) loadUnitPrices() corev1.ResourceList {
 	return prices
 }
 
-// loadPlacementInputs auto-discovers the provider's location (its node IP →
-// mock-geo) and, when discovered, looks up the region's carbon intensity
+// loadPlacementInputs geolocates the provider's already-resolved node ip
+// (mock-geo) and, when discovered, looks up the region's carbon intensity
 // (mock-eco). It returns the Topology to advertise (nil when no location) and the
 // carbon signal (nil when unavailable or no mock-eco URL). Every lookup is
 // best-effort: a failure logs at V(1) and the corresponding field is omitted,
 // never failing the publish cycle. The discovered region CODE (e.g. "QC") is the
-// carbon join key, so an unset region means no carbon either.
-func (p *Publisher) loadPlacementInputs(ctx context.Context) (*brokerv1alpha1.Topology, *float64, []float64) {
-	ip, err := nodeip.Resolve(ctx, p.localClient, p.nodeName, p.advertisedIP)
-	if err != nil {
-		p.log.V(1).Info("node IP discovery failed; advertising no location", "err", err.Error())
+// carbon join key, so an unset region means no carbon either. The caller resolves
+// ip (nodeip.Resolve) once and reuses it for the probe endpoint too; an empty ip
+// means location discovery is off.
+func (p *Publisher) loadPlacementInputs(ctx context.Context, ip string) (*brokerv1alpha1.Topology, *float64, []float64) {
+	if ip == "" {
 		return nil, nil, nil
 	}
 	loc, ok, err := p.geoClient.Lookup(ctx, p.mockGeoURL, ip)

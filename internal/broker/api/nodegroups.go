@@ -102,6 +102,7 @@ func (s *Server) handleNodeGroupsList(w http.ResponseWriter, r *http.Request) {
 		})
 		return
 	}
+	latencyShortlist := false
 	switch entry.Placement.Type {
 	case autoscalingv1alpha1.PlacementStrategyPrice:
 		applyPricePreference(views, costs, priced, inflight)
@@ -109,11 +110,13 @@ func (s *Server) handleNodeGroupsList(w http.ResponseWriter, r *http.Request) {
 		applyEcoPreference(views, carbons, hasCarbon, inflight)
 	case autoscalingv1alpha1.PlacementStrategyLatency:
 		// Latency is a consumer↔provider PAIR metric: distance depends on the
-		// calling consumer's own location (from its heartbeat). If the consumer
-		// has not advertised a location, distances carry no usable value and the
-		// masking is a no-op (all providers stay exposed).
+		// calling consumer's own location (from its heartbeat). Unlike the other
+		// policies the Broker does NOT narrow to one here — it exposes the top-N
+		// nearest-with-capacity as a shortlist and lets the Consumer Agent UDP-probe
+		// them and grow the lowest-RTT one. If the consumer has no location, this is
+		// a no-op (all providers stay exposed) and no shortlist is signalled.
 		distances, hasDist := consumerProviderDistances(entry, avail)
-		applyLatencyPreference(views, distances, hasDist, inflight)
+		latencyShortlist = applyLatencyTopN(views, distances, hasDist, inflight, latencyShortlistSize)
 	default:
 		// Empty (no ConsumerPolicy) or "Standard" → the composite default.
 		applyStandardPreference(views, avail, inflight)
@@ -127,10 +130,11 @@ func (s *Server) handleNodeGroupsList(w http.ResponseWriter, r *http.Request) {
 	})
 
 	writeJSON(w, http.StatusOK, NodeGroupListResponse{
-		NodeGroups:      views,
-		Generation:      0, // step 5b will surface a real revision once the reconciler watches CRs.
-		ServedAt:        metav1.Now(),
-		CacheAgeSeconds: 0,
+		NodeGroups:       views,
+		LatencyShortlist: latencyShortlist,
+		Generation:       0, // step 5b will surface a real revision once the reconciler watches CRs.
+		ServedAt:         metav1.Now(),
+		CacheAgeSeconds:  0,
 	})
 }
 
@@ -211,8 +215,91 @@ func applyEcoPreference(views []NodeGroupView, carbons []float64, hasCarbon []bo
 // advertisement as views[i]; hasDist[i] is false when either endpoint lacks a
 // location, so a consumer with no location (every hasDist false) yields no
 // masking at all (all providers stay exposed) — see consumerProviderDistances.
-func applyLatencyPreference(views []NodeGroupView, distances []float64, hasDist []bool, inflight map[string]bool) {
-	applyMetricPreference(views, distances, hasDist, inflight)
+// latencyShortlistSize caps how many nearest providers the Broker exposes for the
+// measured-latency strategy. The Consumer Agent UDP-probes these and grows the
+// lowest-RTT one; a small shortlist keeps probing cheap while still letting the
+// real network path override raw distance.
+const latencyShortlistSize = 3
+
+// applyLatencyTopN masks the node-group view for a latency-preferring consumer.
+// Unlike the single-winner applyMetricPreference (Price/Eco/Standard), within each
+// chunk type it keeps the n NEAREST providers that still have head-room growable
+// and masks the rest — a shortlist the Consumer Agent then UDP-probes to grow the
+// lowest-RTT one. It returns true when it actually produced a distance shortlist
+// (the consumer advertised a location, so at least one hasDist is true); the
+// handler sets NodeGroupListResponse.LatencyShortlist from this so the consumer
+// knows to probe. A consumer with no location (every hasDist false) yields no
+// masking and returns false — identical to the previous no-op behaviour.
+//
+// The in-flight gate mirrors applyMetricPreference: if the nearest provider is
+// full but a reservation of ours is still mid-peering and nothing has been kept
+// yet, the whole type is held (nothing growable) rather than spilling early.
+func applyLatencyTopN(views []NodeGroupView, distances []float64, hasDist []bool, inflight map[string]bool, n int) bool {
+	anyDist := false
+	for _, h := range hasDist {
+		if h {
+			anyDist = true
+			break
+		}
+	}
+	if !anyDist {
+		return false // consumer has no location → expose all (no shortlist to probe)
+	}
+
+	byType := map[brokerv1alpha1.ChunkType][]int{}
+	for i := range views {
+		byType[views[i].Type] = append(byType[views[i].Type], i)
+	}
+	for _, idxs := range byType {
+		// Distance-bearing providers in this type, nearest first (name breaks ties).
+		order := make([]int, 0, len(idxs))
+		for _, i := range idxs {
+			if hasDist[i] {
+				order = append(order, i)
+			}
+		}
+		sort.SliceStable(order, func(a, b int) bool {
+			ia, ib := order[a], order[b]
+			if distances[ia] != distances[ib] {
+				return distances[ia] < distances[ib]
+			}
+			return views[ia].ProviderClusterID < views[ib].ProviderClusterID
+		})
+
+		keep := map[int]bool{}
+		blocked := false
+		for _, i := range order {
+			if len(keep) >= n {
+				break
+			}
+			if views[i].MaxSize-views[i].CurrentReserved > 0 {
+				keep[i] = true // nearest-so-far with head-room → shortlist it
+				continue
+			}
+			if len(keep) == 0 && inflight[views[i].ProviderClusterID] {
+				blocked = true // nearest is full but still peering → hold CA, don't spill
+				break
+			}
+			// full AND settled → skip, try the next-nearest
+		}
+
+		switch {
+		case blocked:
+			for _, j := range idxs {
+				views[j].MaxSize = views[j].CurrentReserved
+			}
+		case len(keep) > 0:
+			for _, j := range idxs {
+				if !keep[j] {
+					views[j].MaxSize = views[j].CurrentReserved
+				}
+			}
+		default:
+			// No distance-bearing provider has capacity → leave the type as-is
+			// (metric-less providers stay reachable as a last resort).
+		}
+	}
+	return true
 }
 
 // standardCapacityWeight / standardRenewableWeight are the composite Standard
@@ -421,6 +508,7 @@ func (s *Server) nodeGroupViewFromAdvertisement(
 		ChunkResources:        s.perChunkResources(cadv),
 		Cost:                  costQuantity(cost, priced),
 		Topology:              cadv.Spec.Topology,
+		ProbeEndpoint:         cadv.Spec.ProbeEndpoint,
 		// LiqoLabels / LiqoTaints aren't on ClusterAdvertisementSpec yet
 		// (designed but pending). When they land, populate Labels /
 		// Taints straight from the spec; for now, leave them nil.

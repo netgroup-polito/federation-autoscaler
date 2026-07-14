@@ -23,17 +23,15 @@ import (
 	"testing"
 
 	"github.com/go-logr/logr"
-	corev1 "k8s.io/api/core/v1"
-	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/apimachinery/pkg/runtime"
-	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 
 	"github.com/netgroup-polito/federation-autoscaler/internal/agent/eco"
 	"github.com/netgroup-polito/federation-autoscaler/internal/agent/geo"
 )
 
 // geoStub serves one canned /json/{ip} location and records the path it was hit
-// with, so a test can assert which IP was geolocated.
+// with, so a test can assert which IP was geolocated. Node-IP resolution itself
+// is covered by the nodeip package; loadPlacementInputs takes an already-resolved
+// ip, so these tests exercise the ip → geo → Topology mapping directly.
 func geoStub(t *testing.T, body string, gotPath *string) *httptest.Server {
 	t.Helper()
 	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -45,44 +43,25 @@ func geoStub(t *testing.T, body string, gotPath *string) *httptest.Server {
 	}))
 }
 
-func nodeClient(t *testing.T, node *corev1.Node) *fake.ClientBuilder {
-	t.Helper()
-	scheme := runtime.NewScheme()
-	_ = corev1.AddToScheme(scheme)
-	b := fake.NewClientBuilder().WithScheme(scheme)
-	if node != nil {
-		b = b.WithRuntimeObjects(node)
-	}
-	return b
-}
-
-func TestLoadPlacementInputsDiscoversFromNodeIP(t *testing.T) {
+func TestLoadPlacementInputsGeolocatesIP(t *testing.T) {
 	var path string
 	srv := geoStub(t, `{"status":"success","region":"HE","city":"Frankfurt","lat":50.1109,"lon":8.6821,"countryCode":"DE"}`, &path)
 	defer srv.Close()
 
-	node := &corev1.Node{
-		ObjectMeta: metav1.ObjectMeta{Name: "n1"},
-		Status: corev1.NodeStatus{Addresses: []corev1.NodeAddress{
-			{Type: corev1.NodeInternalIP, Address: "172.23.7.10"},
-		}},
-	}
 	p := &Publisher{
-		localClient: nodeClient(t, node).Build(),
-		geoClient:   geo.NewClient(),
-		ecoClient:   eco.NewClient(),
-		nodeName:    "n1",
-		mockGeoURL:  srv.URL,
+		geoClient:  geo.NewClient(),
+		ecoClient:  eco.NewClient(),
+		mockGeoURL: srv.URL,
 		// mockEcoURL left empty ⇒ no carbon lookup.
 		log: logr.Discard(),
 	}
 
-	topo, carbon, forecast := p.loadPlacementInputs(context.Background())
+	topo, carbon, forecast := p.loadPlacementInputs(context.Background(), "172.23.7.10")
 	if topo == nil {
-		t.Fatal("expected a topology from discovery")
+		t.Fatal("expected a topology from the resolved IP")
 	}
 	if path != "/json/172.23.7.10" {
-		t.Errorf("geolocated %q, want the node's InternalIP", path)
+		t.Errorf("geolocated %q, want /json/172.23.7.10", path)
 	}
 	if topo.Region != "HE" || topo.City != "Frankfurt" {
 		t.Errorf("topology = %+v, want HE/Frankfurt", topo)
@@ -95,41 +74,34 @@ func TestLoadPlacementInputsDiscoversFromNodeIP(t *testing.T) {
 	}
 }
 
-func TestLoadPlacementInputsAdvertisedIPOverride(t *testing.T) {
-	var path string
-	srv := geoStub(t, `{"status":"success","region":"NSW","city":"Sydney","lat":-33.8688,"lon":151.2093}`, &path)
-	defer srv.Close()
-
-	// With an override IP the node is never read (nil client is fine).
+func TestLoadPlacementInputsEmptyIP(t *testing.T) {
+	// No resolved IP ⇒ no location advertised (mock-geo never hit).
 	p := &Publisher{
-		localClient:  nil,
-		geoClient:    geo.NewClient(),
-		ecoClient:    eco.NewClient(),
-		advertisedIP: "172.23.4.130",
-		mockGeoURL:   srv.URL,
-		log:          logr.Discard(),
+		geoClient:  geo.NewClient(),
+		ecoClient:  eco.NewClient(),
+		mockGeoURL: "http://mock-geo.invalid",
+		log:        logr.Discard(),
 	}
-
-	topo, _, _ := p.loadPlacementInputs(context.Background())
-	if topo == nil || topo.City != "Sydney" {
-		t.Fatalf("topology = %+v, want Sydney", topo)
-	}
-	if path != "/json/172.23.4.130" {
-		t.Errorf("geolocated %q, want the override IP", path)
+	topo, carbon, forecast := p.loadPlacementInputs(context.Background(), "")
+	if topo != nil || carbon != nil || forecast != nil {
+		t.Errorf("expected no placement inputs, got %+v / %v / %v", topo, carbon, forecast)
 	}
 }
 
-func TestLoadPlacementInputsNoDiscovery(t *testing.T) {
-	// No node name, no override ⇒ no location advertised (mock-geo never hit).
+func TestLoadPlacementInputsDefaultRowNoLocation(t *testing.T) {
+	// A default-row / no-location geo response ⇒ nil topology (the geo client
+	// returns ok=false), so the provider advertises no location.
+	srv := geoStub(t, `{"status":"success","query":"8.8.8.8"}`, nil)
+	defer srv.Close()
+
 	p := &Publisher{
-		localClient: nodeClient(t, nil).Build(),
-		geoClient:   geo.NewClient(),
-		ecoClient:   eco.NewClient(),
-		mockGeoURL:  "http://mock-geo.invalid",
-		log:         logr.Discard(),
+		geoClient:  geo.NewClient(),
+		ecoClient:  eco.NewClient(),
+		mockGeoURL: srv.URL,
+		log:        logr.Discard(),
 	}
-	topo, carbon, forecast := p.loadPlacementInputs(context.Background())
-	if topo != nil || carbon != nil || forecast != nil {
-		t.Errorf("expected no placement inputs, got %+v / %v / %v", topo, carbon, forecast)
+	topo, _, _ := p.loadPlacementInputs(context.Background(), "8.8.8.8")
+	if topo != nil {
+		t.Errorf("expected nil topology for a no-location response, got %+v", topo)
 	}
 }

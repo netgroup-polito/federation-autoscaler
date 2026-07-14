@@ -106,6 +106,11 @@ type Options struct {
 	MockEcoURL string
 	MockGeoURL string
 
+	// ProbeUDPPort is the always-on UDP NodePort the udpecho responder is exposed
+	// on; the provider advertises <nodeIP>:ProbeUDPPort as its measured-latency
+	// probe endpoint. 0 ⇒ advertise no probe endpoint (see advertise.Options).
+	ProbeUDPPort int
+
 	// ConsoleAddr is the address the (plain-HTTP, unauthenticated) config
 	// console binds to, e.g. ":9095". Empty disables the console. This is the
 	// provider role's only HTTP server; it lets an operator set this provider's
@@ -176,6 +181,7 @@ func Run(ctx context.Context, opts Options) error {
 		AdvertisedIP:  opts.AdvertisedIP,
 		MockEcoURL:    opts.MockEcoURL,
 		MockGeoURL:    opts.MockGeoURL,
+		ProbeUDPPort:  opts.ProbeUDPPort,
 		Logger:        logger.WithName("advertise"),
 		// The probe's poll-staleness gate is a "broker reachability"
 		// signal in practice, so a successful advertisement also

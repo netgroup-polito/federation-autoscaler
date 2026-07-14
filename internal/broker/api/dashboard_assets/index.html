@@ -182,7 +182,7 @@
   <section>
     <h2>Registered Consumers <span class="count" id="consCount">0</span></h2>
     <div class="table-wrap"><table>
-      <thead><tr><th>Consumer cluster</th><th>Liqo cluster ID</th><th>Policy</th><th>Location</th><th>Last heartbeat</th></tr></thead>
+      <thead><tr><th>Consumer cluster</th><th>Liqo cluster ID</th><th>Policy</th><th>Location</th><th>Measured RTT</th><th>Last heartbeat</th></tr></thead>
       <tbody id="consBody"></tbody>
     </table></div>
   </section>
@@ -331,6 +331,14 @@
       return city || region || "—";
     }
 
+    // fmtMeasured renders the consumer's measured-latency result: the provider it
+    // grew after UDP-probing, plus that provider's median RTT; "—" when unset.
+    function fmtMeasured(c) {
+      if (!c.chosenProvider) return "—";
+      const rtt = (c.measuredRtt != null) ? " (" + c.measuredRtt.toFixed(1) + " ms)" : "";
+      return "→ " + clusterShort(c.chosenProvider) + rtt;
+    }
+
     function fmtCapacityCustom(pct, fixed) {
       const parts = [];
       for (const k of Object.keys(pct || {}).sort()) {
@@ -439,6 +447,9 @@
         tr.appendChild(pill(c.placement || "Standard", "blue"));
         // Consumer's auto-discovered location (latency origin); "—" when unset.
         tr.appendChild(td(fmtLocation(c.city, c.region), { mono: true }));
+        // Measured-latency result (latency strategy): the provider the consumer
+        // grew after UDP-probing + its median RTT; "—" for non-latency consumers.
+        tr.appendChild(td(fmtMeasured(c), { mono: true }));
         tr.appendChild(td(fmtTime(c.lastSeen)));
         tbody.appendChild(tr);
       }
