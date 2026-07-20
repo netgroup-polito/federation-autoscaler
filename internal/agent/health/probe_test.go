@@ -128,6 +128,108 @@ func TestProbe_LiveAlwaysOK(t *testing.T) {
 }
 
 // -----------------------------------------------------------------------------
+// RecordHandlerActive: a working poll loop must not read as a stalled one
+// -----------------------------------------------------------------------------
+
+// Instruction handlers run synchronously on the poll goroutine, so a slow one
+// starves RecordPoll for its whole duration. That must not close the readiness
+// gate — losing the agent's Service endpoint mid-scale-up costs CA its entire
+// provider surface.
+func TestProbe_ReadyWhileHandlerInFlight(t *testing.T) {
+	clk := newFakeClock(time.Unix(1_700_000_000, 0), time.Second)
+	p := New(Options{Now: clk.Now, PollStaleAfter: 5 * time.Second})
+
+	p.RecordPoll(true)
+	p.RecordHandlerActive(true) // e.g. liqoctl peer starts
+
+	clk.Advance(31 * time.Second) // far past the staleness threshold
+	if err := p.Ready(); err != nil {
+		t.Fatalf("a poll loop blocked RUNNING a handler must stay ready; got %v", err)
+	}
+}
+
+// The gap between two instructions of one batch: inFlight returns to 0 while
+// the last real poll is still stale. Finishing a handler is itself proof the
+// loop is alive, so the gate must not flap red in that window.
+func TestProbe_HandlerFinishRefreshesFreshness(t *testing.T) {
+	clk := newFakeClock(time.Unix(1_700_000_000, 0), time.Second)
+	p := New(Options{Now: clk.Now, PollStaleAfter: 5 * time.Second})
+
+	p.RecordPoll(true)
+	p.RecordHandlerActive(true)
+	clk.Advance(31 * time.Second)
+	p.RecordHandlerActive(false) // returned; the next instruction hasn't started
+
+	if err := p.Ready(); err != nil {
+		t.Fatalf("finishing a handler must refresh freshness; got %v", err)
+	}
+
+	// ...and the refreshed stamp still decays normally once the loop is idle.
+	clk.Advance(31 * time.Second)
+	if err := p.Ready(); err == nil {
+		t.Fatal("an idle loop must still go stale after the threshold")
+	}
+}
+
+// Live() always returns nil, so the bounded suppression is the only signal that
+// would ever surface a handler wedged beyond any plausible runtime.
+func TestProbe_WedgedHandlerEventuallyNotReady(t *testing.T) {
+	clk := newFakeClock(time.Unix(1_700_000_000, 0), time.Second)
+	p := New(Options{
+		Now:                clk.Now,
+		PollStaleAfter:     5 * time.Second,
+		MaxHandlerInFlight: time.Minute,
+	})
+
+	p.RecordPoll(true)
+	p.RecordHandlerActive(true)
+
+	clk.Advance(59 * time.Second)
+	if err := p.Ready(); err != nil {
+		t.Fatalf("still inside MaxHandlerInFlight, must be ready; got %v", err)
+	}
+
+	clk.Advance(2 * time.Second) // 61s > the 1m bound
+	err := p.Ready()
+	if err == nil {
+		t.Fatal("a handler wedged past MaxHandlerInFlight must close the gate")
+	}
+	if !strings.Contains(err.Error(), "handler has been running") {
+		t.Errorf("error should name the wedged handler; got %q", err.Error())
+	}
+}
+
+func TestProbe_HandlerCounterBalances(t *testing.T) {
+	clk := newFakeClock(time.Unix(1_700_000_000, 0), time.Second)
+	p := New(Options{Now: clk.Now, PollStaleAfter: 5 * time.Second})
+
+	p.RecordPoll(true)
+	p.RecordHandlerActive(true)
+	p.RecordHandlerActive(true) // overlapping/nested
+	p.RecordHandlerActive(false)
+
+	clk.Advance(31 * time.Second)
+	if err := p.Ready(); err != nil {
+		t.Fatalf("one handler is still in flight, must stay ready; got %v", err)
+	}
+
+	p.RecordHandlerActive(false) // now idle
+	clk.Advance(31 * time.Second)
+	if err := p.Ready(); err == nil {
+		t.Fatal("expected stale once every handler finished and the loop went idle")
+	}
+
+	// An unbalanced extra finish must not drive the counter negative — that
+	// would permanently disable the suppression for the process lifetime.
+	p.RecordHandlerActive(false)
+	p.RecordHandlerActive(true)
+	clk.Advance(31 * time.Second)
+	if err := p.Ready(); err != nil {
+		t.Fatalf("counter must clamp at zero so suppression still works; got %v", err)
+	}
+}
+
+// -----------------------------------------------------------------------------
 // HTTP behaviour
 // -----------------------------------------------------------------------------
 

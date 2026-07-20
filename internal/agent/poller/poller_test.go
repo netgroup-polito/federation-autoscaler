@@ -19,6 +19,7 @@ package poller
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -463,6 +464,85 @@ func TestPoller_OnPollResultCallback(t *testing.T) {
 	}
 	if !sawSuccess {
 		t.Errorf("expected at least one later callback to report success, got %v", seen)
+	}
+}
+
+// TestPoller_OnHandlerActiveCallback pins the bracket the agent's readiness
+// gate depends on: every dispatch must emit exactly [true, false], on EVERY
+// exit path. An unbalanced pair would either wedge the probe's in-flight
+// counter (suppressing staleness forever) or drop the suppression that keeps
+// /readyz green through a 40-90 s liqoctl peer.
+func TestPoller_OnHandlerActiveCallback(t *testing.T) {
+	peerKind := string(autoscalingv1alpha1.ReservationInstructionPeer)
+
+	cases := []struct {
+		name    string
+		kind    string
+		handler HandlerFunc // nil ⇒ register nothing (unknown-kind path)
+	}{
+		{
+			name: "handler succeeds",
+			kind: peerKind,
+			handler: func(context.Context, *brokerapi.InstructionView) (*brokerapi.InstructionResultRequest, error) {
+				return nil, nil
+			},
+		},
+		{
+			name: "handler returns an error",
+			kind: peerKind,
+			handler: func(context.Context, *brokerapi.InstructionView) (*brokerapi.InstructionResultRequest, error) {
+				return nil, errors.New("boom: liqoctl peer crashed")
+			},
+		},
+		{
+			name: "handler panics",
+			kind: peerKind,
+			handler: func(context.Context, *brokerapi.InstructionView) (*brokerapi.InstructionResultRequest, error) {
+				panic("handler exploded")
+			},
+		},
+		{
+			name:    "no handler registered for kind",
+			kind:    "NoSuchKind",
+			handler: nil, // exercises dispatch's early return
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			fb := newFakeBroker(t)
+			fb.queue([]brokerapi.InstructionView{
+				{ID: "i-1", Kind: tc.kind, ReservationID: "res-1"},
+			})
+
+			r := NewRegistry()
+			if tc.handler != nil {
+				r.Register(tc.kind, tc.handler)
+			}
+
+			var seen []bool
+			var mu sync.Mutex
+			p, err := New(Options{
+				Client:   fb.buildClient(t),
+				Registry: r,
+				Interval: time.Hour, // only the initial tick fires
+				OnHandlerActive: func(active bool) {
+					mu.Lock()
+					defer mu.Unlock()
+					seen = append(seen, active)
+				},
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			runOnce(t, p)
+
+			mu.Lock()
+			defer mu.Unlock()
+			if len(seen) != 2 || !seen[0] || seen[1] {
+				t.Fatalf("dispatch must bracket the handler with exactly [true false]; got %v", seen)
+			}
+		})
 	}
 }
 

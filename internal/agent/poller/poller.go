@@ -57,6 +57,14 @@ type Options struct {
 	// (step 7d) wires its readiness gate through this hook so /readyz
 	// flips red when the broker becomes unreachable.
 	OnPollResult func(success bool)
+
+	// OnHandlerActive, if non-nil, is invoked with true immediately before
+	// an instruction handler runs and false once it returns. Handlers are
+	// dispatched synchronously on the poll goroutine, so a slow one
+	// (liqoctl peer takes 40-90 s) blocks the next poll entirely; the
+	// agent's health probe wires this to RecordHandlerActive so a working
+	// loop is not mistaken for a stalled one.
+	OnHandlerActive func(active bool)
 }
 
 // Poller drives the 5 s GET /api/v1/instructions loop. A single Run
@@ -64,11 +72,12 @@ type Options struct {
 // Recreate invariant of agent Deployments, Poller is NOT safe for
 // concurrent invocation.
 type Poller struct {
-	client       *client.Client
-	registry     *Registry
-	interval     time.Duration
-	log          logr.Logger
-	onPollResult func(success bool)
+	client          *client.Client
+	registry        *Registry
+	interval        time.Duration
+	log             logr.Logger
+	onPollResult    func(success bool)
+	onHandlerActive func(active bool)
 }
 
 // New validates opts and returns a Poller ready to Run. It performs no
@@ -98,11 +107,12 @@ func New(opts Options) (*Poller, error) {
 	}
 
 	return &Poller{
-		client:       opts.Client,
-		registry:     opts.Registry,
-		interval:     interval,
-		log:          logger,
-		onPollResult: opts.OnPollResult,
+		client:          opts.Client,
+		registry:        opts.Registry,
+		interval:        interval,
+		log:             logger,
+		onPollResult:    opts.OnPollResult,
+		onHandlerActive: opts.OnHandlerActive,
 	}, nil
 }
 
@@ -159,6 +169,12 @@ func (p *Poller) tick(ctx context.Context) {
 // returns nil-result-and-nil-error gets a default Succeeded posted on
 // its behalf.
 func (p *Poller) dispatch(ctx context.Context, in *brokerapi.InstructionView) {
+	// Bracket the WHOLE dispatch, not just the handler call, so every return
+	// path stays balanced — including the "no handler registered" early exit
+	// and the postResult round-trip below.
+	p.notifyHandlerActive(true)
+	defer p.notifyHandlerActive(false)
+
 	logger := p.log.WithValues("instructionId", in.ID, "kind", in.Kind, "reservationId", in.ReservationID)
 
 	handler, ok := p.registry.Lookup(in.Kind)
@@ -211,6 +227,17 @@ func (p *Poller) notifyPollResult(success bool) {
 	}
 	defer func() { _ = recover() }() // never let a misbehaving callback kill the loop
 	p.onPollResult(success)
+}
+
+// notifyHandlerActive reports that an instruction handler started (true) or
+// returned (false). Mirrors notifyPollResult: nil callback is a no-op, and a
+// panicking callback can never kill the poll loop.
+func (p *Poller) notifyHandlerActive(active bool) {
+	if p.onHandlerActive == nil {
+		return
+	}
+	defer func() { _ = recover() }() // never let a misbehaving callback kill the loop
+	p.onHandlerActive(active)
 }
 
 // safeHandle wraps a handler call in a panic recovery so a single bad

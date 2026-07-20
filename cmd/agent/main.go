@@ -42,9 +42,11 @@ import (
 	autoscalingv1alpha1 "github.com/netgroup-polito/federation-autoscaler/api/autoscaling/v1alpha1"
 	agentclient "github.com/netgroup-polito/federation-autoscaler/internal/agent/client"
 	"github.com/netgroup-polito/federation-autoscaler/internal/agent/consumer"
+	"github.com/netgroup-polito/federation-autoscaler/internal/agent/consumer/heartbeat"
 	"github.com/netgroup-polito/federation-autoscaler/internal/agent/health"
 	"github.com/netgroup-polito/federation-autoscaler/internal/agent/poller"
 	"github.com/netgroup-polito/federation-autoscaler/internal/agent/provider"
+	"github.com/netgroup-polito/federation-autoscaler/internal/agent/provider/advertise"
 )
 
 const (
@@ -216,9 +218,20 @@ func main() {
 		os.Exit(1)
 	}
 
-	// Liveness/readiness probe. The poller's OnPollResult callback flips
-	// /readyz green on the first successful tick and red after staleness.
-	probe := health.New(health.Options{})
+	// Liveness/readiness probe. /readyz flips green on the first successful
+	// broker contact and red once contact goes stale.
+	//
+	// The gate is refreshed by ANY successful contact, and the SLOWEST one
+	// differs by role: a consumer heartbeats every 15 s, a provider
+	// advertises every 30 s. The 30 s default therefore leaves a provider
+	// zero margin — a single slow advertisement trips it — so size the
+	// window off the role's own cadence. The consumer keeps the historical
+	// 30 s (2 beats); the provider gets 3 publishes of slack.
+	staleAfter := 2 * heartbeat.DefaultInterval // consumer: 30 s, unchanged
+	if role == roleProvider {
+		staleAfter = 3 * advertise.DefaultInterval // provider: 90 s
+	}
+	probe := health.New(health.Options{PollStaleAfter: staleAfter})
 
 	// Handler registry. Step 8 (provider role) and step 9 (consumer role)
 	// populate it with the role-specific ProviderInstruction /
@@ -231,11 +244,15 @@ func main() {
 	registry := poller.NewRegistry()
 
 	pollerInstance, err := poller.New(poller.Options{
-		Client:       brokerClient,
-		Registry:     registry,
-		Interval:     pollInterval,
-		Logger:       ctrl.Log.WithName("poller"),
-		OnPollResult: probe.RecordPoll,
+		Client:   brokerClient,
+		Registry: registry,
+		Interval: pollInterval,
+		Logger:   ctrl.Log.WithName("poller"),
+		// Handlers run synchronously on the poll goroutine, so a slow one
+		// (liqoctl peer: 40-90 s, 10 m ceiling) starves OnPollResult.
+		// OnHandlerActive tells the probe the loop is working, not stalled.
+		OnPollResult:    probe.RecordPoll,
+		OnHandlerActive: probe.RecordHandlerActive,
 	})
 	if err != nil {
 		setupLog.Error(err, "unable to build poller")
