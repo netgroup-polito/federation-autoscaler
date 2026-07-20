@@ -24,6 +24,7 @@ import (
 	"testing"
 
 	corev1 "k8s.io/api/core/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/types"
@@ -141,10 +142,14 @@ func TestUnpeer_KubeconfigKept_WhenNotLastChunk(t *testing.T) {
 	fc.SetName("liqo-provider-1")
 	_ = c.Create(ctx, fc)
 
+	var ranLiqoctl bool
 	h := NewUnpeerHandler(UnpeerConfig{
 		LocalClient: c,
 		Namespace:   testNamespace,
-		Run:         stubRun("", nil),
+		Run: func(_ context.Context, _ string, _ ...string) ([]byte, []byte, error) {
+			ranLiqoctl = true
+			return nil, nil, nil
+		},
 	})
 
 	res, err := h(ctx, unpeerInstruction(false))
@@ -154,15 +159,25 @@ func TestUnpeer_KubeconfigKept_WhenNotLastChunk(t *testing.T) {
 	if res.Payload.TunnelDropped {
 		t.Errorf("want TunnelDropped=false when !LastChunk")
 	}
-	// Secret retained.
-	if err := c.Get(ctx, types.NamespacedName{
-		Name: "kubeconfig-" + testResID, Namespace: testNamespace,
-	}, &corev1.Secret{}); err != nil {
-		t.Errorf("kubeconfig Secret should persist when !LastChunk; got %v", err)
+	// `liqoctl unpeer` must NOT run: it tears down the networking, auth and
+	// gateway that EVERY chunk borrowed from this provider rides on, so running
+	// it here would strand the sibling reservations still holding the provider.
+	if ranLiqoctl {
+		t.Error("liqoctl unpeer must not run while siblings still hold this provider")
 	}
-	// ForeignCluster retained when !LastChunk.
+	// ForeignCluster retained when !LastChunk — it is shared per provider.
 	if exists, _ := objectExists(ctx, c, foreignClusterGVK, "", "liqo-provider-1"); !exists {
 		t.Error("ForeignCluster should persist when !LastChunk")
+	}
+	// The kubeconfig Secret, by contrast, is named per RESERVATION
+	// (kubeconfig-<reservationID>) and is useless once this handler has run, so
+	// it is dropped unconditionally. Keeping it would leak one Secret for every
+	// non-last reservation, since the normal Unpeer -> Released path never emits
+	// a Cleanup instruction to collect it.
+	if err := c.Get(ctx, types.NamespacedName{
+		Name: "kubeconfig-" + testResID, Namespace: testNamespace,
+	}, &corev1.Secret{}); !apierrors.IsNotFound(err) {
+		t.Errorf("per-reservation kubeconfig Secret should be deleted even when !LastChunk; got %v", err)
 	}
 }
 

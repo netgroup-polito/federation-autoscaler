@@ -60,30 +60,51 @@ func (s *Server) NodeGroupIncreaseSize(ctx context.Context, req *protos.NodeGrou
 		return nil, err
 	}
 
-	reservationID := "res-" + uuid.NewString()
-	resReq := &brokerapi.ReservationRequest{
-		ProviderClusterID: group.ProviderClusterID,
-		NodeGroupID:       group.ID,
-		ChunkCount:        req.Delta,
-		ChunkType:         group.Type,
-	}
-	if _, err := s.agent.PostReservation(ctx, reservationID, resReq); err != nil {
-		return nil, mapAgentError(err, "PostReservation")
+	// One Reservation per chunk, NOT one Reservation of Delta chunks.
+	//
+	// A Reservation materialises exactly one Liqo ResourceSlice, hence exactly
+	// one borrowed node (the slice name becomes the node name). A single
+	// Reservation carrying N chunks would therefore be billed N and reported to
+	// CA as N via NodeGroupTargetSize while delivering one node — CA would keep
+	// seeing its Pods pending against capacity that does not exist. Fanning out
+	// keeps the ledger honest by construction: N reservations, N slices, N
+	// nodes, and releasing one node releases exactly one chunk.
+	ids := make([]string, 0, req.Delta)
+	for range req.Delta {
+		reservationID := "res-" + uuid.NewString()
+		resReq := &brokerapi.ReservationRequest{
+			ProviderClusterID: group.ProviderClusterID,
+			NodeGroupID:       group.ID,
+			ChunkCount:        1,
+			ChunkType:         group.Type,
+		}
+		if _, err := s.agent.PostReservation(ctx, reservationID, resReq); err != nil {
+			// Partial success is safe to surface as an error: the reservations
+			// already placed stand on their own (each is independently
+			// releasable), and CA retries with a delta recomputed from the
+			// TargetSize those reservations now report.
+			if len(ids) > 0 {
+				s.log.V(1).Info("scale-up partially applied before failing",
+					"nodeGroupId", req.Id, "requested", req.Delta, "placed", len(ids))
+			}
+			return nil, mapAgentError(err, "PostReservation")
+		}
+		ids = append(ids, reservationID)
 	}
 	s.log.V(1).Info("scaled up node group",
 		"nodeGroupId", req.Id,
 		"delta", req.Delta,
-		"reservationId", reservationID)
+		"reservationIds", ids)
 	return &protos.NodeGroupIncreaseSizeResponse{}, nil
 }
 
 // NodeGroupDeleteNodes maps each requested virtual-node name to its
 // underlying Reservation (via GET /local/virtual-nodes) and issues
-// one DELETE per distinct reservation. In v1 the broker always
-// releases every chunk of a Reservation at once (see
-// docs/design.md §5.3 partial-release deferral); deleting any node
-// that belongs to a multi-chunk Reservation therefore tears the whole
-// Reservation down. Callers should batch deletions accordingly.
+// one DELETE per distinct reservation. Since a Reservation is exactly one
+// chunk and therefore exactly one node, deleting a node releases precisely
+// that node's chunk — there is no partial-release case to defer, and sibling
+// nodes borrowed from the same provider are unaffected (the broker ref-counts
+// the shared peering; see handleUnpeering's LastChunk).
 //
 // The RPC is best-effort across nodes: if half the deletions fail
 // after the other half succeeded, the first error wins. CA retries

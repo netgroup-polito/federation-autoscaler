@@ -19,6 +19,7 @@ package autoscaling
 import (
 	"context"
 	"errors"
+	"strings"
 	"testing"
 	"time"
 
@@ -179,7 +180,7 @@ func TestResourceRequestReserveAndRelease(t *testing.T) {
 	rr := &autoscalingv1alpha1.ResourceRequest{
 		ObjectMeta: metav1.ObjectMeta{Name: "batch-job", Namespace: "default", UID: "abc123"},
 		Spec: autoscalingv1alpha1.ResourceRequestSpec{
-			Resources: corev1.ResourceList{corev1.ResourceCPU: resource.MustParse("3"), corev1.ResourceMemory: resource.MustParse("6Gi")},
+			Resources: corev1.ResourceList{corev1.ResourceCPU: resource.MustParse("2"), corev1.ResourceMemory: resource.MustParse("4Gi")},
 		},
 	}
 	agent := &fakeReservationClient{nodeGroups: []brokerapi.NodeGroupView{{
@@ -215,8 +216,8 @@ func TestResourceRequestReserveAndRelease(t *testing.T) {
 	if agent.lastPostID != wantResID {
 		t.Errorf("reservation id = %q, want mr-abc123 (deterministic from UID)", agent.lastPostID)
 	}
-	if agent.lastPostReq.ProviderClusterID != "provider-1" || agent.lastPostReq.ChunkCount != 2 {
-		t.Errorf("post req = %+v, want provider-1 / 2 chunks", agent.lastPostReq)
+	if agent.lastPostReq.ProviderClusterID != "provider-1" || agent.lastPostReq.ChunkCount != 1 {
+		t.Errorf("post req = %+v, want provider-1 / 1 chunk", agent.lastPostReq)
 	}
 	if err := cl.Get(ctx, key, rr); err != nil {
 		t.Fatalf("get after reserve: %v", err)
@@ -271,6 +272,44 @@ func TestResourceRequestPendingWhenNoCapacity(t *testing.T) {
 	}
 	if rr.Status.Phase != autoscalingv1alpha1.ResourceRequestPending {
 		t.Errorf("phase = %q, want Pending", rr.Status.Phase)
+	}
+}
+
+// A Reservation is exactly one chunk (one ResourceSlice, one node). A manual
+// request that needs more must say so plainly instead of silently reserving —
+// and being billed for — capacity it will not receive.
+func TestResourceRequestPendingWhenMultiChunk(t *testing.T) {
+	ctx := context.Background()
+	rr := &autoscalingv1alpha1.ResourceRequest{
+		ObjectMeta: metav1.ObjectMeta{Name: "too-big", Namespace: "default", UID: "big1"},
+		Spec: autoscalingv1alpha1.ResourceRequestSpec{
+			// 6 CPU against 2-CPU chunks ⇒ 3 chunks.
+			Resources: corev1.ResourceList{corev1.ResourceCPU: resource.MustParse("6")},
+		},
+	}
+	agent := &fakeReservationClient{nodeGroups: []brokerapi.NodeGroupView{{
+		ID: "ng-p1", ProviderClusterID: "provider-1", Type: brokerv1alpha1.ChunkTypeStandard,
+		MaxSize: 10, CurrentReserved: 0,
+		ChunkResources: corev1.ResourceList{corev1.ResourceCPU: resource.MustParse("2")},
+	}}}
+	r, cl := newReconcileFixture(t, agent, rr)
+	key := types.NamespacedName{Namespace: "default", Name: "too-big"}
+
+	_, _ = r.Reconcile(ctx, ctrl.Request{NamespacedName: key}) // finalize
+	if _, err := r.Reconcile(ctx, ctrl.Request{NamespacedName: key}); err != nil {
+		t.Fatalf("reconcile: %v", err)
+	}
+	if agent.postCalls != 0 {
+		t.Errorf("must not reserve a multi-chunk request; postCalls = %d", agent.postCalls)
+	}
+	if err := cl.Get(ctx, key, rr); err != nil {
+		t.Fatal(err)
+	}
+	if rr.Status.Phase != autoscalingv1alpha1.ResourceRequestPending {
+		t.Errorf("phase = %q, want Pending", rr.Status.Phase)
+	}
+	if !strings.Contains(rr.Status.Message, "3 chunks") {
+		t.Errorf("message should say how many chunks were needed; got %q", rr.Status.Message)
 	}
 }
 
@@ -411,7 +450,7 @@ func reservedRR(ago time.Duration) *autoscalingv1alpha1.ResourceRequest {
 			Finalizers: []string{resourceRequestFinalizer},
 		},
 		Spec: autoscalingv1alpha1.ResourceRequestSpec{
-			Resources: corev1.ResourceList{corev1.ResourceCPU: resource.MustParse("3"), corev1.ResourceMemory: resource.MustParse("6Gi")},
+			Resources: corev1.ResourceList{corev1.ResourceCPU: resource.MustParse("2"), corev1.ResourceMemory: resource.MustParse("4Gi")},
 		},
 		Status: autoscalingv1alpha1.ResourceRequestStatus{
 			Phase:              autoscalingv1alpha1.ResourceRequestActive,

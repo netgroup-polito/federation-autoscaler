@@ -123,18 +123,27 @@ func NewUnpeerHandler(cfg UnpeerConfig) poller.HandlerFunc {
 		}
 
 		// 2. Delete ResourceSlice (idempotent on missing).
-		if err := deleteResourceSlice(ctx, cfg.LocalClient, cfg.Namespace, in.ReservationID); err != nil {
+		if err := deleteResourceSlice(ctx, cfg.LocalClient, in.ReservationID, in.ProviderLiqoClusterID); err != nil {
 			return nil, err
 		}
 
-		// 3. Stage the kubeconfig and run `liqoctl unpeer` — only if
-		//    the kubeconfig Secret still exists; without it liqoctl
-		//    cannot reach the provider and the cross-cluster tunnel
-		//    has presumably already dropped.
+		// 3. Stage the kubeconfig and run `liqoctl unpeer` — only when this
+		//    is the LAST reservation to this provider, and only if the
+		//    kubeconfig Secret still exists (without it liqoctl cannot reach
+		//    the provider and the cross-cluster tunnel has presumably already
+		//    dropped).
+		//
+		//    The LastChunk gate matters as much as steps 1-2 being per-
+		//    reservation: `liqoctl unpeer` tears down the networking,
+		//    authentication and gateway that EVERY chunk borrowed from this
+		//    provider rides on. Running it while a sibling reservation is
+		//    still live would strand that sibling's node.
 		kubeconfig, err := loadKubeconfigFromSecret(ctx, cfg.LocalClient, cfg.Namespace, in.ReservationID)
 		switch {
 		case err != nil:
 			return nil, err
+		case !in.LastChunk:
+			logger.V(1).Info("other reservations still hold this provider; keeping the peering up")
 		case kubeconfig == "":
 			logger.V(1).Info("no kubeconfig secret present; skipping liqoctl unpeer")
 		default:
@@ -164,26 +173,28 @@ func NewUnpeerHandler(cfg UnpeerConfig) poller.HandlerFunc {
 			}
 		}
 
-		// 4. On LastChunk=true, finish tearing down the peering: wipe the
-		//    kubeconfig Secret and delete the ForeignCluster shell that
-		//    `liqoctl unpeer` leaves behind (otherwise `liqoctl info` keeps
-		//    listing the peering with Authentication Healthy indefinitely —
-		//    unpeer disables the modules + deletes the Identity/Tenant but
-		//    never the ForeignCluster object itself). Gated on LastChunk
-		//    because the ForeignCluster is shared by all chunks to the same
-		//    provider; v1 always releases the whole reservation at once
-		//    (LastChunk hardcoded true), so this is the point at which the
-		//    provider is fully released.
-		if in.LastChunk {
-			if err := deleteKubeconfigSecret(ctx, cfg.LocalClient, cfg.Namespace, in.ReservationID); err != nil {
+		// 4. Final cleanup, split by what is per-reservation and what is
+		//    shared with sibling reservations to the same provider.
+		//
+		//    The kubeconfig Secret is named kubeconfig-<reservationID>, so it
+		//    is ours alone: drop it unconditionally. Gating it on LastChunk
+		//    would leak one Secret per non-last reservation. It is only needed
+		//    up to step 3 above.
+		if err := deleteKubeconfigSecret(ctx, cfg.LocalClient, cfg.Namespace, in.ReservationID); err != nil {
+			return nil, err
+		}
+		//    The ForeignCluster is genuinely shared, so only the last
+		//    reservation may remove it. `liqoctl unpeer` disables the modules
+		//    and deletes the Identity/Tenant but leaves this shell behind,
+		//    which is what keeps `liqoctl info` reporting an active peering
+		//    with Authentication Healthy. The broker ref-counts the gate for
+		//    us (handleUnpeering: LastChunk = no other active reservation to
+		//    this provider).
+		if in.LastChunk && in.ProviderLiqoClusterID != "" {
+			if err := deleteForeignCluster(ctx, cfg.LocalClient, in.ProviderLiqoClusterID); err != nil {
 				return nil, err
 			}
-			if in.ProviderLiqoClusterID != "" {
-				if err := deleteForeignCluster(ctx, cfg.LocalClient, in.ProviderLiqoClusterID); err != nil {
-					return nil, err
-				}
-				logger.V(1).Info("deleted ForeignCluster shell", "foreignCluster", in.ProviderLiqoClusterID)
-			}
+			logger.V(1).Info("deleted ForeignCluster shell", "foreignCluster", in.ProviderLiqoClusterID)
 		}
 
 		return &brokerapi.InstructionResultRequest{

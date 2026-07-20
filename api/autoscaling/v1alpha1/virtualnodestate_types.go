@@ -51,11 +51,22 @@ type VirtualNodeStateSpec struct {
 	ProviderClusterID string `json:"providerClusterId"`
 
 	// ProviderLiqoClusterID is the Liqo cluster identifier of the provider.
-	// Used by the gRPC server to resolve the Liqo virtual node back to its
-	// owning VirtualNodeState via the liqo.io/remote-cluster-id label.
 	// +required
 	// +kubebuilder:validation:MinLength=1
 	ProviderLiqoClusterID string `json:"providerLiqoClusterId"`
+
+	// ResourceSliceName is the name of the Liqo ResourceSlice this chunk was
+	// claimed with, and therefore the name of the v1.Node Liqo materialises for
+	// it: Liqo propagates ResourceSlice.Name -> VirtualNode.Name -> Node.Name
+	// unchanged. It is how the VirtualNodeState controller finds its node.
+	//
+	// This MUST NOT be inferred from ProviderLiqoClusterID. That used to work
+	// only because `liqoctl peer` names the slice it creates after the provider
+	// cluster, which caps a provider at one borrowed node and makes two chunks
+	// from one provider collide on a single node. The consumer agent now owns
+	// the slice and names it per reservation.
+	// +optional
+	ResourceSliceName string `json:"resourceSliceName,omitempty"`
 
 	// NodeGroupID is the gRPC-server-generated node-group identifier this
 	// chunk belongs to (one node group per provider × chunk type).
@@ -65,6 +76,9 @@ type VirtualNodeStateSpec struct {
 
 	// ChunkIndex is the position of this chunk inside its reservation
 	// (0-based). Together with ReservationID it uniquely identifies a chunk.
+	// A Reservation now carries exactly one chunk (N chunks = N Reservations,
+	// so each maps 1:1 to one ResourceSlice and one node), which makes this
+	// always 0; the field stays for wire/CRD compatibility.
 	// +required
 	// +kubebuilder:validation:Minimum=0
 	ChunkIndex int32 `json:"chunkIndex"`
@@ -111,8 +125,10 @@ type VirtualNodeStateStatus struct {
 	// +optional
 	ProviderID string `json:"providerID,omitempty"`
 
-	// ResourceSliceName is the name of the Liqo ResourceSlice the Consumer
-	// Agent created for this chunk. Empty until the Peer instruction succeeds.
+	// ResourceSliceName mirrors Spec.ResourceSliceName once the controller has
+	// observed the chunk, so the printcolumn and the Reconcile report can read
+	// it off status like every other observed field. Empty until the Peer
+	// instruction has succeeded and written the spec.
 	// +optional
 	ResourceSliceName string `json:"resourceSliceName,omitempty"`
 

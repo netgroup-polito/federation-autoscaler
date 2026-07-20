@@ -85,7 +85,7 @@ func NewCleanupHandler(cfg CleanupConfig) poller.HandlerFunc {
 		if err := deleteVirtualNodeState(ctx, cfg.LocalClient, cfg.Namespace, in.ReservationID); err != nil {
 			return nil, err
 		}
-		if err := deleteResourceSlice(ctx, cfg.LocalClient, cfg.Namespace, in.ReservationID); err != nil {
+		if err := deleteResourceSlice(ctx, cfg.LocalClient, in.ReservationID, in.ProviderLiqoClusterID); err != nil {
 			return nil, err
 		}
 		if err := deleteKubeconfigSecret(ctx, cfg.LocalClient, cfg.Namespace, in.ReservationID); err != nil {

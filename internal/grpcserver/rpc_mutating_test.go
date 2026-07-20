@@ -50,18 +50,28 @@ func TestNodeGroupIncreaseSize_PostsReservationWithProviderAndType(t *testing.T)
 	if err != nil {
 		t.Fatalf("err: %v", err)
 	}
+	// One Reservation PER CHUNK. A Reservation materialises exactly one
+	// ResourceSlice and therefore one node, so a single 3-chunk reservation
+	// would be billed 3 and reported to CA as 3 while delivering one node.
 	posted := fb.snapshotPosted()
-	if len(posted) != 1 {
-		t.Fatalf("want 1 PostReservation, got %d", len(posted))
+	if len(posted) != 3 {
+		t.Fatalf("want 3 PostReservations (one per chunk), got %d", len(posted))
 	}
-	if posted[0].req.ProviderClusterID != "p1" ||
-		posted[0].req.ChunkCount != 3 ||
-		posted[0].req.ChunkType != brokerv1alpha1.ChunkTypeStandard ||
-		posted[0].req.NodeGroupID != "p1/standard" {
-		t.Errorf("reservation request mismatch: %+v", posted[0].req)
-	}
-	if !strings.HasPrefix(posted[0].id, "res-") {
-		t.Errorf("X-Reservation-Id should be 'res-<uuid>'; got %q", posted[0].id)
+	seen := map[string]bool{}
+	for i, p := range posted {
+		if p.req.ProviderClusterID != "p1" ||
+			p.req.ChunkCount != 1 ||
+			p.req.ChunkType != brokerv1alpha1.ChunkTypeStandard ||
+			p.req.NodeGroupID != "p1/standard" {
+			t.Errorf("reservation %d request mismatch: %+v", i, p.req)
+		}
+		if !strings.HasPrefix(p.id, "res-") {
+			t.Errorf("X-Reservation-Id should be 'res-<uuid>'; got %q", p.id)
+		}
+		if seen[p.id] {
+			t.Errorf("reservation ids must be distinct; %q reused", p.id)
+		}
+		seen[p.id] = true
 	}
 }
 

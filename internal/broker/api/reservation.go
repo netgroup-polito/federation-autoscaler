@@ -193,6 +193,13 @@ func validateReservationRequest(req *ReservationRequest) error {
 		return errors.New("providerClusterId is required")
 	case req.ChunkCount < 1:
 		return errors.New("chunkCount must be >= 1")
+	case req.ChunkCount > 1:
+		// A Reservation materialises exactly one Liqo ResourceSlice, hence one
+		// borrowed node. Accepting N here would deduct N chunks and report N to
+		// Cluster Autoscaler while delivering one node. Callers ask for N nodes
+		// by making N reservations (see NodeGroupIncreaseSize).
+		return fmt.Errorf("chunkCount must be 1 (one reservation = one chunk = one node); "+
+			"request %d separate reservations instead, got %d", req.ChunkCount, req.ChunkCount)
 	case req.ChunkType == "":
 		return errors.New("chunkType is required")
 	}

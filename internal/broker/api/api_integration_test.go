@@ -167,19 +167,39 @@ var _ = Describe("Broker REST API", func() {
 			Expect(resp.Status).To(Equal(http.StatusPreconditionFailed), resp.Describe())
 		})
 
-		It("creates a Reservation and decrements available chunks", func() {
+		It("rejects a multi-chunk reservation", func() {
+			// A Reservation materialises exactly one Liqo ResourceSlice, hence
+			// one node. Accepting N would deduct N and report N to Cluster
+			// Autoscaler while delivering one node, so callers must ask for N
+			// nodes by making N reservations.
 			authClusterID = consumerCluster
 			resp := doJSON(http.MethodPost, "/api/v1/reservations", ReservationRequest{
 				ProviderClusterID: providerCluster,
 				ChunkCount:        2,
 				ChunkType:         brokerv1alpha1.ChunkTypeStandard,
 			})
-			Expect(resp.Status).To(Equal(http.StatusCreated), resp.Describe())
+			Expect(resp.Status).To(Equal(http.StatusBadRequest), resp.Describe())
+		})
 
+		It("creates a Reservation per chunk and decrements available chunks", func() {
+			authClusterID = consumerCluster
+
+			// Two chunks = two Reservations, mirroring what
+			// NodeGroupIncreaseSize does for a delta of 2.
 			var body ReservationResponse
-			Expect(resp.DecodeInto(&body)).To(Succeed())
-			Expect(body.ReservationID).NotTo(BeEmpty())
-			Expect(body.Status).To(Equal(brokerv1alpha1.ReservationPhasePending))
+			for i := range 2 {
+				resp := doJSON(http.MethodPost, "/api/v1/reservations", ReservationRequest{
+					ProviderClusterID: providerCluster,
+					ChunkCount:        1,
+					ChunkType:         brokerv1alpha1.ChunkTypeStandard,
+				})
+				Expect(resp.Status).To(Equal(http.StatusCreated), resp.Describe())
+				if i == 0 {
+					Expect(resp.DecodeInto(&body)).To(Succeed())
+					Expect(body.ReservationID).NotTo(BeEmpty())
+					Expect(body.Status).To(Equal(brokerv1alpha1.ReservationPhasePending))
+				}
+			}
 
 			// Reserved-chunk accounting flowed through to the advertisement.
 			cadv := &brokerv1alpha1.ClusterAdvertisement{}
@@ -299,6 +319,69 @@ var _ = Describe("Broker REST API", func() {
 					types.NamespacedName{Name: resID, Namespace: testNamespace}, got)
 				return got.Status.Phase
 			}).Should(Equal(brokerv1alpha1.ReservationPhaseFailed))
+		})
+	})
+
+	Describe("POST /api/v1/instructions/{id}/result — Unpeer with LastChunk=false", func() {
+		It("still releases the Reservation, because LastChunk only gates the SHARED peering", func() {
+			// Caught on a real cluster: releasing one of three nodes borrowed
+			// from one provider left its Reservation stuck in Unpeering
+			// forever, because the release was gated on LastChunk — which is
+			// false while sibling reservations still hold the provider. The
+			// chunk was then never credited back, so the broker's ledger
+			// claimed capacity that had already been handed back.
+			const resID = "res-unpeer-not-last"
+
+			By("a Reservation parked in Unpeering")
+			resv := &brokerv1alpha1.Reservation{
+				ObjectMeta: metav1.ObjectMeta{Name: resID, Namespace: testNamespace},
+				Spec: brokerv1alpha1.ReservationSpec{
+					ConsumerClusterID:     consumerCluster,
+					ConsumerLiqoClusterID: "liqo-" + consumerCluster,
+					ProviderClusterID:     providerCluster,
+					ProviderLiqoClusterID: "liqo-" + providerCluster,
+					ChunkCount:            1,
+					ChunkType:             brokerv1alpha1.ChunkTypeStandard,
+					Resources: corev1.ResourceList{
+						corev1.ResourceCPU:    resource.MustParse("2"),
+						corev1.ResourceMemory: resource.MustParse("4Gi"),
+					},
+				},
+			}
+			Expect(k8sClient.Create(suiteCtx, resv)).To(Succeed())
+			resv.Status.Phase = brokerv1alpha1.ReservationPhaseUnpeering
+			Expect(k8sClient.Status().Update(suiteCtx, resv)).To(Succeed())
+
+			By("an Unpeer instruction that is NOT the last one holding the provider")
+			ri := &autoscalingv1alpha1.ReservationInstruction{
+				ObjectMeta: metav1.ObjectMeta{Name: "unpeer-" + resID, Namespace: testNamespace},
+				Spec: autoscalingv1alpha1.ReservationInstructionSpec{
+					ReservationID:     resID,
+					Kind:              autoscalingv1alpha1.ReservationInstructionUnpeer,
+					TargetClusterID:   consumerCluster,
+					ProviderClusterID: providerCluster,
+					ChunkCount:        1,
+					LastChunk:         false,
+				},
+			}
+			Expect(k8sClient.Create(suiteCtx, ri)).To(Succeed())
+
+			By("the consumer reports success")
+			authClusterID = consumerCluster
+			resp := doJSON(http.MethodPost, "/api/v1/instructions/unpeer-"+resID+"/result",
+				InstructionResultRequest{
+					Status:  ResultStatusSucceeded,
+					Payload: &ResultPayload{Kind: PayloadKindUnpeer, ReleasedChunks: 1},
+				})
+			Expect(resp.Status).To(Equal(http.StatusOK), resp.Describe())
+
+			By("the Reservation is Released, not stranded in Unpeering")
+			Eventually(func() brokerv1alpha1.ReservationPhase {
+				got := &brokerv1alpha1.Reservation{}
+				_ = k8sClient.Get(suiteCtx,
+					types.NamespacedName{Name: resID, Namespace: testNamespace}, got)
+				return got.Status.Phase
+			}).Should(Equal(brokerv1alpha1.ReservationPhaseReleased))
 		})
 	})
 

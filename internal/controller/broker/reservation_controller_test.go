@@ -78,8 +78,10 @@ var _ = Describe("Reservation Controller", func() {
 					ConsumerLiqoClusterID: "liqo-consumer-test",
 					ProviderClusterID:     providerName,
 					ProviderLiqoClusterID: "liqo-provider-test",
-					ChunkCount:            2,
-					ChunkType:             brokerv1alpha1.ChunkTypeStandard,
+					// One Reservation is exactly one chunk (one ResourceSlice,
+					// one node); N chunks are N Reservations.
+					ChunkCount: 1,
+					ChunkType:  brokerv1alpha1.ChunkTypeStandard,
 					Resources: corev1.ResourceList{
 						corev1.ResourceCPU:    resource.MustParse("2"),
 						corev1.ResourceMemory: resource.MustParse("4Gi"),
@@ -196,6 +198,50 @@ var _ = Describe("Reservation Controller", func() {
 		updated := &brokerv1alpha1.Reservation{}
 		Expect(k8sClient.Get(ctx, key, updated)).To(Succeed())
 		Expect(updated.Status.Phase).To(Equal(brokerv1alpha1.ReservationPhaseUnpeering))
+	})
+
+	It("Unpeering with an active sibling → LastChunk=false so the shared peering survives", func() {
+		// One Reservation is one chunk, so N borrowed nodes from a provider are
+		// N Reservations sharing ONE peering. LastChunk gates everything the
+		// consumer tears down that is shared — `liqoctl unpeer`, the
+		// ForeignCluster — so releasing one node while a sibling is live must
+		// NOT report true, or the sibling's node is stranded.
+		By("creating a sibling Reservation for the same (consumer, provider)")
+		sibling := newReservation("test-resource-sibling")
+		Expect(k8sClient.Create(ctx, sibling)).To(Succeed())
+		sibling.Status.Phase = brokerv1alpha1.ReservationPhasePeered
+		Expect(k8sClient.Status().Update(ctx, sibling)).To(Succeed())
+
+		setPhase(ctx, key, brokerv1alpha1.ReservationPhaseUnpeering)
+		reconcileOnce()
+
+		got := &autoscalingv1alpha1.ReservationInstruction{}
+		Expect(k8sClient.Get(ctx, types.NamespacedName{Name: "unpeer-" + resName, Namespace: "default"}, got)).To(Succeed())
+		Expect(got.Spec.LastChunk).To(BeFalse(),
+			"a live sibling still holds this provider; the peering must stay up")
+	})
+
+	It("Unpeering while every sibling is ALSO unpeering → LastChunk=true so the peering is not orphaned", func() {
+		// A full scale-down releases every reservation to a provider at once,
+		// so each one sees its siblings sitting in Unpeering. Those siblings
+		// are on their way out and no longer hold the peering — counting them
+		// would give EVERY instruction LastChunk=false, nothing would delete
+		// the shared ForeignCluster, and `liqoctl info` would keep reporting a
+		// phantom peering forever. Two releases both deciding "I'm last" is
+		// harmless: deleting the ForeignCluster is idempotent.
+		By("creating a sibling that is itself already unpeering")
+		sibling := newReservation("test-resource-sibling")
+		Expect(k8sClient.Create(ctx, sibling)).To(Succeed())
+		sibling.Status.Phase = brokerv1alpha1.ReservationPhaseUnpeering
+		Expect(k8sClient.Status().Update(ctx, sibling)).To(Succeed())
+
+		setPhase(ctx, key, brokerv1alpha1.ReservationPhaseUnpeering)
+		reconcileOnce()
+
+		got := &autoscalingv1alpha1.ReservationInstruction{}
+		Expect(k8sClient.Get(ctx, types.NamespacedName{Name: "unpeer-" + resName, Namespace: "default"}, got)).To(Succeed())
+		Expect(got.Spec.LastChunk).To(BeTrue(),
+			"siblings that are themselves unpeering must not keep the peering alive")
 	})
 
 	It("fails a Pending Reservation when its ClusterAdvertisement is missing (no Cleanup needed)", func() {
@@ -463,11 +509,11 @@ var _ = Describe("Reservation Controller", func() {
 			return apierrors.IsNotFound(k8sClient.Get(ctx, key, &brokerv1alpha1.Reservation{}))
 		}).Should(BeTrue())
 
-		By("ReservedChunks was credited back by resv.Spec.ChunkCount (5 - 2 = 3)")
+		By("ReservedChunks was credited back by resv.Spec.ChunkCount (5 - 1 = 4)")
 		updatedCA := &brokerv1alpha1.ClusterAdvertisement{}
 		Expect(k8sClient.Get(ctx, cadvKey, updatedCA)).To(Succeed())
-		Expect(updatedCA.Status.ReservedChunks).To(Equal(int32(3)))
-		Expect(updatedCA.Status.AvailableChunks).To(Equal(int32(2)))
+		Expect(updatedCA.Status.ReservedChunks).To(Equal(int32(4)))
+		Expect(updatedCA.Status.AvailableChunks).To(Equal(int32(1)))
 
 		By("a consumer Cleanup instruction was emitted (un-owned) so the agent tears down its Liqo state")
 		cleanup := &autoscalingv1alpha1.ReservationInstruction{}
@@ -538,7 +584,7 @@ var _ = Describe("Reservation Controller", func() {
 
 	It("two concurrent Pendings to the same provider issue exactly one GenerateKubeconfig", func() {
 		By("creating a sibling Reservation for the same (consumer, provider)")
-		sibling := newReservation("test-resource-2", "consumer-test", providerName)
+		sibling := newReservation("test-resource-2")
 		Expect(k8sClient.Create(ctx, sibling)).To(Succeed())
 		setPhase(ctx, types.NamespacedName{Name: "test-resource-2", Namespace: "default"},
 			brokerv1alpha1.ReservationPhasePending)
@@ -571,7 +617,7 @@ var _ = Describe("Reservation Controller", func() {
 			ObjectMeta: metav1.ObjectMeta{Name: secretName, Namespace: "default"},
 			Data:       map[string][]byte{"kubeconfig": []byte("dummy")},
 		})).To(Succeed())
-		sibling := newReservation("test-resource-2", "consumer-test", providerName)
+		sibling := newReservation("test-resource-2")
 		Expect(k8sClient.Create(ctx, sibling)).To(Succeed())
 		setPhase(ctx, types.NamespacedName{Name: "test-resource-2", Namespace: "default"},
 			brokerv1alpha1.ReservationPhasePeered)
@@ -660,17 +706,17 @@ var _ = Describe("Reservation Controller", func() {
 	})
 })
 
-// newReservation builds a Pending-ready Reservation for a (consumer,
-// provider) pair. Status.Phase is set separately by the caller via
+// newReservation builds a Pending-ready sibling Reservation for the suite's
+// (consumer-test, provider-test) pair. Status.Phase is set separately by the caller via
 // setPhase (status is a subresource).
-func newReservation(name, consumer, provider string) *brokerv1alpha1.Reservation {
+func newReservation(name string) *brokerv1alpha1.Reservation {
 	return &brokerv1alpha1.Reservation{
 		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: "default"},
 		Spec: brokerv1alpha1.ReservationSpec{
-			ConsumerClusterID:     consumer,
-			ConsumerLiqoClusterID: "liqo-" + consumer,
-			ProviderClusterID:     provider,
-			ProviderLiqoClusterID: "liqo-" + provider,
+			ConsumerClusterID:     "consumer-test",
+			ConsumerLiqoClusterID: "liqo-consumer-test",
+			ProviderClusterID:     "provider-test",
+			ProviderLiqoClusterID: "liqo-provider-test",
 			ChunkCount:            1,
 			ChunkType:             brokerv1alpha1.ChunkTypeStandard,
 			Resources: corev1.ResourceList{

@@ -146,6 +146,9 @@ var _ = Describe("Step 9 end-to-end: real consumer.Run against the broker over m
 			return k8sClient.Status().Update(suiteCtx, c)
 		}, suiteTimeout, suiteInterval).Should(Succeed())
 
+		By("creating the provider's Liqo tenant namespace, as liqoctl peer's auth phase would")
+		ensureTenantNamespace(suiteCtx, "liqo-"+providerCluster)
+
 		By("creating the Reservation directly in KubeconfigReady so the reconciler emits Peer next")
 		resv := &brokerv1alpha1.Reservation{
 			ObjectMeta: metav1.ObjectMeta{Name: resName, Namespace: suiteNamespace},

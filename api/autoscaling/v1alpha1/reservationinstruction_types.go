@@ -74,9 +74,18 @@ type ReservationInstructionSpec struct {
 	// +kubebuilder:validation:Minimum=0
 	ChunkCount int32 `json:"chunkCount,omitempty"`
 
-	// LastChunk is true when the instruction releases (or represents) the
-	// last remaining chunk of the reservation. On Unpeer, this tells the
-	// Consumer Agent it must also run `liqoctl unpeer`.
+	// LastChunk is true when this reservation is the LAST one its consumer
+	// holds against this provider — i.e. releasing it also releases the
+	// peering the two clusters share.
+	//
+	// It gates only what is SHARED: on Unpeer the Consumer Agent runs
+	// `liqoctl unpeer` and deletes the ForeignCluster when true, and leaves
+	// both alone when false so sibling reservations keep their nodes. It does
+	// NOT gate the reservation's own completion — a Reservation is exactly one
+	// chunk and is Released as soon as its Unpeer succeeds, whatever this says.
+	//
+	// (Historically this meant "the last chunk of this reservation" and was
+	// hardcoded true, back when one Reservation could claim N chunks.)
 	// +optional
 	LastChunk bool `json:"lastChunk,omitempty"`
 

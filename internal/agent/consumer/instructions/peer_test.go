@@ -19,11 +19,13 @@ package instructions
 import (
 	"context"
 	"errors"
+	"slices"
 	"strings"
 	"testing"
 
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
+	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
@@ -68,6 +70,11 @@ func flagHasValue(args []string, flag, value string) bool {
 	return false
 }
 
+// hasFlag matches a single self-contained argument (e.g. "--foo=false").
+func hasFlag(args []string, flag string) bool {
+	return slices.Contains(args, flag)
+}
+
 func peerInstruction() *brokerapi.InstructionView {
 	return &brokerapi.InstructionView{
 		ID:                    "peer-res-1",
@@ -101,14 +108,16 @@ func TestPeer_HappyPath_PersistsSecretRunsLiqoctlAndCreatesCRs(t *testing.T) {
 			if len(args) < 3 || args[1] != "--remote-kubeconfig" {
 				t.Errorf("expected --remote-kubeconfig flag, got %v", args)
 			}
-			// The chunk size (2 CPU / 4Gi) must be passed to liqoctl so
-			// the borrowed VirtualNode is sized to the chunk, not the
-			// provider's full capacity.
-			if !flagHasValue(args, "--cpu", "2") {
-				t.Errorf("expected --cpu 2 (chunk size), got %v", args)
+			// liqoctl must NOT create its own ResourceSlice: it names the
+			// slice after the PROVIDER, and Liqo turns the slice name into
+			// the node name, so that would cap this provider at one borrowed
+			// node forever. We own the slice instead (named per reservation).
+			if !hasFlag(args, "--create-resource-slice=false") {
+				t.Errorf("expected --create-resource-slice=false, got %v", args)
 			}
-			if !flagHasValue(args, "--memory", "4Gi") {
-				t.Errorf("expected --memory 4Gi (chunk size), got %v", args)
+			// Sizing moved onto our slice, so these are gone.
+			if flagHasValue(args, "--cpu", "2") || flagHasValue(args, "--memory", "4Gi") {
+				t.Errorf("--cpu/--memory should no longer be passed to liqoctl, got %v", args)
 			}
 			return nil, nil, nil
 		},
@@ -143,9 +152,36 @@ func TestPeer_HappyPath_PersistsSecretRunsLiqoctlAndCreatesCRs(t *testing.T) {
 		t.Errorf("kubeconfig bytes mismatch: %q", sec.Data[KubeconfigSecretDataKey])
 	}
 
-	// ResourceSlice created.
-	if exists, _ := objectExists(context.Background(), c, resourceSliceGVK, testNamespace, "rs-"+testResID); !exists {
-		t.Error("ResourceSlice was not created")
+	// ResourceSlice created in the provider's TENANT namespace (not the agent's
+	// own) and carrying the liqo.io labels/annotation. Without all of these the
+	// object is inert: Liqo's VirtualNodeCreatorReconciler skips it and no node
+	// is ever produced — which is exactly the bug this replaced.
+	tenantNS := liqoTenantNamespacePrefix + "liqo-provider-1"
+	slice := &unstructured.Unstructured{}
+	slice.SetGroupVersionKind(resourceSliceGVK)
+	if err := c.Get(context.Background(), types.NamespacedName{
+		Name: "rs-" + testResID, Namespace: tenantNS,
+	}, slice); err != nil {
+		t.Fatalf("ResourceSlice not created in tenant namespace %q: %v", tenantNS, err)
+	}
+	labels := slice.GetLabels()
+	for k, want := range map[string]string{
+		liqoReplicationLabel:     liqoReplicationLabelValue,
+		liqoRemoteIDLabel:        "liqo-provider-1",
+		liqoRemoteClusterIDLabel: "liqo-provider-1",
+	} {
+		if labels[k] != want {
+			t.Errorf("ResourceSlice label %s: want %q, got %q", k, want, labels[k])
+		}
+	}
+	if got := slice.GetAnnotations()[liqoCreateVirtualNodeAnn]; got != "true" {
+		t.Errorf("ResourceSlice annotation %s: want \"true\", got %q", liqoCreateVirtualNodeAnn, got)
+	}
+	// And it is sized to the chunk — an unsized slice grants the provider's
+	// full allocatable, making the node the whole provider.
+	cpu, _, _ := unstructured.NestedString(slice.Object, "spec", "resources", "cpu")
+	if cpu != "2" {
+		t.Errorf("ResourceSlice spec.resources.cpu: want \"2\", got %q", cpu)
 	}
 	// VirtualNodeState CR created with the right spec.
 	vns, err := getVirtualNodeState(context.Background(), c, testNamespace, testResID)

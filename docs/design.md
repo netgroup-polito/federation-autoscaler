@@ -262,7 +262,7 @@ No Ingress, LoadBalancer, NodePort, or public DNS is required.
 | Heartbeat | Every 15 s `POST /api/v1/heartbeat` — single liveness signal to the Broker; also carries the consumer's `ConsumerPolicy` placement type (§5.6) |
 | Advertise placement inputs | On each heartbeat, **auto-discovers its location**: resolves its own node IP (`NODE_NAME` downward API, or the `--advertised-ip` override) and, when `--mock-geo-url` is configured, geolocates it via mock-geo (`GET /json/<ip>`); sends the discovered `region` / `city` / `latitude` / `longitude` — the consumer's input to the **Latency** strategy. No resolvable IP / no mock-geo ⇒ the consumer opts out of Latency. |
 | Forward reservations | Translate `/local/reservations` calls into Broker calls synchronously; maintain a local cache of results for the gRPC server |
-| Execute `Peer` | On `ReservationInstruction{Kind: Peer}` (kubeconfig **inlined** in the polling response): store the kubeconfig as a Secret on the consumer cluster, run `liqoctl peer --gw-server-service-type NodePort` if not already peered with this provider (the `NodePort` flag is required because Liqo defaults to `LoadBalancer`, which sits at `<pending>` forever on Kind / on-prem clusters without an LB provisioner). Then create one per-Reservation `ResourceSlice` CRD per chunk, ensure the per-namespace **singleton** `NamespaceOffloading` named literally `offloading` exists (Liqo's `nsoff.validate.liqo.io` admission webhook hardcodes this name — one offloading CR per consumer namespace, shared by every Reservation that targets it), wait for Liqo to materialize the virtual nodes, then POST result with `virtualNodeNames` |
+| Execute `Peer` | On `ReservationInstruction{Kind: Peer}` (kubeconfig **inlined** in the polling response): store the kubeconfig as a Secret on the consumer cluster, then run `liqoctl peer --gw-server-service-type NodePort --create-resource-slice=false` (the `NodePort` flag is required because Liqo defaults to `LoadBalancer`, which sits at `<pending>` forever on Kind / on-prem clusters without an LB provisioner; `--create-resource-slice=false` because the **agent owns the ResourceSlice** — see below). Then create exactly one `ResourceSlice` named `rs-<reservationID>` in the provider's Liqo tenant namespace, carrying the `liqo.io/replication`, `liqo.io/remoteID` and `liqo.io/remote-cluster-id` labels plus the `liqo.io/create-virtual-node` annotation (without all four Liqo's `VirtualNodeCreatorReconciler` skips it and no node is ever built). `NamespaceOffloading` is **not** created here — it is a per-namespace **singleton** named literally `offloading` (Liqo's `nsoff.validate.liqo.io` webhook hardcodes the name), operator-stamped and shared by every Reservation targeting that namespace. Finally create the `VirtualNodeState` recording the slice name, and POST the result with `resourceSliceNames`. |
 | Execute `Unpeer` | On `ReservationInstruction{Kind: Unpeer}`: delete the specified `ResourceSlice`s; if `lastChunk == true`, run full `liqoctl unpeer`; report result |
 | Execute `Cleanup` | On `ReservationInstruction{Kind: Cleanup}`: tear down per-Reservation consumer-side artefacts (stale ResourceSlices, orphaned peerings); report result. **NamespaceOffloading is intentionally not deleted** — it is the per-namespace singleton shared with sibling Reservations, so a per-Reservation Cleanup must not touch it. Removal happens out-of-band when the namespace itself is decommissioned (v2 chore). |
 | Execute `Reconcile` | On `ReservationInstruction{Kind: Reconcile}`: gather an authoritative local snapshot (active ResourceSlices, VirtualNodeStates, active Liqo peerings) and return it as the `/instructions/{id}/result` payload |
@@ -1172,13 +1172,18 @@ Step 8: CA calls NodeGroupIncreaseSize(id="ng-provider-1-standard", delta=2).
   Step 24: Reservation phase → KubeconfigReady → Peering.
 
 → Consumer Agent (next 5 s poll):
-  Step 25: GET /api/v1/instructions returns ReservationInstruction{Peer, kubeconfig inlined, chunkCount=2…}.
+  Step 25: GET /api/v1/instructions returns ReservationInstruction{Peer, kubeconfig inlined, chunkCount=1…}.
   Step 26: Writes kubeconfig to a Secret on the consumer cluster.
-  Step 27: If not already peered with provider-1 → runs `liqoctl peer`.
-  Step 28: Creates ResourceSlice #1 and #2 (cpu=2, memory=4Gi each).
-  Step 29: Creates NamespaceOffloading CR for the specified namespaces (if missing).
-  Step 30: Waits for Liqo to materialize 2 VirtualNodes.
-  Step 31: POST /api/v1/instructions/{id}/result {status:"Succeeded", payload:{virtualNodeNames, resourceSliceNames}}.
+  Step 27: Runs `liqoctl peer … --create-resource-slice=false` (networking + auth + gateway only).
+  Step 28: Creates ResourceSlice rs-<reservationID> (cpu=2, memory=4Gi) in liqo-tenant-<provider>.
+  Step 29: NamespaceOffloading is operator-stamped, not created here.
+  Step 30: Liqo materializes ONE VirtualNode, named after the slice (rs-<reservationID>).
+  Step 31: POST /api/v1/instructions/{id}/result {status:"Succeeded", payload:{resourceSliceNames}}.
+
+  A 2-chunk scale-up is TWO Reservations, each running the above independently and
+  yielding its own node. One Reservation = one chunk = one ResourceSlice = one node,
+  because Liqo derives the node name from the slice name — so a single Reservation can
+  never produce more than one node, whatever its chunkCount said.
 
 → Broker:
   Step 32: Marks ReservationInstruction Enforced:true; Reservation phase → Peered; stores virtualNodeNames.

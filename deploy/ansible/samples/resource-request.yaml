@@ -19,10 +19,16 @@ metadata:
   name: preprovision
   namespace: default
 spec:
-  # Total capacity to reserve; rounded UP to whole chunks (a chunk is ~2 vCPU / 4 GiB).
+  # Capacity to reserve, rounded UP to whole chunks (a chunk is ~2 vCPU / 4 GiB).
+  #
+  # A manual request must currently fit in ONE chunk: a Reservation maps to one
+  # Liqo ResourceSlice and therefore one borrowed node. Ask for more and the
+  # request stays Pending with a message saying how many chunks it needed —
+  # apply several ResourceRequests to get several nodes. (The autoscaler path
+  # already fans a scale-up of N out into N reservations automatically.)
   resources:
-    cpu: "4"
-    memory: 8Gi
+    cpu: "2"
+    memory: 4Gi
   # Optional (recorded but not yet enforced in v1):
   # duration: "2h"   # lifetime hint; the global --reservation-timeout applies for now
   # priority: 10     # reserved for the standard composite policy (feature 3)

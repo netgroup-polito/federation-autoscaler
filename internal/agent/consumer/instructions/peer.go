@@ -160,27 +160,31 @@ func NewPeerHandler(cfg PeerConfig) poller.HandlerFunc {
 		// the LB entirely; the underlying Pod gets a stable nodePort
 		// that the consumer side reaches via the shared kind docker
 		// network. See liqoctl peer --gw-server-service-type flag.
+		// --create-resource-slice=false: liqoctl establishes networking,
+		// authentication and the gateway, and we own the ResourceSlice.
+		//
+		// Left at its default (true), `liqoctl peer` creates a slice named
+		// after the PROVIDER cluster (pkg/liqoctl/peer/handler.go
+		// ensureOffloading -> Name: string(providerClusterID)). Liqo then
+		// propagates ResourceSlice.Name -> VirtualNode.Name -> Node.Name
+		// unchanged, so that naming caps a provider at exactly ONE borrowed
+		// node no matter how many chunks are reserved: a second reservation
+		// to the same provider re-runs CreateOrUpdate on the same slice and
+		// silently resizes the one node instead of adding another. Owning
+		// the slice lets us name it per reservation (rs-<reservationID>), so
+		// N reservations to one provider yield N distinct nodes.
+		//
+		// Sizing moves with it: the chunk's cpu/memory now goes on our slice
+		// (see ensureResourceSlice) rather than through --cpu/--memory. The
+		// constraint itself still matters — an unconstrained slice grants the
+		// provider's FULL allocatable, so the node becomes the whole provider
+		// instead of one chunk, the scheduler over-packs it, and CA (which
+		// plans against the chunk-sized template) over-provisions.
 		args := []string{
 			"peer",
 			"--remote-kubeconfig", kubeconfigPath,
 			"--gw-server-service-type", "NodePort",
-		}
-		// Size the borrowed VirtualNode to exactly the reserved chunk.
-		// `liqoctl peer` creates (and Liqo accepts) its own ResourceSlice
-		// for the peering; left unconstrained it grants the provider's
-		// FULL allocatable, so the materialised virtual node is the whole
-		// provider instead of one chunk. The scheduler then over-packs
-		// that oversized node (stranding pods that are already bound) and
-		// Cluster Autoscaler — which plans against the chunk-sized node
-		// template — over-provisions (grabs N nodes, needs fewer, releases
-		// the rest). Passing --cpu/--memory from the reservation's chunk
-		// makes the node match what the broker advertised. See
-		// docs/design.md §6 and the liqoctl peer --cpu/--memory flags.
-		if cpu := in.ResourceSliceResources.Cpu(); cpu != nil && !cpu.IsZero() {
-			args = append(args, "--cpu", cpu.String())
-		}
-		if mem := in.ResourceSliceResources.Memory(); mem != nil && !mem.IsZero() {
-			args = append(args, "--memory", mem.String())
+			"--create-resource-slice=false",
 		}
 		logger.V(1).Info("running liqoctl", "path", cfg.LiqoctlPath, "args", args)
 		_, stderr, err := cfg.Run(execCtx, cfg.LiqoctlPath, args...)
@@ -192,9 +196,12 @@ func NewPeerHandler(cfg PeerConfig) poller.HandlerFunc {
 			return nil, fmt.Errorf("liqoctl peer failed: %w — stderr: %s", err, trimmed)
 		}
 
-		// 3. Create the ResourceSlice claiming the reservation's chunks.
+		// 3. Create the ResourceSlice claiming this reservation's chunk. This
+		// is the object that actually produces the borrowed node — it lands in
+		// the provider's Liqo tenant namespace and is named rs-<reservationID>,
+		// which becomes the node's name.
 		sliceName, err := ensureResourceSlice(
-			ctx, cfg.LocalClient, cfg.Namespace, in.ReservationID,
+			ctx, cfg.LocalClient, in.ReservationID,
 			in.ProviderLiqoClusterID, in.ResourceSliceResources)
 		if err != nil {
 			return nil, err
@@ -216,7 +223,7 @@ func NewPeerHandler(cfg PeerConfig) poller.HandlerFunc {
 		// gRPC server consumes via /local/virtual-nodes; the
 		// VirtualNodeStateReconciler then projects the Liqo
 		// VirtualNode's status onto it as Liqo materialises the node.
-		if err := ensureVirtualNodeState(ctx, cfg.LocalClient, cfg.Namespace, in); err != nil {
+		if err := ensureVirtualNodeState(ctx, cfg.LocalClient, cfg.Namespace, sliceName, in); err != nil {
 			return nil, err
 		}
 

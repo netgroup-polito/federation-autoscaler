@@ -50,14 +50,18 @@ func virtualNodeStateName(reservationID string) string {
 // re-issuing the same Peer instruction (which is how the broker handles
 // retries) must not flap the CR.
 //
-// In v1 a Reservation maps to exactly one ResourceSlice → one Liqo
-// VirtualNode → one VirtualNodeState. ChunkIndex is therefore always
-// zero; the field stays on the CRD spec for v2's per-chunk model. See
-// docs/design.md §5.1.
+// A Reservation maps to exactly one ResourceSlice → one Liqo VirtualNode →
+// one v1.Node → one VirtualNodeState. ChunkIndex is therefore always zero;
+// N chunks are N Reservations, which is what lets one provider donate more
+// than one node. See docs/design.md §5.1.
+//
+// sliceName is the ResourceSlice ensureResourceSlice just created. It is also
+// the name Liqo gives the resulting node, so recording it here is what lets
+// the VirtualNodeState controller find that node.
 func ensureVirtualNodeState(
 	ctx context.Context,
 	c ctrlclient.Client,
-	namespace string,
+	namespace, sliceName string,
 	in *brokerapi.InstructionView,
 ) error {
 	if in == nil {
@@ -75,6 +79,7 @@ func ensureVirtualNodeState(
 		Spec: autoscalingv1alpha1.VirtualNodeStateSpec{
 			ProviderClusterID:     in.ProviderClusterID,
 			ProviderLiqoClusterID: in.ProviderLiqoClusterID,
+			ResourceSliceName:     sliceName,
 			NodeGroupID:           nodeGroupIDFor(in.ProviderClusterID, chunkType),
 			ChunkIndex:            0,
 			ReservationID:         in.ReservationID,

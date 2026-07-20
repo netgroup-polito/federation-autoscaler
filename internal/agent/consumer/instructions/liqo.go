@@ -56,11 +56,71 @@ var (
 	}
 )
 
+// Liqo's own labels/annotation on a locally-originated ResourceSlice. Without
+// ALL of these the object is inert: the crdReplicator never ships it to the
+// provider and Liqo's VirtualNodeCreatorReconciler skips it (it requires the
+// remote-cluster-id label and the create-virtual-node annotation), so no
+// VirtualNode and no v1.Node are ever produced. Mirrors
+// liqo/pkg/liqo-controller-manager/authentication/forge.MutateResourceSlice;
+// values are liqo/pkg/consts.{ReplicationRequestedLabel,
+// ReplicationDestinationLabel,RemoteClusterID,CreateVirtualNodeAnnotation}.
+const (
+	liqoReplicationLabel      = "liqo.io/replication"
+	liqoReplicationLabelValue = "true"
+	liqoRemoteIDLabel         = "liqo.io/remoteID"
+	liqoRemoteClusterIDLabel  = "liqo.io/remote-cluster-id"
+	liqoCreateVirtualNodeAnn  = "liqo.io/create-virtual-node"
+
+	// liqoTenantNamespaceLabel marks a Liqo tenant namespace; combined with
+	// liqoRemoteClusterIDLabel it identifies the one for a given provider.
+	liqoTenantNamespaceLabel = "liqo.io/tenant-namespace"
+
+	// liqoTenantNamespacePrefix is the conventional tenant-namespace name
+	// ("liqo-tenant-<clusterID>"), used only as a fallback when the label
+	// lookup finds nothing.
+	liqoTenantNamespacePrefix = "liqo-tenant-"
+)
+
 // resourceSliceName returns the deterministic ResourceSlice name for a
 // reservation. Deterministic naming means re-issuing the same Peer
 // instruction is a no-op (AlreadyExists → success).
+//
+// It is also, by construction, the name of the node: Liqo propagates
+// ResourceSlice.Name → VirtualNode.Name → v1.Node.Name unchanged. Naming the
+// slice per RESERVATION (rather than per provider, as `liqoctl peer` does) is
+// what allows one provider to yield more than one borrowed node.
 func resourceSliceName(reservationID string) string {
 	return "rs-" + reservationID
+}
+
+// tenantNamespaceFor resolves the Liqo tenant namespace for a provider — the
+// namespace a locally-originated ResourceSlice must live in to be replicated.
+// It matches Liqo's own lookup (tenantnamespace.Manager.GetNamespace): select on
+// remote-cluster-id AND the tenant-namespace marker. Falls back to the
+// conventional "liqo-tenant-<id>" name when the lookup finds nothing, so a
+// cluster whose namespace predates the labels still works.
+func tenantNamespaceFor(
+	ctx context.Context,
+	c ctrlclient.Client,
+	providerLiqoClusterID string,
+) (string, error) {
+	var list corev1.NamespaceList
+	if err := c.List(ctx, &list,
+		ctrlclient.MatchingLabels{liqoRemoteClusterIDLabel: providerLiqoClusterID},
+		ctrlclient.HasLabels{liqoTenantNamespaceLabel},
+	); err != nil {
+		return "", fmt.Errorf("list tenant namespaces for %q: %w", providerLiqoClusterID, err)
+	}
+	switch len(list.Items) {
+	case 0:
+		return liqoTenantNamespacePrefix + providerLiqoClusterID, nil
+	case 1:
+		return list.Items[0].Name, nil
+	default:
+		// Liqo treats this as a hard error too — picking one at random would
+		// put the slice somewhere non-deterministic.
+		return "", fmt.Errorf("multiple tenant namespaces found for provider %q", providerLiqoClusterID)
+	}
 }
 
 // ensureResourceSlice creates a Liqo ResourceSlice claiming `resources`
@@ -70,21 +130,36 @@ func resourceSliceName(reservationID string) string {
 func ensureResourceSlice(
 	ctx context.Context,
 	c ctrlclient.Client,
-	namespace, reservationID, providerLiqoClusterID string,
+	reservationID, providerLiqoClusterID string,
 	resources corev1.ResourceList,
 ) (string, error) {
+	namespace, err := tenantNamespaceFor(ctx, c, providerLiqoClusterID)
+	if err != nil {
+		return "", err
+	}
+
 	name := resourceSliceName(reservationID)
 	obj := &unstructured.Unstructured{}
 	obj.SetGroupVersionKind(resourceSliceGVK)
 	obj.SetName(name)
 	obj.SetNamespace(namespace)
+	// The liqo.io labels/annotation are what make this object DO anything —
+	// see the const block above. The federation-autoscaler label is ours, for
+	// correlating the slice back to its reservation.
 	obj.SetLabels(map[string]string{
 		"federation-autoscaler.io/reservation": reservationID,
+		liqoReplicationLabel:                   liqoReplicationLabelValue,
+		liqoRemoteIDLabel:                      providerLiqoClusterID,
+		liqoRemoteClusterIDLabel:               providerLiqoClusterID,
+	})
+	obj.SetAnnotations(map[string]string{
+		liqoCreateVirtualNodeAnn: "true",
 	})
 
-	// Minimal Spec — see Liqo's authentication.liqo.io/v1beta1 docs for
-	// the full schema. Production deployments will rely on Liqo's
-	// webhook defaulting/validation for anything we leave unset.
+	// `resources` is ONE chunk's worth (Reservation.Spec.Resources is
+	// per-chunk, and a Reservation now carries exactly one chunk). Leaving it
+	// unset would grant the provider's full allocatable, making the borrowed
+	// node the whole provider instead of one chunk.
 	spec := map[string]interface{}{
 		"providerClusterID": providerLiqoClusterID,
 		"class":             "default",
@@ -96,18 +171,23 @@ func ensureResourceSlice(
 		if apierrors.IsAlreadyExists(err) {
 			return name, nil
 		}
-		return "", fmt.Errorf("create ResourceSlice %q: %w", name, err)
+		return "", fmt.Errorf("create ResourceSlice %q in %q: %w", name, namespace, err)
 	}
 	return name, nil
 }
 
-// deleteResourceSlice removes the ResourceSlice for a reservation.
-// Idempotent on missing.
+// deleteResourceSlice removes the ResourceSlice for a reservation from the
+// provider's tenant namespace (the same one ensureResourceSlice resolved).
+// Deleting it is what takes the borrowed node away. Idempotent on missing.
 func deleteResourceSlice(
 	ctx context.Context,
 	c ctrlclient.Client,
-	namespace, reservationID string,
+	reservationID, providerLiqoClusterID string,
 ) error {
+	namespace, err := tenantNamespaceFor(ctx, c, providerLiqoClusterID)
+	if err != nil {
+		return err
+	}
 	obj := &unstructured.Unstructured{}
 	obj.SetGroupVersionKind(resourceSliceGVK)
 	obj.SetName(resourceSliceName(reservationID))

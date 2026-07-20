@@ -55,16 +55,27 @@ var liqoVirtualNodeGVK = schema.GroupVersionKind{
 	Kind:    "VirtualNode",
 }
 
+// resourceSliceGVK is likewise duplicated from the instructions package, which
+// keeps it unexported.
+var resourceSliceGVK = schema.GroupVersionKind{
+	Group:   "authentication.liqo.io",
+	Version: "v1beta1",
+	Kind:    "ResourceSlice",
+}
+
 var _ = Describe("Step 11 end-to-end: Peer → VirtualNodeState → reconciler → localapi → gRPC server", func() {
 	const (
 		providerCluster = "provider-11f"
 		consumerCluster = "consumer-11f"
 		reservationID   = "res-11f"
-		// The VNS reconciler correlates by the cluster-scoped v1.Node
-		// named after the provider's Liqo cluster ID (== Spec.
-		// ProviderLiqoClusterID), which is what Liqo names it. The stub
-		// node below uses this name so the projection resolves.
-		liqoVNName  = "liqo-" + providerCluster
+		// The VNS reconciler correlates by the cluster-scoped v1.Node named
+		// after the RESERVATION's ResourceSlice: Liqo propagates
+		// ResourceSlice.Name → VirtualNode.Name → v1.Node.Name unchanged. The
+		// stub node below uses that name so the projection resolves.
+		// (Correlating by the provider's Liqo cluster ID instead would cap a
+		// provider at one borrowed node and make two chunks from one provider
+		// resolve to the same node.)
+		liqoVNName  = "rs-" + reservationID
 		nodeGroupID = "ng-provider-11f-standard"
 	)
 
@@ -130,6 +141,9 @@ var _ = Describe("Step 11 end-to-end: Peer → VirtualNodeState → reconciler �
 			return k8sClient.Status().Update(suiteCtx, c)
 		}, suiteTimeout, suiteInterval).Should(Succeed())
 
+		By("creating the provider's Liqo tenant namespace, as liqoctl peer's auth phase would")
+		ensureTenantNamespace(suiteCtx, "liqo-"+providerCluster)
+
 		By("running the consumer Peer handler with a stubbed liqoctl — produces the VirtualNodeState CR")
 		peerHandler := instructions.NewPeerHandler(instructions.PeerConfig{
 			LocalClient: k8sClient,
@@ -155,6 +169,22 @@ var _ = Describe("Step 11 end-to-end: Peer → VirtualNodeState → reconciler �
 		Expect(err).NotTo(HaveOccurred())
 		Expect(res.Status).To(Equal(brokerapi.ResultStatusSucceeded))
 
+		By("verifying the ResourceSlice is FUNCTIONAL — the labels Liqo requires to build a node")
+		// Without every one of these, Liqo's VirtualNodeCreatorReconciler skips
+		// the object and no node is ever produced. Our slice used to carry only
+		// the federation-autoscaler label, so it was inert and the node came
+		// from liqoctl's own provider-named slice instead — which is what
+		// capped a provider at one borrowed node.
+		slice := &unstructured.Unstructured{}
+		slice.SetGroupVersionKind(resourceSliceGVK)
+		Expect(k8sClient.Get(suiteCtx, types.NamespacedName{
+			Name: "rs-" + reservationID, Namespace: "liqo-tenant-liqo-" + providerCluster,
+		}, slice)).To(Succeed(), "ResourceSlice must live in the provider's tenant namespace")
+		Expect(slice.GetLabels()).To(HaveKeyWithValue("liqo.io/replication", "true"))
+		Expect(slice.GetLabels()).To(HaveKeyWithValue("liqo.io/remote-cluster-id", "liqo-"+providerCluster))
+		Expect(slice.GetLabels()).To(HaveKeyWithValue("liqo.io/remoteID", "liqo-"+providerCluster))
+		Expect(slice.GetAnnotations()).To(HaveKeyWithValue("liqo.io/create-virtual-node", "true"))
+
 		By("verifying the VirtualNodeState CR has the expected linkage")
 		vnsKey := types.NamespacedName{Name: "vns-" + reservationID, Namespace: suiteNamespace}
 		var vns autoscalingv1alpha1.VirtualNodeState
@@ -162,6 +192,9 @@ var _ = Describe("Step 11 end-to-end: Peer → VirtualNodeState → reconciler �
 		Expect(vns.Spec.NodeGroupID).To(Equal(nodeGroupID))
 		Expect(vns.Spec.ProviderClusterID).To(Equal(providerCluster))
 		Expect(vns.Spec.ReservationID).To(Equal(reservationID))
+		// The slice name is recorded because it IS the node name — this is what
+		// the reconciler correlates on.
+		Expect(vns.Spec.ResourceSliceName).To(Equal("rs-" + reservationID))
 
 		By("simulating Liqo materialising the VirtualNode + v1.Node")
 		// The VirtualNode CR is created for fidelity with a real cluster,

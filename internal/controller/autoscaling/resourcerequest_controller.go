@@ -172,6 +172,9 @@ func (r *ResourceRequestReconciler) Reconcile(ctx context.Context, req ctrl.Requ
 	if !ok {
 		return r.setPending(ctx, &rr, "no provider with enough free capacity yet")
 	}
+	if msg, tooBig := multiChunkUnsupported(count); tooBig {
+		return r.setPending(ctx, &rr, msg)
+	}
 
 	resReq := &brokerapi.ReservationRequest{
 		ProviderClusterID: group.ProviderClusterID,
@@ -185,6 +188,25 @@ func (r *ResourceRequestReconciler) Reconcile(ctx context.Context, req ctrl.Requ
 	log.V(1).Info("created manual reservation",
 		"reservationId", reservationID, "provider", group.ProviderClusterID, "chunks", count)
 	return r.setReserved(ctx, &rr, reservationID, group.ProviderClusterID, count)
+}
+
+// multiChunkUnsupported reports whether a request sized to `count` chunks
+// exceeds what a manual reservation can currently hold, with the message to
+// surface when it does.
+//
+// A Reservation is exactly one chunk (one ResourceSlice, one node). The
+// Cluster-Autoscaler path covers a delta of N by making N reservations, but a
+// ResourceRequest tracks a SINGLE Status.ReservationID — which the re-eval /
+// migration machinery is built on — so fanning it out is a follow-up. Until
+// then, say so plainly rather than silently reserving less than asked.
+func multiChunkUnsupported(count int32) (string, bool) {
+	if count <= 1 {
+		return "", false
+	}
+	return fmt.Sprintf(
+		"request needs %d chunks; a manual reservation currently covers exactly one chunk — "+
+			"lower spec.resources to fit one chunk, or create %d separate ResourceRequests",
+		count, count), true
 }
 
 // pickProviderAndSize chooses the growable node group with the most free
@@ -409,6 +431,15 @@ func (r *ResourceRequestReconciler) completeMigration(ctx context.Context, rr *a
 		// The old reservation is already gone; wait for a provider with capacity.
 		if err := r.writePhase(ctx, rr, autoscalingv1alpha1.ResourceRequestMigrating,
 			"migrating — waiting for a provider with capacity", "", "", 0); err != nil {
+			return ctrl.Result{}, err
+		}
+		return ctrl.Result{RequeueAfter: pendingRequeue}, nil
+	}
+	if msg, tooBig := multiChunkUnsupported(count); tooBig {
+		// Only reachable if the winning provider's chunk shape shrank mid-flight.
+		// The old reservation is already released, so stay Migrating and retry.
+		if err := r.writePhase(ctx, rr, autoscalingv1alpha1.ResourceRequestMigrating,
+			"migrating — "+msg, "", "", 0); err != nil {
 			return ctrl.Result{}, err
 		}
 		return ctrl.Result{RequeueAfter: pendingRequeue}, nil

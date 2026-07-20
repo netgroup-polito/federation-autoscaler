@@ -38,7 +38,10 @@ import (
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 
+	corev1 "k8s.io/api/core/v1"
 	apiextensionsv1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/kubernetes/scheme"
 	"k8s.io/client-go/rest"
 	ctrl "sigs.k8s.io/controller-runtime"
@@ -221,3 +224,28 @@ func envtestBinaryDir() string {
 // brokerURL formats the brokerListen address as an https URL the agent
 // client can dial.
 func brokerURL() string { return "https://" + brokerListen }
+
+// ensureTenantNamespace stands in for what `liqoctl peer` does on a real
+// cluster: its authentication phase creates the provider's Liqo tenant
+// namespace (pkg/liqoctl/authenticate/cluster.go CreateNamespace), which runs
+// unconditionally — only the ResourceSlice creation is gated behind
+// --create-resource-slice. The Peer handler puts our slice there, so a suite
+// driving a FAKE liqoctl has to create it itself.
+//
+// The labels are the ones Liqo stamps and that tenantNamespaceFor selects on,
+// so this exercises the real label lookup rather than the name fallback.
+func ensureTenantNamespace(ctx context.Context, providerLiqoClusterID string) {
+	GinkgoHelper()
+	ns := &corev1.Namespace{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: "liqo-tenant-" + providerLiqoClusterID,
+			Labels: map[string]string{
+				"liqo.io/remote-cluster-id": providerLiqoClusterID,
+				"liqo.io/tenant-namespace":  "true",
+			},
+		},
+	}
+	if err := k8sClient.Create(ctx, ns); err != nil {
+		Expect(apierrors.IsAlreadyExists(err)).To(BeTrue(), "create tenant namespace: %v", err)
+	}
+}

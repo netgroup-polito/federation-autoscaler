@@ -569,18 +569,22 @@ func (s *Server) applyPeerPayload(
 	return s.client.Status().Update(ctx, patched)
 }
 
-// applyUnpeerPayload advances Released-on-last-chunk; partial release
-// transitions stay on Unpeering until the next chunk's result arrives.
+// applyUnpeerPayload advances the Reservation to Released once its Unpeer has
+// succeeded.
+//
+// It deliberately does NOT consult ri.Spec.LastChunk. That flag answers a
+// different question — "may the consumer tear down the peering SHARED with
+// sibling reservations to this provider?" — and is false whenever a sibling is
+// still live. A Reservation carries exactly one chunk and therefore receives
+// exactly one Unpeer, so gating on it would strand every non-last reservation
+// in Unpeering forever, and its chunk would never be credited back.
 func (s *Server) applyUnpeerPayload(
 	ctx context.Context, ri *autoscalingv1alpha1.ReservationInstruction,
 ) {
-	if !ri.Spec.LastChunk {
-		return
-	}
 	if err := s.advanceReservationPhase(ctx, ri.Spec.ReservationID,
 		brokerv1alpha1.ReservationPhaseUnpeering,
 		brokerv1alpha1.ReservationPhaseReleased,
-		"all chunks released"); err != nil {
+		"chunk released"); err != nil {
 		s.log.Info("phase advance to Released skipped", "err", err.Error())
 	}
 }

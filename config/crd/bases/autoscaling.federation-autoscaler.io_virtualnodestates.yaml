@@ -70,6 +70,9 @@ spec:
                 description: |-
                   ChunkIndex is the position of this chunk inside its reservation
                   (0-based). Together with ReservationID it uniquely identifies a chunk.
+                  A Reservation now carries exactly one chunk (N chunks = N Reservations,
+                  so each maps 1:1 to one ResourceSlice and one node), which makes this
+                  always 0; the field stays for wire/CRD compatibility.
                 format: int32
                 minimum: 0
                 type: integer
@@ -86,10 +89,8 @@ spec:
                 minLength: 1
                 type: string
               providerLiqoClusterId:
-                description: |-
-                  ProviderLiqoClusterID is the Liqo cluster identifier of the provider.
-                  Used by the gRPC server to resolve the Liqo virtual node back to its
-                  owning VirtualNodeState via the liqo.io/remote-cluster-id label.
+                description: ProviderLiqoClusterID is the Liqo cluster identifier
+                  of the provider.
                 minLength: 1
                 type: string
               reservationId:
@@ -97,6 +98,19 @@ spec:
                   ReservationID is the identifier of the Broker-side Reservation that
                   owns this chunk.
                 minLength: 1
+                type: string
+              resourceSliceName:
+                description: |-
+                  ResourceSliceName is the name of the Liqo ResourceSlice this chunk was
+                  claimed with, and therefore the name of the v1.Node Liqo materialises for
+                  it: Liqo propagates ResourceSlice.Name -> VirtualNode.Name -> Node.Name
+                  unchanged. It is how the VirtualNodeState controller finds its node.
+
+                  This MUST NOT be inferred from ProviderLiqoClusterID. That used to work
+                  only because `liqoctl peer` names the slice it creates after the provider
+                  cluster, which caps a provider at one borrowed node and makes two chunks
+                  from one provider collide on a single node. The consumer agent now owns
+                  the slice and names it per reservation.
                 type: string
               resources:
                 additionalProperties:
@@ -239,8 +253,10 @@ spec:
                 type: string
               resourceSliceName:
                 description: |-
-                  ResourceSliceName is the name of the Liqo ResourceSlice the Consumer
-                  Agent created for this chunk. Empty until the Peer instruction succeeds.
+                  ResourceSliceName mirrors Spec.ResourceSliceName once the controller has
+                  observed the chunk, so the printcolumn and the Reconcile report can read
+                  it off status like every other observed field. Empty until the Peer
+                  instruction has succeeded and written the spec.
                 type: string
               virtualNodeName:
                 description: |-

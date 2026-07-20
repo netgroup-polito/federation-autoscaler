@@ -99,11 +99,12 @@ func (r *VirtualNodeStateReconciler) Reconcile(ctx context.Context, req ctrl.Req
 	desired := vns.DeepCopy()
 	desired.Status.ObservedGeneration = vns.Generation
 
-	nodeName := vns.Spec.ProviderLiqoClusterID
+	nodeName := nodeNameFor(&vns)
+	desired.Status.ResourceSliceName = vns.Spec.ResourceSliceName
 	if nodeName == "" {
 		// Misconfigured CR — nothing to correlate against.
 		applyPhase(&desired.Status, autoscalingv1alpha1.VirtualNodeStatePhaseCreating,
-			"VirtualNodeState missing providerLiqoClusterId")
+			"VirtualNodeState missing resourceSliceName and providerLiqoClusterId")
 		desired.Status.VirtualNodeName = ""
 		desired.Status.ProviderID = ""
 		desired.Status.Allocatable = nil
@@ -340,11 +341,29 @@ func (r *VirtualNodeStateReconciler) SetupWithManager(mgr ctrl.Manager) error {
 		Complete(r)
 }
 
+// nodeNameFor returns the name of the v1.Node this chunk projects from.
+//
+// Liqo propagates ResourceSlice.Name → VirtualNode.Name → v1.Node.Name
+// unchanged, so the slice name IS the node name. Correlating on
+// ProviderLiqoClusterID instead only worked while `liqoctl peer` owned the
+// slice and named it after the provider — which capped a provider at one
+// borrowed node and made two chunks from one provider resolve to the SAME
+// node (one invisible, the other double-counted, both reporting one
+// ProviderID that CA cannot tell apart).
+//
+// Falls back to ProviderLiqoClusterID for CRs written before the agent took
+// ownership of the slice, so an in-place upgrade still resolves them.
+func nodeNameFor(vns *autoscalingv1alpha1.VirtualNodeState) string {
+	if vns.Spec.ResourceSliceName != "" {
+		return vns.Spec.ResourceSliceName
+	}
+	return vns.Spec.ProviderLiqoClusterID
+}
+
 // requestsForNode is the map-func feeding the v1.Node watch. It enqueues
-// every VirtualNodeState whose Spec.ProviderLiqoClusterID equals the
-// node's name — i.e. the CR(s) that project from this node. Listed
-// cluster-wide so the lookup is independent of which namespace the CRs
-// live in.
+// every VirtualNodeState that projects from this node (see nodeNameFor).
+// Listed cluster-wide so the lookup is independent of which namespace the
+// CRs live in.
 func (r *VirtualNodeStateReconciler) requestsForNode(
 	ctx context.Context, obj client.Object,
 ) []reconcile.Request {
@@ -358,7 +377,7 @@ func (r *VirtualNodeStateReconciler) requestsForNode(
 	out := make([]reconcile.Request, 0, len(list.Items))
 	for i := range list.Items {
 		v := &list.Items[i]
-		if v.Spec.ProviderLiqoClusterID != nodeName {
+		if nodeNameFor(v) != nodeName {
 			continue
 		}
 		out = append(out, reconcile.Request{

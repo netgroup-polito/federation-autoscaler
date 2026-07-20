@@ -335,6 +335,18 @@ func (r *ReservationReconciler) handleKubeconfigReady(
 func (r *ReservationReconciler) handleUnpeering(
 	ctx context.Context, log logr.Logger, resv *brokerv1alpha1.Reservation,
 ) (ctrl.Result, error) {
+	// LastChunk gates everything the consumer tears down that is SHARED with
+	// sibling reservations to the same provider: `liqoctl unpeer`, the
+	// kubeconfig Secret, and the ForeignCluster. A Reservation carries exactly
+	// one chunk, so "last chunk" means "last reservation to this provider" —
+	// it must be ref-counted, not assumed. Hardcoding true was safe only while
+	// a provider could donate at most one node; now that N reservations to one
+	// provider are normal, releasing one would rip the peering out from under
+	// the others.
+	last, err := r.hasOtherHoldingReservation(ctx, resv)
+	if err != nil {
+		return ctrl.Result{}, fmt.Errorf("check sibling reservations: %w", err)
+	}
 	ri := &autoscalingv1alpha1.ReservationInstruction{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      reservationInstructionUnpeerName(resv.Name),
@@ -347,10 +359,7 @@ func (r *ReservationReconciler) handleUnpeering(
 			ProviderClusterID:     resv.Spec.ProviderClusterID,
 			ProviderLiqoClusterID: resv.Spec.ProviderLiqoClusterID,
 			ChunkCount:            resv.Spec.ChunkCount,
-			// v1 limitation: a Reservation always releases every chunk at
-			// once. Per-chunk decrement is a v2 feature; the field stays in
-			// the spec to keep the wire / CRD shape forward-compatible.
-			LastChunk: true,
+			LastChunk:             !last,
 		},
 	}
 
@@ -770,6 +779,43 @@ func (r *ReservationReconciler) deleteKubeconfigSecret(
 func (r *ReservationReconciler) hasOtherActiveReservation(
 	ctx context.Context, resv *brokerv1alpha1.Reservation,
 ) (bool, error) {
+	return r.anyOtherSibling(ctx, resv, func(p brokerv1alpha1.ReservationPhase) bool {
+		return !isReservationTerminal(p)
+	})
+}
+
+// hasOtherHoldingReservation reports whether any Reservation other than resv
+// targets the same (consumer, provider) pair and still NEEDS the shared peering
+// to stay up.
+//
+// This is deliberately narrower than hasOtherActiveReservation: it also ignores
+// siblings in Unpeering, because those are on their way out and their own
+// Unpeer handles whatever teardown they still owe.
+//
+// The distinction matters because the LastChunk gate is a ONE-SHOT snapshot
+// taken when the Unpeer/Cleanup instruction is emitted — unlike the caller in
+// the terminal path, which requeues and re-checks. On a full scale-down every
+// sibling enters Unpeering at once; counting them as holders would give every
+// instruction LastChunk=false, so NOTHING would ever delete the shared
+// ForeignCluster and `liqoctl info` would keep reporting a phantom peering.
+// Two simultaneous releases both deciding "I'm last" is harmless: deleting the
+// ForeignCluster is idempotent, and the peering genuinely is going away.
+func (r *ReservationReconciler) hasOtherHoldingReservation(
+	ctx context.Context, resv *brokerv1alpha1.Reservation,
+) (bool, error) {
+	return r.anyOtherSibling(ctx, resv, func(p brokerv1alpha1.ReservationPhase) bool {
+		return !isReservationTerminal(p) && p != brokerv1alpha1.ReservationPhaseUnpeering
+	})
+}
+
+// anyOtherSibling reports whether some OTHER Reservation for the same
+// (consumer, provider) pair, not already being deleted, is in a phase `counts`
+// accepts.
+func (r *ReservationReconciler) anyOtherSibling(
+	ctx context.Context,
+	resv *brokerv1alpha1.Reservation,
+	counts func(brokerv1alpha1.ReservationPhase) bool,
+) (bool, error) {
 	var list brokerv1alpha1.ReservationList
 	if err := r.List(ctx, &list, client.InNamespace(resv.Namespace)); err != nil {
 		return false, err
@@ -786,13 +832,9 @@ func (r *ReservationReconciler) hasOtherActiveReservation(
 		if !other.DeletionTimestamp.IsZero() {
 			continue
 		}
-		switch other.Status.Phase {
-		case brokerv1alpha1.ReservationPhaseReleased,
-			brokerv1alpha1.ReservationPhaseFailed,
-			brokerv1alpha1.ReservationPhaseExpired:
-			continue
+		if counts(other.Status.Phase) {
+			return true, nil
 		}
-		return true, nil
 	}
 	return false, nil
 }
@@ -940,6 +982,12 @@ func (r *ReservationReconciler) ensureConsumerCleanupShared(
 func (r *ReservationReconciler) emitConsumerCleanup(
 	ctx context.Context, resv *brokerv1alpha1.Reservation, owned bool,
 ) error {
+	// Same ref-count as handleUnpeering: only the LAST reservation to this
+	// provider may take down the shared peering (see LastChunk there).
+	last, err := r.hasOtherHoldingReservation(ctx, resv)
+	if err != nil {
+		return fmt.Errorf("check sibling reservations: %w", err)
+	}
 	ri := &autoscalingv1alpha1.ReservationInstruction{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      reservationInstructionCleanupName(resv.Name),
@@ -952,7 +1000,7 @@ func (r *ReservationReconciler) emitConsumerCleanup(
 			ProviderClusterID:     resv.Spec.ProviderClusterID,
 			ProviderLiqoClusterID: resv.Spec.ProviderLiqoClusterID,
 			ChunkCount:            resv.Spec.ChunkCount,
-			LastChunk:             true,
+			LastChunk:             !last,
 		},
 	}
 	if owned {
