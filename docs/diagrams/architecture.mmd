@@ -1,7 +1,7 @@
 %%{init: {'theme': 'base', 'layout': 'elk', 'themeVariables': {'fontSize': '13px', 'fontFamily': 'Helvetica, Arial, sans-serif'}, 'flowchart': {'curve': 'basis', 'nodeSpacing': 55, 'rankSpacing': 70}}}%%
-%% docs/design.md §3 — system overview (as-built).
+%% docs/design.md §3 - system overview (as-built).
 %% Layout (flowchart LR, ELK engine): the consumer and provider clusters (left)
-%% initiate ALL traffic to the right — to the central broker and, for the
+%% initiate ALL traffic to the right: to the central broker and, for the
 %% eco/latency strategies, to the mock cluster. Arrows point in the direction
 %% each call is made; the broker never dials an agent, so no arrow points back
 %% (right-to-left) into a cluster. Each cluster owns its own liqoctl exec.
@@ -29,7 +29,7 @@ flowchart LR
         CA("Cluster<br/>Autoscaler")
         GS("gRPC Server")
         CAg("Consumer Agent")
-        VNS[("CRD<br/>VirtualNodeState")]
+        VNS[("CRDs<br/>VirtualNodeState · ResourceRequest<br/>ConsumerPolicy")]
         VN("Liqo VirtualNode<br/>materialised on peer")
         LqC[["liqoctl<br/>peer / unpeer"]]
         CA -- "externalgrpc · mTLS<br/>(in-cluster)" --> GS
@@ -51,7 +51,7 @@ flowchart LR
     CAg == "mTLS · agent-initiated<br/>POST heartbeat · reservations<br/>GET nodegroups · instructions<br/>POST instructions/{id}/result" ==> Bk
     PAg == "mTLS · agent-initiated<br/>POST advertisements<br/>GET instructions<br/>POST instructions/{id}/result" ==> Bk
 
-    %% mock fetches — plain HTTP, agent-initiated, best-effort. Each agent
+    %% mock fetches: plain HTTP, agent-initiated, best-effort. Each agent
     %% geolocates its own node IP; the provider keys carbon by the discovered region.
     PAg -. "GET /carbon?region=" .-> MockEco
     PAg -. "GET /json/&lt;node-ip&gt;" .-> MockGeo

@@ -8,14 +8,13 @@ sources; they may lag the `.mmd` until somebody regenerates them.
 | Source           | Renders to                              | Covers                                                   |
 |------------------|-----------------------------------------|----------------------------------------------------------|
 | `architecture.mmd` | `architecture-diagram.png`            | System overview, three-binary split, asymmetric flow (§3) |
-| `registration.mmd` | `registration-flow.png`               | Advertisement + heartbeat boot-up (§8.1)                  |
-| `scale-up.mmd`     | `scale-up-execution-flow.png`         | CA scale-up → Reservation Peered → VirtualNode Ready (§8.2) |
-| `scale-down.mmd`   | `scale-down-execution-flow.png`       | CA scale-down → Reservation Released (§8.3)               |
+| `registration.mmd` | `registration-flow.png`                 | Advertisement + heartbeat boot-up (§9.1)                  |
+| `scale-up.mmd`     | `scale-up-execution-flow.png`         | CA scale-up, one Reservation per chunk, to VirtualNode Ready (§9.2) |
+| `scale-down.mmd`   | `scale-down-execution-flow.png`       | CA scale-down to Reservation Released (§9.3)              |
 
-The `liqoctl` exec hops added in steps 8 / 9 (provider's `liqoctl generate
-peering-user`, consumer's `liqoctl peer` / `liqoctl unpeer`) appear as
-explicit participants in the sequence diagrams; the v3.0 PNGs predate
-them.
+`architecture-diagram-2.svg` is a hand-authored companion of the
+architecture view used by the top-level `README.md`; it has no `.mmd`
+source.
 
 ## Regenerating the PNGs
 
@@ -32,6 +31,13 @@ mmdc -i scale-down.mmd    -o scale-down-execution-flow.png   --backgroundColor w
 
 Commit both the updated `.mmd` and `.png` together so the rendering
 stays in lock-step with the source.
+
+Two rendering gotchas: mermaid treats a semicolon inside sequence-diagram
+message or note text as a statement separator and fails to parse (use a
+comma or period instead; an old semicolon is why `registration-flow.png`
+went unrendered for months), and on hosts where Chrome refuses to start
+without a sandbox, pass `-p` with a puppeteer config containing
+`{"args": ["--no-sandbox"]}`.
 
 ## Viewing without re-rendering
 

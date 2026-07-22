@@ -1,6 +1,5 @@
 %%{init: {'theme': 'neutral'}}%%
-%% docs/design.md §8.3 — scale-down execution flow (as-built).
-%% Surfaces the liqoctl unpeer exec hop introduced in step 9.
+%% docs/design.md §9.3 - scale-down execution flow (as-built).
 %% Regenerate the PNG with: mmdc -i scale-down.mmd -o scale-down-execution-flow.png
 sequenceDiagram
     autonumber
@@ -12,11 +11,12 @@ sequenceDiagram
     participant Lq  as liqoctl<br/>(exec)
     participant Lo  as Liqo<br/>(networking +<br/>VirtualNode)
 
-    Note over CA: virtual node underutilised<br/>or NodeGroupDeleteNodes call
+    Note over CA: virtual node unneeded for<br/>--scale-down-unneeded-time, drained
     CA->>GS: NodeGroupDeleteNodes([node-xyz])
+    GS->>CAg: GET /local/virtual-nodes<br/>(map node name to reservation)
     GS->>CAg: DELETE /local/reservations/{id}
-    CAg->>Bk: DELETE /api/v1/reservations/{id}<br/>(mTLS, full release in v1)
-    Note right of Bk: Reservation phase<br/>Peered → Unpeering<br/>ReservationInstruction{Unpeer}<br/>queued for consumer-1
+    CAg->>Bk: DELETE /api/v1/reservations/{id}<br/>(mTLS, ?chunks= partial release returns 501)
+    Note right of Bk: Reservation phase<br/>Peered to Unpeering,<br/>ReservationInstruction{Unpeer} queued,<br/>lastChunk=true only when no sibling<br/>reservation still holds this provider
     Bk-->>CAg: 202
     CAg-->>GS: 202
     GS-->>CA: ok
@@ -26,18 +26,19 @@ sequenceDiagram
     CAg->>CAg: delete VirtualNodeState CR
     CAg->>Lo: delete ResourceSlice
     Lo-->>CAg: ok
-    CAg->>Lq: liqoctl unpeer<br/>--remote-kubeconfig <path>
+    CAg->>Lq: liqoctl unpeer (lastChunk only)
     Lq-->>CAg: ok (or "already unpeered")
-    CAg->>CAg: delete kubeconfig Secret<br/>(lastChunk=true)
-    CAg->>Lo: delete ForeignCluster shell<br/>(lastChunk=true, liqoctl unpeer leaves it behind)
+    CAg->>CAg: delete kubeconfig Secret (always)
+    CAg->>Lo: delete ForeignCluster shell<br/>(lastChunk only, liqoctl unpeer leaves it behind)
     CAg->>Bk: POST /api/v1/instructions/{id}/result<br/>(releasedChunks, tunnelDropped)
+    Note right of Bk: Reservation phase Released<br/>(chunk returns to the pool)
 
-    Note right of Bk: Reservation enters terminal phase<br/>handleTerminal emits ProviderInstruction{Cleanup}<br/>plus un-owned consumer ReservationInstruction{Cleanup},<br/>GC-ed after DefaultTerminalReservationTTL (15m)
+    Note right of Bk: handleTerminal then emits the shared<br/>ProviderInstruction{Cleanup}<br/>(pcleanup-<consumer>-<provider>, last chunk only)<br/>plus a consumer Cleanup, and deletes the<br/>staging Secret. The terminal Reservation<br/>is GC-ed after 15 m
     PAg->>Bk: GET /api/v1/instructions (5 s poll)
     Bk-->>PAg: ProviderInstruction{Cleanup}
-    PAg->>PAg: revoke peering-user<br/>ServiceAccount + bindings
+    PAg->>Lq: liqoctl delete peering-user<br/>--consumer-cluster-id <consumer-1>
+    Lq-->>PAg: ok ("not found" counts as success)
     PAg->>Bk: POST /api/v1/instructions/{id}/result
-    Note right of Bk: Reservation phase<br/>Released<br/>(chunks return to pool)
 
     Note over Lo: Liqo tears down<br/>VirtualNode + tunnel
     Note over GS: VirtualNodeStateReconciler<br/>no longer sees the CR,<br/>NodeGroupTargetSize drops

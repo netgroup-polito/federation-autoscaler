@@ -1,5 +1,5 @@
 %%{init: {'theme': 'neutral'}}%%
-%% docs/design.md §8.1 — registration flow (as-built).
+%% docs/design.md §9.1 - registration flow (as-built).
 %% Asymmetric: only agents call the broker; broker NEVER initiates.
 %% Regenerate the PNG with: mmdc -i registration.mmd -o registration-flow.png
 sequenceDiagram
@@ -10,11 +10,11 @@ sequenceDiagram
 
     Note over PAg: snapshot local nodes →<br/>allocatable + topology
     PAg->>Bk: POST /api/v1/advertisements<br/>(mTLS, every 30 s,<br/>doubles as heartbeat)
-    Note right of Bk: ClusterAdvertisement CR<br/>upserted;<br/>ClusterAdvertisementReconciler<br/>flips Status.Available=true
-    Bk-->>PAg: 200 + piggybacked instructions
+    Note right of Bk: ClusterAdvertisement CR<br/>upserted.<br/>ClusterAdvertisementReconciler<br/>flips Status.Available=true
+    Bk-->>PAg: 200 + piggybacked instructions<br/>(currently ignored, the 5 s poll<br/>is the dispatch path)
 
-    CAg->>Bk: POST /api/v1/heartbeat<br/>(mTLS, every 15 s)
-    Note right of Bk: in-memory ConsumerRegistry<br/>upsert lastSeen + liqoClusterId
+    CAg->>Bk: POST /api/v1/heartbeat<br/>(mTLS, every 15 s,<br/>carries placement policy +<br/>discovered location + measured RTTs)
+    Note right of Bk: in-memory ConsumerRegistry<br/>upsert lastSeen + liqoClusterId<br/>+ policy + coordinates
     Bk-->>CAg: 200
 
     Note over PAg,CAg: Both agents now poll<br/>GET /api/v1/instructions every 5 s

@@ -1,6 +1,6 @@
 %%{init: {'theme': 'neutral'}}%%
-%% docs/design.md §8.2 — scale-up execution flow (as-built).
-%% Surfaces every liqoctl exec hop introduced in steps 8/9.
+%% docs/design.md §9.2 - scale-up execution flow (as-built).
+%% One Reservation = one chunk = one virtual node; a delta-N scale-up fans out N reservations.
 %% Regenerate the PNG with: mmdc -i scale-up.mmd -o scale-up-execution-flow.png
 sequenceDiagram
     autonumber
@@ -13,30 +13,32 @@ sequenceDiagram
     participant Lo  as Liqo<br/>(networking +<br/>VirtualNode)
 
     Note over CA: unschedulable Pods detected
-    CA->>GS: NodeGroupIncreaseSize(delta=2)
-    GS->>CAg: POST /local/reservations
-    CAg->>Bk: POST /api/v1/reservations<br/>(mTLS, X-Reservation-Id)
-    Note right of Bk: Reservation phase<br/>Pending → GeneratingKubeconfig
-    Bk-->>CAg: 201 + reservationId
-    CAg-->>GS: 202 + reservationId
-    GS-->>CA: ok
+    CA->>GS: NodeGroupIncreaseSize(delta=N)
+    loop N times (one single-chunk Reservation per chunk)
+        GS->>CAg: POST /local/reservations<br/>(1 chunk, id res-<uuid>)
+        CAg->>Bk: POST /api/v1/reservations<br/>(mTLS, X-Reservation-Id)
+        Note right of Bk: Reservation created (Pending),<br/>controller emits shared<br/>ProviderInstruction{GenerateKubeconfig}<br/>(gk-<consumer>-<provider>)<br/>and advances to GeneratingKubeconfig
+        Bk-->>CAg: 201 + reservationId
+        CAg-->>GS: 201 (passed through)
+    end
+    GS-->>CA: ok (does not wait for peering)
 
-    Note over Bk: ProviderInstruction{<br/>GenerateKubeconfig}<br/>queued for provider-1
+    Note over Bk: sibling Reservations fast-forward to<br/>KubeconfigReady when the (consumer, provider)<br/>credential Secret already exists<br/>(the peering user is a per-pair singleton)
     PAg->>Bk: GET /api/v1/instructions (5 s poll)
     Bk-->>PAg: ProviderInstruction{GenerateKubeconfig}
     PAg->>Lq: liqoctl generate peering-user<br/>--consumer-cluster-id <consumer-1>
     Lq-->>PAg: kubeconfig (stdout)
     PAg->>Bk: POST /api/v1/instructions/{id}/result<br/>(payload: kubeconfig)
-    Note right of Bk: Reservation phase<br/>KubeconfigReady → Peering<br/>ReservationInstruction{Peer}<br/>queued (kubeconfig inlined)
+    Note right of Bk: kubeconfig staged in a Broker Secret.<br/>Reservation phase<br/>KubeconfigReady, then Peering.<br/>ReservationInstruction{Peer}<br/>queued (kubeconfig inlined)
 
     CAg->>Bk: GET /api/v1/instructions (5 s poll)
     Bk-->>CAg: ReservationInstruction{Peer}<br/>(kubeconfig inlined)
     CAg->>CAg: persist kubeconfig Secret
-    CAg->>Lq: liqoctl peer<br/>--remote-kubeconfig <path>
+    CAg->>Lq: liqoctl peer<br/>--remote-kubeconfig <path><br/>(40-90 s cold, ~1 s warm re-peer)
     Lq-->>CAg: ok
-    CAg->>Lo: create ResourceSlice<br/>(NamespaceOffloading is operator-stamped,<br/>not per-reservation)
+    CAg->>Lo: create ResourceSlice rs-<reservation><br/>(NamespaceOffloading is operator-stamped,<br/>not per-reservation)
     Lo-->>CAg: ResourceSlice accepted
-    Note over Lo: Liqo materialises<br/>VirtualNode + v1.Node
+    Note over Lo: Liqo materialises<br/>VirtualNode + v1.Node,<br/>named after the slice
     CAg->>CAg: create VirtualNodeState CR
     CAg->>Bk: POST /api/v1/instructions/{id}/result<br/>(virtualNodeNames)
     Note right of Bk: Reservation phase<br/>Peered
@@ -45,5 +47,5 @@ sequenceDiagram
     CA->>GS: NodeGroupNodes()
     GS->>CAg: GET /local/virtual-nodes
     CAg-->>GS: [{name, Phase=Running, allocatable}]
-    GS-->>CA: Instance{Running}
+    GS-->>CA: Instance{Running}<br/>(Id = node providerID)
     Note over CA: kube-scheduler<br/>places Pods on<br/>the new VirtualNode
