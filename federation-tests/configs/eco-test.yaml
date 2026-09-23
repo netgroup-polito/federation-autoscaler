@@ -1,0 +1,49 @@
+consumers: 3
+providers: 7
+
+experiment:
+  mode: reserve
+  duration: time
+  # An hour per phase: with the 2m carbonRefreshInterval below, that is ~30
+  # distinct carbon rankings per phase. Halving it to 30m would halve the
+  # steps too, leaving the overlaid A-vs-B chart visibly blocky and the
+  # Random baseline's mean estimated from far fewer samples.
+  timer: 1h
+  iterations: 15 # ignored while duration: time; kept as a fallback value
+  phasePause: 35s
+  policyPropagationWait: 35s
+  advertisementLag: 35s
+
+  # carbonLow/carbonHigh/carbonGreenFractionMin/Max left at their defaults
+  # (50/800/0.3/0.7) -- already the values validated in earlier sessions.
+  #
+  # The two knobs below set how fast the environment changes and how quickly
+  # a Consumer gets to see that change. They are deliberately far apart.
+  #
+  # A value written to mock-eco reaches a Consumer only after the provider's
+  # eco cache expires (up to ecoCacheTTL) AND its next advertisement fires
+  # (up to 30s, hardcoded in advertise.DefaultInterval). That combined lag
+  # must stay a small fraction of carbonRefreshInterval, otherwise different
+  # providers are observed on different ticks of the sequence -- and since
+  # each provider's cache/advertisement offset differs between Phase A and
+  # Phase B, the two phases stop LOOKING like the same environment even
+  # though Phase B replays Phase A's exact carbon sequence (same seed, see
+  # comparative-eco's carbonSeed). At 35s/35s the lag was ~65s against a 35s
+  # tick and the phases were unalignable point-by-point; at 2m/5s it is ~35s
+  # against a 120s tick, so a sample taken at the same elapsed time in both
+  # phases lands on the same tick.
+  #
+  # The cost of the slower tick is fewer distinct carbon rankings per phase
+  # (~15 over 30 minutes instead of ~51). That is the trade for a directly
+  # overlayable A-vs-B chart.
+  carbonRefreshInterval: 2m
+  ecoCacheTTL: 5s
+
+infra:
+  readinessTimeout: 10m
+  liqoProvider: kind
+
+cleanup: true
+
+output:
+  dir: results

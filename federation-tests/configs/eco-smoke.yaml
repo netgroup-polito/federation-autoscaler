@@ -1,0 +1,40 @@
+# Smoke test for eco-test.yaml's cadence, not an experiment.
+#
+# Purpose: prove, in ~20 minutes instead of ~2h20, that a sample taken at the
+# same elapsed time in Phase A and Phase B sees the same carbon intensity. The
+# cadence knobs (carbonRefreshInterval, ecoCacheTTL) are IDENTICAL to
+# eco-test.yaml -- they are the thing under test and must not be scaled down
+# with the rest. Only the topology and the phase length shrink.
+#
+# 6m per phase at a 2m tick is 3 ticks: enough to tell "aligned" from
+# "unaligned", not enough to draw any conclusion about the Eco policy itself.
+#
+# Verify with:
+#   python federation-tests/scripts/verifyReplayAlignment.py --input <results>/nodegroups.csv
+# Expect a per-tick match well above 80%. The old 35s/35s cadence measured 15.5%.
+
+consumers: 5
+providers: 15
+
+experiment:
+  mode: reserve
+  duration: time
+  timer: 6m
+  iterations: 15 # ignored while duration: time; kept as a fallback value
+  phasePause: 35s
+  policyPropagationWait: 35s
+  advertisementLag: 35s
+
+  # Must match eco-test.yaml exactly. See the long note there for why these two
+  # values have to stay far apart.
+  carbonRefreshInterval: 2m
+  ecoCacheTTL: 5s
+
+infra:
+  readinessTimeout: 10m
+  liqoProvider: kind
+
+cleanup: true
+
+output:
+  dir: results

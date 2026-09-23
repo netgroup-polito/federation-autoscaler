@@ -12,101 +12,332 @@
  (never innerHTML) so cluster-controlled strings cannot inject markup.
 -->
 <html lang="en">
+
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <title>Consumer Console — Federation Autoscaler</title>
+  <title>Consumer Console &#x2014; Federation Autoscaler</title>
   <style>
     :root {
-      --bg: #0f1419; --panel: #1a212b; --panel-2: #222b37; --border: #2d3949;
-      --fg: #e6edf3; --muted: #8b98a9; --accent: #4aa8ff; --green: #3fb950;
-      --amber: #d29922; --red: #f85149; --purple: #bc8cff;
+      --bg: #0f1419;
+      --panel: #1a212b;
+      --panel-2: #222b37;
+      --border: #2d3949;
+      --fg: #e6edf3;
+      --muted: #8b98a9;
+      --accent: #4aa8ff;
+      --green: #3fb950;
+      --amber: #d29922;
+      --red: #f85149;
+      --purple: #bc8cff;
     }
-    * { box-sizing: border-box; }
+
+    * {
+      box-sizing: border-box;
+    }
+
     body {
-      margin: 0; background: var(--bg); color: var(--fg);
+      margin: 0;
+      background: var(--bg);
+      color: var(--fg);
       font: 14px/1.5 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
       padding: 0 0 64px;
     }
+
     header {
-      display: flex; align-items: center; gap: 14px; flex-wrap: wrap;
-      padding: 14px 22px; background: var(--panel); border-bottom: 1px solid var(--border);
-      position: sticky; top: 0; z-index: 10;
+      display: flex;
+      align-items: center;
+      gap: 14px;
+      flex-wrap: wrap;
+      padding: 14px 22px;
+      background: var(--panel);
+      border-bottom: 1px solid var(--border);
+      position: sticky;
+      top: 0;
+      z-index: 10;
     }
-    header h1 { font-size: 16px; margin: 0; font-weight: 600; }
-    .role { font-size: 11px; font-weight: 700; letter-spacing: .5px; text-transform: uppercase;
-      padding: 3px 8px; border-radius: 4px; background: rgba(74,168,255,.15); color: var(--accent);
-      border: 1px solid rgba(74,168,255,.4); }
-    .spacer { flex: 1; }
-    .ns { color: var(--muted); font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12px; }
-    .cluster { text-align: right; line-height: 1.25; }
-    .cluster .cid { font-size: 13px; font-weight: 600; color: var(--fg); font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
-    .cluster .lid { font-size: 11px; color: var(--muted); font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
-    main { max-width: 920px; margin: 0 auto; padding: 0 22px; }
+
+    header h1 {
+      font-size: 16px;
+      margin: 0;
+      font-weight: 600;
+    }
+
+    .role {
+      font-size: 11px;
+      font-weight: 700;
+      letter-spacing: .5px;
+      text-transform: uppercase;
+      padding: 3px 8px;
+      border-radius: 4px;
+      background: rgba(74, 168, 255, .15);
+      color: var(--accent);
+      border: 1px solid rgba(74, 168, 255, .4);
+    }
+
+    .spacer {
+      flex: 1;
+    }
+
+    .ns {
+      color: var(--muted);
+      font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+      font-size: 12px;
+    }
+
+    .cluster {
+      text-align: right;
+      line-height: 1.25;
+    }
+
+    .cluster .cid {
+      font-size: 13px;
+      font-weight: 600;
+      color: var(--fg);
+      font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+    }
+
+    .cluster .lid {
+      font-size: 11px;
+      color: var(--muted);
+      font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+    }
+
+    main {
+      max-width: 920px;
+      margin: 0 auto;
+      padding: 0 22px;
+    }
+
     section {
-      background: var(--panel); border: 1px solid var(--border); border-radius: 10px;
-      padding: 18px 20px; margin-top: 18px;
+      background: var(--panel);
+      border: 1px solid var(--border);
+      border-radius: 10px;
+      padding: 18px 20px;
+      margin-top: 18px;
     }
+
     section h2 {
-      font-size: 13px; font-weight: 600; text-transform: uppercase; letter-spacing: .6px;
-      color: var(--muted); margin: 0 0 4px;
+      font-size: 13px;
+      font-weight: 600;
+      text-transform: uppercase;
+      letter-spacing: .6px;
+      color: var(--muted);
+      margin: 0 0 4px;
     }
-    section p.hint { color: var(--muted); font-size: 12px; margin: 0 0 14px; }
-    .cards { display: flex; gap: 12px; flex-wrap: wrap; }
+
+    section p.hint {
+      color: var(--muted);
+      font-size: 12px;
+      margin: 0 0 14px;
+    }
+
+    .cards {
+      display: flex;
+      gap: 12px;
+      flex-wrap: wrap;
+    }
+
     .opt {
-      flex: 1; min-width: 140px; cursor: pointer; user-select: none;
-      background: var(--panel-2); border: 1px solid var(--border); border-radius: 8px;
-      padding: 14px 16px; transition: border-color .12s, background .12s;
+      flex: 1;
+      min-width: 140px;
+      cursor: pointer;
+      user-select: none;
+      background: var(--panel-2);
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      padding: 14px 16px;
+      transition: border-color .12s, background .12s;
     }
-    .opt:hover { border-color: var(--accent); }
-    .opt.sel { border-color: var(--accent); background: rgba(74,168,255,.12); box-shadow: 0 0 0 1px var(--accent) inset; }
-    .opt .t { font-weight: 600; font-size: 14px; }
-    .opt .d { color: var(--muted); font-size: 12px; margin-top: 4px; }
-    .row { display: flex; align-items: center; gap: 14px; flex-wrap: wrap; }
-    select, input[type=text] {
-      background: var(--bg); color: var(--fg); border: 1px solid var(--border);
-      border-radius: 6px; padding: 9px 11px; font-size: 14px; min-width: 220px;
+
+    .opt:hover {
+      border-color: var(--accent);
     }
-    select:focus, input:focus { outline: none; border-color: var(--accent); }
+
+    .opt.sel {
+      border-color: var(--accent);
+      background: rgba(74, 168, 255, .12);
+      box-shadow: 0 0 0 1px var(--accent) inset;
+    }
+
+    .opt .t {
+      font-weight: 600;
+      font-size: 14px;
+    }
+
+    .opt .d {
+      color: var(--muted);
+      font-size: 12px;
+      margin-top: 4px;
+    }
+
+    .row {
+      display: flex;
+      align-items: center;
+      gap: 14px;
+      flex-wrap: wrap;
+    }
+
+    select,
+    input[type=text] {
+      background: var(--bg);
+      color: var(--fg);
+      border: 1px solid var(--border);
+      border-radius: 6px;
+      padding: 9px 11px;
+      font-size: 14px;
+      min-width: 220px;
+    }
+
+    select:focus,
+    input:focus {
+      outline: none;
+      border-color: var(--accent);
+    }
+
     button {
-      background: var(--accent); color: #04121f; border: none; border-radius: 6px;
-      padding: 9px 18px; font-size: 13px; font-weight: 700; cursor: pointer;
+      background: var(--accent);
+      color: #04121f;
+      border: none;
+      border-radius: 6px;
+      padding: 9px 18px;
+      font-size: 13px;
+      font-weight: 700;
+      cursor: pointer;
     }
-    button:disabled { background: var(--panel-2); color: var(--muted); cursor: not-allowed; }
-    button.ghost { background: var(--panel-2); color: var(--fg); border: 1px solid var(--border); }
-    .submit-row { margin-top: 14px; display: flex; align-items: center; gap: 12px; }
-    .kv { display: flex; gap: 22px; flex-wrap: wrap; margin-top: 4px; }
-    .kv .label { color: var(--muted); font-size: 11px; text-transform: uppercase; letter-spacing: .5px; }
-    .kv .value { font-size: 15px; font-weight: 600; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
+
+    button:disabled {
+      background: var(--panel-2);
+      color: var(--muted);
+      cursor: not-allowed;
+    }
+
+    button.ghost {
+      background: var(--panel-2);
+      color: var(--fg);
+      border: 1px solid var(--border);
+    }
+
+    .submit-row {
+      margin-top: 14px;
+      display: flex;
+      align-items: center;
+      gap: 12px;
+    }
+
+    .kv {
+      display: flex;
+      gap: 22px;
+      flex-wrap: wrap;
+      margin-top: 4px;
+    }
+
+    .kv .label {
+      color: var(--muted);
+      font-size: 11px;
+      text-transform: uppercase;
+      letter-spacing: .5px;
+    }
+
+    .kv .value {
+      font-size: 15px;
+      font-weight: 600;
+      font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+    }
+
     /* toggle switch */
-    .switch { position: relative; display: inline-block; width: 54px; height: 28px; }
-    .switch input { opacity: 0; width: 0; height: 0; }
-    .slider { position: absolute; inset: 0; cursor: pointer; background: var(--panel-2);
-      border: 1px solid var(--border); border-radius: 999px; transition: .2s; }
-    .slider:before { content: ""; position: absolute; height: 20px; width: 20px; left: 3px; bottom: 3px;
-      background: var(--muted); border-radius: 50%; transition: .2s; }
-    .switch input:checked + .slider { background: rgba(63,185,80,.25); border-color: var(--green); }
-    .switch input:checked + .slider:before { transform: translateX(26px); background: var(--green); }
-    .wl-state { font-weight: 600; }
-    .wl-state.on { color: var(--green); }
-    .wl-state.off { color: var(--muted); }
-    #toast {
-      position: fixed; bottom: 24px; left: 50%; transform: translateX(-50%);
-      background: var(--panel); border: 1px solid var(--green); color: var(--fg);
-      padding: 11px 18px; border-radius: 8px; font-size: 13px; opacity: 0; pointer-events: none;
-      transition: opacity .25s; box-shadow: 0 8px 30px rgba(0,0,0,.4); max-width: 90vw;
+    .switch {
+      position: relative;
+      display: inline-block;
+      width: 54px;
+      height: 28px;
     }
-    #toast.show { opacity: 1; }
-    #toast.err { border-color: var(--red); }
+
+    .switch input {
+      opacity: 0;
+      width: 0;
+      height: 0;
+    }
+
+    .slider {
+      position: absolute;
+      inset: 0;
+      cursor: pointer;
+      background: var(--panel-2);
+      border: 1px solid var(--border);
+      border-radius: 999px;
+      transition: .2s;
+    }
+
+    .slider:before {
+      content: "";
+      position: absolute;
+      height: 20px;
+      width: 20px;
+      left: 3px;
+      bottom: 3px;
+      background: var(--muted);
+      border-radius: 50%;
+      transition: .2s;
+    }
+
+    .switch input:checked+.slider {
+      background: rgba(63, 185, 80, .25);
+      border-color: var(--green);
+    }
+
+    .switch input:checked+.slider:before {
+      transform: translateX(26px);
+      background: var(--green);
+    }
+
+    .wl-state {
+      font-weight: 600;
+    }
+
+    .wl-state.on {
+      color: var(--green);
+    }
+
+    .wl-state.off {
+      color: var(--muted);
+    }
+
+    #toast {
+      position: fixed;
+      bottom: 24px;
+      left: 50%;
+      transform: translateX(-50%);
+      background: var(--panel);
+      border: 1px solid var(--green);
+      color: var(--fg);
+      padding: 11px 18px;
+      border-radius: 8px;
+      font-size: 13px;
+      opacity: 0;
+      pointer-events: none;
+      transition: opacity .25s;
+      box-shadow: 0 8px 30px rgba(0, 0, 0, .4);
+      max-width: 90vw;
+    }
+
+    #toast.show {
+      opacity: 1;
+    }
+
+    #toast.err {
+      border-color: var(--red);
+    }
   </style>
 </head>
+
 <body>
   <header>
     <span class="role">Consumer</span>
     <h1>Federation Autoscaler Console</h1>
     <span class="spacer"></span>
     <span class="cluster">
-      <span class="cid" id="clusterId">—</span><br />
+      <span class="cid" id="clusterId">&#x2014;</span><br />
       <span class="lid" id="liqoId"></span>
     </span>
   </header>
@@ -117,6 +348,13 @@
       <h2>Placement policy</h2>
       <p class="hint">How the broker places your borrowed capacity. Takes effect on the next heartbeat (~15&nbsp;s).</p>
       <div class="cards" id="policyCards"></div>
+      <div id="promptWrap" style="display:none;margin-top:12px">
+        <label style="color:var(--muted);font-size:12px;display:block;margin-bottom:4px">Natural-language selection
+          prompt</label>
+        <textarea id="userPrompt" rows="3"
+          style="width:100%;background:var(--bg);color:var(--fg);border:1px solid var(--border);border-radius:6px;padding:9px 11px;font-size:14px;resize:vertical;font-family:inherit"
+          placeholder="e.g. I want the cheapest provider that is also reasonably green"></textarea>
+      </div>
       <div class="submit-row">
         <button id="policySubmit" disabled>Apply policy</button>
         <span class="ns" id="policyCurrent"></span>
@@ -126,7 +364,8 @@
     <!-- Location (auto-discovered, read-only) -->
     <section>
       <h2>Location</h2>
-      <p class="hint">Auto-discovered from this cluster's node IP — the latency strategy's origin. Read-only; set the demo override with the agent's <code>--advertised-ip</code> flag.</p>
+      <p class="hint">Auto-discovered from this cluster's node IP — the latency strategy's origin. Read-only; set the
+        demo override with the agent's <code>--advertised-ip</code> flag.</p>
       <div id="locationBox" class="hint">discovering…</div>
     </section>
 
@@ -139,9 +378,18 @@
         <span class="wl-state off" id="wlState">deleted</span>
         <span class="spacer"></span>
         <div class="kv">
-          <div><div class="label">Replicas</div><div class="value" id="wlReplicas">–</div></div>
-          <div><div class="label">Requests</div><div class="value" id="wlRequests">–</div></div>
-          <div><div class="label">Limits</div><div class="value" id="wlLimits">–</div></div>
+          <div>
+            <div class="label">Replicas</div>
+            <div class="value" id="wlReplicas">&#x2013;</div>
+          </div>
+          <div>
+            <div class="label">Requests</div>
+            <div class="value" id="wlRequests">&#x2013;</div>
+          </div>
+          <div>
+            <div class="label">Limits</div>
+            <div class="value" id="wlLimits">&#x2013;</div>
+          </div>
         </div>
       </div>
     </section>
@@ -149,7 +397,8 @@
     <!-- Manual reservation -->
     <section>
       <h2>Manual reservation</h2>
-      <p class="hint">Reserve federated capacity up front — no pending pods needed. Each reservation is sized into whole chunks and peered on a broker-chosen provider. Release a specific one from the list.</p>
+      <p class="hint">Reserve federated capacity up front &#x2014; no pending pods needed. Each reservation is sized
+        into whole chunks and peered on a broker-chosen provider. Release a specific one from the list.</p>
       <div class="row">
         <label>CPU <input type="text" id="mrCpu" placeholder="e.g. 4" style="width:6rem"></label>
         <label>Memory <input type="text" id="mrMem" placeholder="e.g. 8Gi" style="width:7rem"></label>
@@ -169,10 +418,12 @@
     "use strict";
 
     const POLICIES = [
-      { value: "",        t: "Standard",  d: "Default: balance free capacity, prefer renewable." },
-      { value: "Price",   t: "Price",     d: "Prefer the cheapest provider." },
-      { value: "Eco",     t: "Eco",       d: "Prefer the lowest-carbon provider." },
-      { value: "Latency", t: "Latency",   d: "Probe the nearest few; grow the lowest measured latency." },
+      { value: "", t: "Standard", d: "Default: balance free capacity, prefer renewable." },
+      { value: "Price", t: "Price", d: "Prefer the cheapest provider." },
+      { value: "Eco", t: "Eco", d: "Prefer the lowest-carbon provider." },
+      { value: "Latency", t: "Latency", d: "Probe the nearest few; grow the lowest measured latency." },
+      { value: "ConsumerChoice", t: "AI Choice", d: "Local AI picks based on your prompt." },
+      { value: "Random", t: "Random", d: "Pick a random available provider (lowest broker load)." },
     ];
 
     let current = { policy: "", workloadPresent: false };
@@ -195,7 +446,7 @@
       });
       if (!res.ok) {
         let msg = "HTTP " + res.status;
-        try { const j = await res.json(); if (j.error) msg = j.error; } catch (e) {}
+        try { const j = await res.json(); if (j.error) msg = j.error; } catch (e) { }
         throw new Error(msg);
       }
       return res.json();
@@ -213,6 +464,8 @@
         card.onclick = () => { selectedPolicy = p.value; renderPolicyCards(); refreshPolicySubmit(); };
         wrap.appendChild(card);
       }
+      document.getElementById("promptWrap").style.display =
+        selectedPolicy === "ConsumerChoice" ? "block" : "none";
     }
     function refreshPolicySubmit() {
       document.getElementById("policySubmit").disabled = (selectedPolicy === current.policy);
@@ -239,23 +492,25 @@
     }
 
     function fmtRes(m) {
-      if (!m) return "–";
+      if (!m) return "\u2013";
       const parts = [];
       if (m.cpu) parts.push(m.cpu + " CPU");
       if (m.memory) parts.push(m.memory);
-      return parts.length ? parts.join(" / ") : "–";
+      return parts.length ? parts.join(" / ") : "\u2013";
     }
 
     async function loadState() {
       const res = await fetch("/api/state", { cache: "no-store" });
       const st = await res.json();
-      document.getElementById("clusterId").textContent = "cluster: " + (st.clusterId || "—");
+      document.getElementById("clusterId").textContent = "cluster: " + (st.clusterId || "\u2014");
       document.getElementById("liqoId").textContent = st.liqoClusterId ? "liqo: " + st.liqoClusterId : "";
       current.policy = st.policy || "";
+      current.userPrompt = st.userPrompt || "";
       selectedPolicy = current.policy;
       renderPolicyCards();
       refreshPolicySubmit();
       document.getElementById("policyCurrent").textContent = "current: " + labelFor(current.policy);
+      document.getElementById("userPrompt").value = current.userPrompt;
 
       renderLocation(st.location);
 
@@ -266,7 +521,7 @@
       const stEl = document.getElementById("wlState");
       stEl.textContent = current.workloadPresent ? "applied" : "deleted";
       stEl.className = "wl-state " + (current.workloadPresent ? "on" : "off");
-      document.getElementById("wlReplicas").textContent = (wl.replicas != null ? String(wl.replicas) : "–");
+      document.getElementById("wlReplicas").textContent = (wl.replicas != null ? String(wl.replicas) : "\u2013");
       document.getElementById("wlRequests").textContent = fmtRes(wl.requests);
       document.getElementById("wlLimits").textContent = fmtRes(wl.limits);
 
@@ -276,21 +531,22 @@
       mrSel.textContent = "";
       if (!reservations.length) {
         const o = document.createElement("option");
-        o.value = ""; o.textContent = "— no active reservations —";
+        o.value = ""; o.textContent = "\u2014 no active reservations \u2014";
         mrSel.appendChild(o);
         document.getElementById("mrRelease").disabled = true;
       } else {
         for (const rvn of reservations) {
           const o = document.createElement("option");
           o.value = rvn.name;
-          const size = [rvn.cpu ? rvn.cpu + " CPU" : null, rvn.memory, rvn.gpu ? rvn.gpu + " GPU" : null].filter(Boolean).join(" / ") || "—";
-          const bits = [rvn.phase || "—"];
+          const size = [rvn.cpu ? rvn.cpu + " CPU" : null, rvn.memory, rvn.gpu ? rvn.gpu + " GPU" : null].filter(Boolean).join(" / ") || "\u2014";
+          const bits = [rvn.phase || "\u2014"];
           if (rvn.provider) bits.push(rvn.provider);
           if (rvn.chunks) bits.push(rvn.chunks + " chunk" + (rvn.chunks === 1 ? "" : "s"));
           // During a re-eval migration (feature 7) the message tells the story
           // ("migrating from p1 to p2") while the provider still shows the old one.
           if (rvn.phase === "Migrating" && rvn.message) bits.push(rvn.message);
           o.textContent = size + "  ·  " + bits.join(" · ");
+          o.textContent = size + "  \u00b7  " + bits.join(" \u00b7 ");
           mrSel.appendChild(o);
         }
         if (prev && reservations.some(r => r.name === prev)) mrSel.value = prev;
@@ -300,8 +556,12 @@
 
     document.getElementById("policySubmit").onclick = async () => {
       try {
-        await postJSON("/api/policy", { type: selectedPolicy });
-        toast("Policy set to “" + labelFor(selectedPolicy) + "” — takes effect within ~15 s");
+        const body = { type: selectedPolicy };
+        if (selectedPolicy === "ConsumerChoice") {
+          body.userPrompt = document.getElementById("userPrompt").value;
+        }
+        await postJSON("/api/policy", body);
+        toast("Policy set to \u201c" + labelFor(selectedPolicy) + "\u201d \u2014 takes effect within ~15 s");
         await loadState();
       } catch (e) { toast(e.message, true); }
     };
@@ -309,7 +569,7 @@
       const action = ev.target.checked ? "apply" : "delete";
       try {
         await postJSON("/api/workload", { action });
-        toast(action === "apply" ? "Workload applied — scale-up begins shortly" : "Workload deleted — scale-down begins shortly");
+        toast(action === "apply" ? "Workload applied \u2014 scale-up begins shortly" : "Workload deleted \u2014 scale-down begins shortly");
         await loadState();
       } catch (e) { toast(e.message, true); await loadState(); }
     };
@@ -319,7 +579,7 @@
       const gpu = document.getElementById("mrGpu").value.trim();
       try {
         await postJSON("/api/reservation", { action: "apply", cpu, memory, gpu });
-        toast("Reservation created — peering begins shortly");
+        toast("Reservation created \u2014 peering begins shortly");
         document.getElementById("mrCpu").value = "";
         document.getElementById("mrMem").value = "";
         document.getElementById("mrGpu").value = "";
@@ -331,7 +591,7 @@
       if (!name) { toast("Select a reservation to release", true); return; }
       try {
         await postJSON("/api/reservation", { action: "delete", name });
-        toast("Reservation released — unpeering shortly");
+        toast("Reservation released \u2014 unpeering shortly");
         await loadState();
       } catch (e) { toast(e.message, true); }
     };
@@ -342,4 +602,5 @@
     })();
   </script>
 </body>
+
 </html>

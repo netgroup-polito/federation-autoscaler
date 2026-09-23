@@ -1,0 +1,33 @@
+# Smoke test for latency-test.yaml's cadence, not an experiment.
+# See eco-smoke.yaml for the rationale; same shape, latency side.
+#
+# What this one is specifically checking, beyond the cadence: that the
+# prober-cache drain comparative-latency now waits out at the start of BOTH
+# phases actually removes the stale window at the top of Phase B, where
+# Consumers used to keep serving RTTs measured against Phase A's final delays.
+
+consumers: 5
+providers: 15
+
+experiment:
+  mode: reserve
+  duration: time
+  timer: 6m
+  iterations: 15 # ignored while duration: time; kept as a fallback value
+  phasePause: 35s
+  policyPropagationWait: 35s
+  advertisementLag: 35s
+
+  # Must match latency-test.yaml exactly.
+  latencyRefreshInterval: 2m
+  latencyMinMs: 30
+  latencyMaxMs: 250
+
+infra:
+  readinessTimeout: 10m
+  liqoProvider: kind
+
+cleanup: true
+
+output:
+  dir: results

@@ -47,6 +47,11 @@ endif
 # scaffolded by default. However, you might want to replace it to use other
 # tools. (i.e. podman)
 CONTAINER_TOOL ?= docker
+# Extra flags for every `make docker-build` image build. Set
+# DOCKER_BUILD_FLAGS=--network=host on a host whose containers cannot resolve
+# DNS: the build then downloads Go modules through the host's network. Empty
+# by default.
+DOCKER_BUILD_FLAGS ?=
 
 # liqoctl version + the host-cached binary path. The agent image bundles
 # liqoctl on $PATH; we fetch it on the host (where curl reaches GitHub
@@ -180,7 +185,7 @@ docker-build: $(LIQOCTL_BIN) ## Build container image(s). Set COMPONENT=<one> to
 	for c in $$targets; do \
 		img="$(IMG_PREFIX)/$$c:$(TAG)"; \
 		echo ">>> building image $$img"; \
-		$(CONTAINER_TOOL) build \
+		$(CONTAINER_TOOL) build $(DOCKER_BUILD_FLAGS) \
 			--build-arg COMPONENT=$$c \
 			--build-arg LIQOCTL_BIN=$(LIQOCTL_BIN) \
 			-t $$img . || exit 1; \

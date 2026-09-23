@@ -1,0 +1,84 @@
+# ConsumerChoice end-to-end validation -- smoke test (one eco-oriented decision)
+#
+# Run:  ./federation-tests/consumerchoice/run-consumerchoice.sh --config federation-tests/consumerchoice/configs/default.yaml
+#
+# The only thing you normally edit is scenarios[].userRequest. Everything else
+# (clusters, Broker, agents, Liqo, mocks, Ollama, the model) is created and torn
+# down by the run. See federation-tests/consumerchoice/README.md.
+
+consumers: 1
+providers: 9
+# One region per provider, index-aligned with providerProfiles below. The
+# consumer is placed in providerRegions[0] (Milan), so provider-1 is co-located
+# with it -- and deliberately given a dirty grid, so "nearest" is a real trade-off.
+providerRegions: [LOM, CH, IDF, HE, AT, ENG, FI, MH, QC]
+
+experiment:
+  reservationPoll: 5s
+  reservationTimeout: 10m
+
+infra:
+  readinessTimeout: 15m
+  liqoProvider: kind
+
+cleanup: true   # false keeps clusters and the Ollama container for inspection
+
+output:
+  dir: results  # results/consumerchoice/<UTC timestamp>/
+
+consumerChoice:
+  mode: consumerchoice   # must be exactly this; anything else aborts the run
+  repetitions: 1
+  metadataTimeout: 5m
+  policyTimeout: 2m
+
+  ollama:
+    managed: true                  # start a dedicated Ollama container for this run
+    image: ollama/ollama:0.34.0    # pinned for reproducibility
+    model: llama3.2
+    pullIfMissing: true            # first run downloads the model (~2 GB) into the cache volume
+    pullTimeout: 30m
+    modelCacheVolume: federation-autoscaler-ollama
+    removeModelCache: false
+    gpu: false                     # true adds --gpus all (needs the NVIDIA container toolkit)
+    # The model is queried exactly as the consumer agent queries it: JSON mode and
+    # Ollama's default sampling. timeout is one decision; the agent gets the same
+    # value as --ollama-timeout (a 3B model on CPU needs tens of seconds).
+    timeout: 120s
+    warmupTimeout: 5m              # first call also loads the model into memory
+
+  # Once per scenario, the consumer agent decides on its own: a manual reservation
+  # goes through its local API, which asks the model and reserves the provider it
+  # ranks first. The harness then checks that is where the reservation landed.
+  agentPath:
+    enabled: true
+    cpu: "1"                       # must fit in one chunk (2 CPU / 4Gi)
+    memory: 1Gi
+    timeout: 10m                   # until the borrowed virtual node is Active
+
+  fallback:
+    mode: agent-default   # fail | agent-default | cheapest-eligible | lowest-carbon-eligible
+
+  # What each provider advertises. carbonIntensity in gCO2eq/kWh; prices per unit
+  # per hour (cpu per core, memory per GiB); a chunk is 2 CPU / 4 GiB, so the
+  # capacity gives the chunk count noted at the end of each line.
+  providerProfiles:
+    - { carbonIntensity: 520, prices: { cpu: "0.030", memory: "0.0040" }, capacity: { cpu: "4000m", memory: "8Gi" } }   # provider-1 Milan        0 km  dirty, nearest      2 chunks
+    - { carbonIntensity: 45,  prices: { cpu: "0.045", memory: "0.0060" }, capacity: { cpu: "4000m", memory: "8Gi" } }   # provider-2 Zurich    ~220 km  green, dearest      2 chunks
+    - { carbonIntensity: 60,  prices: { cpu: "0.035", memory: "0.0050" }, capacity: { cpu: "6000m", memory: "12Gi" } }  # provider-3 Paris     ~640 km  green               3 chunks
+    - { carbonIntensity: 350, prices: { cpu: "0.020", memory: "0.0030" }, capacity: { cpu: "4000m", memory: "8Gi" } }   # provider-4 Frankfurt ~520 km                      2 chunks
+    - { carbonIntensity: 150, prices: { cpu: "0.030", memory: "0.0040" }, capacity: { cpu: "2000m", memory: "4Gi" } }   # provider-5 Vienna    ~620 km                      1 chunk
+    - { carbonIntensity: 230, prices: { cpu: "0.022", memory: "0.0030" }, capacity: { cpu: "6000m", memory: "12Gi" } }  # provider-6 London    ~960 km                      3 chunks
+    - { carbonIntensity: 35,  prices: { cpu: "0.025", memory: "0.0035" }, capacity: { cpu: "4000m", memory: "8Gi" } }   # provider-7 Helsinki ~1940 km  very green          2 chunks
+    - { carbonIntensity: 720, prices: { cpu: "0.010", memory: "0.0015" }, capacity: { cpu: "8000m", memory: "16Gi" } }  # provider-8 Mumbai   ~6470 km  dirtiest, cheapest, farthest  4 chunks
+    - { carbonIntensity: 25,  prices: { cpu: "0.032", memory: "0.0045" }, capacity: { cpu: "4000m", memory: "8Gi" } }   # provider-9 Montreal ~6130 km  greenest, far       2 chunks
+
+  # Criteria are judged afterwards on measurable ranks among the eligible
+  # providers (1 = lowest value). They never use the model's own "reason".
+  scenarios:
+    - name: eco-oriented
+      userRequest: "Prioritize the greenest provider. Latency is secondary."
+      criterion:
+        type: eco
+        maxCarbonRank: 2          # the greenest or second greenest
+      referenceWeights: { carbon: 1.0, distance: 0.0, cost: 0.0 }

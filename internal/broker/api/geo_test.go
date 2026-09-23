@@ -41,16 +41,16 @@ func TestHaversineKm(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got := haversineKm(tt.lat1, tt.lon1, tt.lat2, tt.lon2)
+			got := HaversineKm(tt.lat1, tt.lon1, tt.lat2, tt.lon2)
 			if math.Abs(got-tt.wantKm) > tt.tolKm {
-				t.Errorf("haversineKm = %.1f km, want %.0f ± %.0f", got, tt.wantKm, tt.tolKm)
+				t.Errorf("HaversineKm = %.1f km, want %.0f ± %.0f", got, tt.wantKm, tt.tolKm)
 			}
 		})
 	}
 
 	// Distance is symmetric.
-	ab := haversineKm(montrealLat, montrealLon, sydneyLat, sydneyLon)
-	ba := haversineKm(sydneyLat, sydneyLon, montrealLat, montrealLon)
+	ab := HaversineKm(montrealLat, montrealLon, sydneyLat, sydneyLon)
+	ba := HaversineKm(sydneyLat, sydneyLon, montrealLat, montrealLon)
 	if math.Abs(ab-ba) > 1e-6 {
 		t.Errorf("haversine not symmetric: %.6f vs %.6f", ab, ba)
 	}

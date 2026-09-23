@@ -27,3 +27,38 @@
     name: console
     containerPort: 9095
     protocol: TCP
+# ConsumerChoice LLM, from agent-config (config/agent/base/configmap.yaml). An
+# empty ollamaUrl leaves --ollama-url empty, which disables the LLM.
+- op: add
+  path: /spec/template/spec/containers/0/env/-
+  value:
+    name: OLLAMA_URL
+    valueFrom:
+      configMapKeyRef:
+        name: agent-config
+        key: ollamaUrl
+- op: add
+  path: /spec/template/spec/containers/0/env/-
+  value:
+    name: OLLAMA_MODEL
+    valueFrom:
+      configMapKeyRef:
+        name: agent-config
+        key: ollamaModel
+- op: add
+  path: /spec/template/spec/containers/0/env/-
+  value:
+    name: OLLAMA_TIMEOUT
+    valueFrom:
+      configMapKeyRef:
+        name: agent-config
+        key: ollamaTimeout
+- op: add
+  path: /spec/template/spec/containers/0/args/-
+  value: --ollama-url=$(OLLAMA_URL)
+- op: add
+  path: /spec/template/spec/containers/0/args/-
+  value: --ollama-model=$(OLLAMA_MODEL)
+- op: add
+  path: /spec/template/spec/containers/0/args/-
+  value: --ollama-timeout=$(OLLAMA_TIMEOUT)

@@ -5,6 +5,7 @@
 *.so
 *.dylib
 bin/*
+certs/
 Dockerfile.cross
 
 # Test binary, built with `go test -c`
@@ -19,12 +20,31 @@ go.work
 # Kubernetes Generated files - skip generated files, except for vendored files
 !vendor/**/zz_generated.*
 
+# Compiled test binaries (go build ./federation-tests/comparative-*)
+/comparative-eco
+/comparative-latency
+federation-tests/comparative-eco/comparative-eco
+federation-tests/comparative-latency/comparative-latency
+# Test results generated inside test directories
+federation-tests/comparative-eco/results/
+federation-tests/comparative-latency/results/
+
+# Test results (generated per-run)
+results/
+
 # editor and IDE paraphernalia
 .idea
 .vscode
 *.swp
 *.swo
 *~
+
+# local thesis drafts (source of truth is the Overleaf project)
+/thesis/
+
+# Python bytecode from the federation-tests/scripts analysis tools
+__pycache__/
+*.pyc
 
 # Per-deployment Ansible inventory (VM addresses, registry, image tag).
 # inventory.yaml.example is the committed template.

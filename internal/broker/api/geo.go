@@ -21,14 +21,19 @@ import "math"
 // earthRadiusKm is the mean Earth radius used by the Haversine formula.
 const earthRadiusKm = 6371.0
 
-// haversineKm returns the great-circle distance, in kilometres, between two
+// HaversineKm returns the great-circle distance, in kilometres, between two
 // points given in decimal degrees. For the latency strategy the Broker ranks
 // providers by this distance to build the top-N nearest SHORTLIST (it can be
 // computed from advertised coordinates alone — no probing, no Broker dial-out).
 // The Consumer Agent then UDP-probes the shortlist to make the final,
 // measured-RTT choice (applyLatencyTopN + internal/agent/consumer/latency);
 // distance is the coarse pre-filter, real RTT is the tiebreak.
-func haversineKm(lat1, lon1, lat2, lon2 float64) float64 {
+//
+// Exported for the ConsumerChoice end-to-end suite (federation-tests/consumerchoice), which
+// judges proximity requests afterwards with the same figure the Latency policy
+// ranks on rather than a second implementation of it. The LLM itself is never
+// given a distance: it receives raw coordinates and works proximity out itself.
+func HaversineKm(lat1, lon1, lat2, lon2 float64) float64 {
 	toRad := func(deg float64) float64 { return deg * math.Pi / 180.0 }
 
 	phi1, phi2 := toRad(lat1), toRad(lat2)

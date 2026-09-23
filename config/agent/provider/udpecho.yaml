@@ -7,7 +7,16 @@
 #
 # `ghcr.io/liqotech/udpecho` listens on UDP 5000 and echoes datagrams back
 # (upper-cased). The image name is NOT rewritten by the agent-only image
-# substitution in the deploy paths, so it is pulled directly from ghcr.io.
+# substitution in the deploy paths. In the Kind test harness it is
+# preloaded via `kind load docker-image` the same way as the Liqo images
+# (see UDPEchoImage in federation-tests/testlib/infra.go) rather than pulled live by
+# the node — some environments have no working DNS/egress to ghcr.io from
+# inside a Kind node's network namespace, which otherwise leaves this pod
+# in ImagePullBackOff forever with no loud failure anywhere in the
+# experiment. imagePullPolicy below MUST stay IfNotPresent: the image tag
+# is implicitly "latest", and Kubernetes defaults untagged/`:latest`
+# images to Always, which would re-attempt (and fail) the live pull on
+# every scheduling even with the image already preloaded.
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -31,6 +40,7 @@ spec:
       containers:
       - name: echo-server
         image: ghcr.io/liqotech/udpecho
+        imagePullPolicy: IfNotPresent
         ports:
         - name: udpecho
           containerPort: 5000

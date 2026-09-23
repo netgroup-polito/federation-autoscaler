@@ -8,11 +8,15 @@
 # 3. Append --capacity-file pointing at the mounted capacity ConfigMap, and mount
 #    it. Same re-read-every-cycle semantics; ships empty so a provider with no
 #    cap set advertises its full allocatable exactly as before.
-# 4. Append --mock-eco-url (provider-only) for the eco strategy; the region file
-#    and --mock-geo-url come from the base. Empty URL ⇒ advertise no carbon.
+# 4. Append --mock-eco-url and --eco-cache-ttl (provider-only) for the eco
+#    strategy; the region file and --mock-geo-url come from the base. Empty
+#    URL ⇒ advertise no carbon.
 - op: add
   path: /spec/template/spec/containers/0/args/-
   value: --mock-eco-url=$(MOCK_ECO_URL)
+- op: add
+  path: /spec/template/spec/containers/0/args/-
+  value: --eco-cache-ttl=$(ECO_CACHE_TTL)
 - op: add
   path: /spec/template/spec/containers/0/args/-
   value: --role=provider

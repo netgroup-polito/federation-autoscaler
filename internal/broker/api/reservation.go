@@ -93,24 +93,14 @@ func (s *Server) handleReservationCreate(w http.ResponseWriter, r *http.Request)
 		return
 	}
 
-	// Resolve the matching ClusterAdvertisement and check available capacity.
+	// Resolve the matching ClusterAdvertisement (chunkType + Available check).
+	// The chunk-count availability check happens later, atomically with the
+	// reservation itself, via reserveChunks — see its doc comment for why a
+	// plain read-then-check here would race under concurrent requests.
 	cadv, errResp, status := s.findAdvertisement(ctx, req.ProviderClusterID, req.ChunkType)
 	if errResp != nil {
 		errResp.RequestID = requestID
 		writeError(w, status, *errResp)
-		return
-	}
-	if cadv.Status.AvailableChunks < req.ChunkCount {
-		writeError(w, http.StatusConflict, ErrorResponse{
-			Code: ErrCodeInsufficientCapacity,
-			Message: fmt.Sprintf("provider %q has %d chunks available; %d requested",
-				req.ProviderClusterID, cadv.Status.AvailableChunks, req.ChunkCount),
-			Details: map[string]any{
-				"available": cadv.Status.AvailableChunks,
-				"requested": req.ChunkCount,
-			},
-			RequestID: requestID,
-		})
 		return
 	}
 
@@ -150,6 +140,33 @@ func (s *Server) handleReservationCreate(w http.ResponseWriter, r *http.Request)
 		return
 	}
 
+	// Atomically check-and-reserve the requested chunks. Must happen before
+	// creating the Reservation object: this is the sole capacity gate now
+	// (see reserveChunks's doc comment for why it replaced a plain read
+	// followed by a later, separate increment).
+	reserved, available, err := s.reserveChunks(ctx, cadv.Name, req.ChunkCount)
+	if err != nil {
+		s.log.Error(err, "reserve chunks failed", "clusterId", cadv.Name, "requestId", requestID)
+		writeError(w, http.StatusInternalServerError, ErrorResponse{
+			Code: ErrCodeInternalError, Message: "reservation capacity update failed",
+			RequestID: requestID,
+		})
+		return
+	}
+	if !reserved {
+		writeError(w, http.StatusConflict, ErrorResponse{
+			Code: ErrCodeInsufficientCapacity,
+			Message: fmt.Sprintf("provider %q has %d chunks available; %d requested",
+				req.ProviderClusterID, available, req.ChunkCount),
+			Details: map[string]any{
+				"available": available,
+				"requested": req.ChunkCount,
+			},
+			RequestID: requestID,
+		})
+		return
+	}
+
 	// Re-run the sizer over the provider's advertised capacity to recover
 	// per-chunk resources. The CRD's spec.resources field is +required,
 	// so we cannot leave it nil — it is also exactly the value Cluster
@@ -160,6 +177,13 @@ func (s *Server) handleReservationCreate(w http.ResponseWriter, r *http.Request)
 		consumerEntry.LiqoClusterID, cadv.Spec.LiqoClusterID, perChunk)
 	if err := s.client.Create(ctx, resv); err != nil {
 		s.log.Error(err, "create Reservation failed", "name", resName, "requestId", requestID)
+		// Roll back the chunks we just reserved — otherwise they stay marked
+		// reserved with no Reservation object behind them, permanently
+		// shrinking this provider's real availability.
+		if rbErr := s.adjustReservedChunks(ctx, cadv.Name, -req.ChunkCount); rbErr != nil {
+			s.log.Error(rbErr, "rollback reservedChunks after failed create also failed",
+				"clusterId", cadv.Name, "requestId", requestID)
+		}
 		writeError(w, http.StatusInternalServerError, ErrorResponse{
 			Code: ErrCodeInternalError, Message: "reservation persistence failed",
 			RequestID: requestID,
@@ -172,13 +196,6 @@ func (s *Server) handleReservationCreate(w http.ResponseWriter, r *http.Request)
 	if err := s.initReservationStatus(ctx, resv); err != nil {
 		s.log.Info("initial Reservation status update failed",
 			"err", err.Error(), "name", resName, "requestId", requestID)
-	}
-
-	// Bump the advertisement's reserved count. Conflict-retry up to 3 times
-	// because the ClusterAdvertisement reconciler may also update status.
-	if err := s.adjustReservedChunks(ctx, cadv.Name, +req.ChunkCount); err != nil {
-		s.log.Error(err, "increment reservedChunks failed",
-			"clusterId", cadv.Name, "delta", req.ChunkCount, "requestId", requestID)
 	}
 
 	writeJSON(w, http.StatusCreated, reservationResponseFromCR(resv))
@@ -351,6 +368,45 @@ func (s *Server) adjustReservedChunks(ctx context.Context, clusterID string, del
 		return nil
 	}
 	return errors.New("exhausted conflict retries updating ClusterAdvertisement status")
+}
+
+// reserveChunks atomically checks and reserves `count` chunks against the
+// named ClusterAdvertisement, retrying on optimistic-concurrency conflicts
+// so the availability check and the increment always happen against the
+// SAME read — closing the race where two concurrent requests could both
+// see "capacity available" before either commits its increment, admitting
+// more reservations than the provider actually has room for (observed at
+// low chunk counts: current_reserved ending up above max_size).
+//
+// ok=false, available=N means insufficient capacity (N chunks were free at
+// the moment the check actually committed against the API server) — the
+// caller should reject with 409 and create nothing. A non-nil err is an
+// infrastructure failure (distinct from "insufficient capacity").
+func (s *Server) reserveChunks(ctx context.Context, clusterID string, count int32) (ok bool, available int32, err error) {
+	for attempt := 0; attempt < 3; attempt++ {
+		cadv := &brokerv1alpha1.ClusterAdvertisement{}
+		if err := s.client.Get(ctx, types.NamespacedName{Name: clusterID, Namespace: s.namespace}, cadv); err != nil {
+			return false, 0, err
+		}
+		if cadv.Status.AvailableChunks < count {
+			return false, cadv.Status.AvailableChunks, nil
+		}
+		next := cadv.Status.ReservedChunks + count
+		cadv.Status.ReservedChunks = next
+		avail := cadv.Status.TotalChunks - next
+		if avail < 0 {
+			avail = 0
+		}
+		cadv.Status.AvailableChunks = avail
+		if err := s.client.Status().Update(ctx, cadv); err != nil {
+			if apierrors.IsConflict(err) {
+				continue
+			}
+			return false, 0, err
+		}
+		return true, avail, nil
+	}
+	return false, 0, errors.New("exhausted conflict retries reserving chunks")
 }
 
 // sameReservationRequest reports whether an existing Reservation matches a

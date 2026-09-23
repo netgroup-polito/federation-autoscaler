@@ -57,6 +57,7 @@ federation-autoscaler/
 │   ├── ansible/    # 4-host k3s demo install: playbooks, roles, demo-up.sh (one-command), samples
 │   └── standalone/ # per-cluster deploy scripts (no Ansible / no cert-manager); one script per role + join bundles
 ├── docs/           # design.md (as-built), diagrams/
+├── federation-tests/ # experiment harnesses: comparative eco/latency, ConsumerChoice, Broker scalability
 ├── hack/           # development scripts
 ├── internal/       # controllers, broker REST API, agent core, gRPC server
 ├── test/
@@ -126,6 +127,7 @@ kubectl --kubeconfig ~/.kube/consumer-1.yaml delete -f ~/federation-autoscaler/d
 
 - **[docs/design.md](docs/design.md)** — full architectural proposal (v3.2, as-built) with `Implemented in:` footers.
 - **[docs/diagrams/](docs/diagrams/)** — Mermaid sources + PNG renderings of the architecture / registration / scale-up / scale-down flows.
+- **[federation-tests/guide.md](federation-tests/guide.md)** — how to run the experiments (comparative eco/latency, ConsumerChoice, scalability): requirements, commands, result validation, and the machine they were run on.
 
 ---
 

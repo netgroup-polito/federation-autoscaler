@@ -62,15 +62,27 @@ spec:
                     description: |-
                       Type selects the placement strategy. Empty means the Broker default — the
                       "Standard" composite (balance free capacity, prefer renewable). Supported
-                      values are "Standard", "Price" (cheapest), "Eco" (lowest carbon), and
-                      "Latency" (closest).
+                      values are "Standard", "Price" (cheapest), "Eco" (lowest carbon),
+                      "Latency" (closest), "ConsumerChoice" (a local LLM chooses from the
+                      user's natural-language request), and "Random".
                     enum:
                     - Standard
                     - Price
                     - Eco
                     - Latency
+                    - ConsumerChoice
+                    - Random
                     type: string
                 type: object
+              userPrompt:
+                description: |-
+                  UserPrompt is the natural-language selection request used by the
+                  ConsumerChoice strategy. The Consumer Agent passes it alongside the
+                  provider list to a local LLM (e.g. Ollama) which interprets it and
+                  selects a single provider. Ignored for other strategies. Example:
+                  "I want the cheapest provider that is also reasonably green".
+                  Re-read every heartbeat so changes take effect without a restart.
+                type: string
             type: object
         required:
         - spec

@@ -98,8 +98,12 @@ func main() {
 		renewableFile         string
 		advertisedIP          string
 		mockEcoURL            string
+		ecoCacheTTL           time.Duration
 		mockGeoURL            string
 		probeUDPPort          int
+		ollamaURL             string
+		ollamaModel           string
+		ollamaTimeout         time.Duration
 	)
 
 	flag.StringVar(&role, "role", "",
@@ -168,6 +172,12 @@ func main() {
 		"(provider role only) Base URL of the carbon-intensity service, e.g. "+
 			"http://mock-eco:8081. Keyed by the discovered region code. Empty ⇒ "+
 			"advertise no carbon intensity.")
+	flag.DurationVar(&ecoCacheTTL, "eco-cache-ttl", time.Hour,
+		"(provider role only) How long a region's carbon intensity/forecast is "+
+			"cached before re-fetching from --mock-eco-url. Production carbon data "+
+			"changes at most hourly, hence the 1h default; comparative-eco test runs "+
+			"lower this to match their carbonRefreshInterval so providers actually "+
+			"observe the periodic mock-eco re-randomization within a phase.")
 	flag.StringVar(&mockGeoURL, "mock-geo-url", "",
 		"Base URL of the geo-IP service, e.g. http://mock-geo:8080. Used by both "+
 			"roles to resolve this cluster's node IP to a region + coordinates. "+
@@ -178,6 +188,18 @@ func main() {
 			"exposed on; the provider advertises <nodeIP>:<port> as its measured-"+
 			"latency probe endpoint. Must match the agent-probe Service's nodePort. "+
 			"0 ⇒ advertise no probe endpoint (latency falls back to distance).")
+	flag.StringVar(&ollamaURL, "ollama-url", "",
+		"(consumer role only) Base URL of a local Ollama instance, e.g. "+
+			"http://localhost:11434. When set alongside a ConsumerPolicy with placement "+
+			"type ConsumerChoice, provider selection is delegated to the LLM. "+
+			"Empty ⇒ ConsumerChoice falls back to a deterministic strategy.")
+	flag.StringVar(&ollamaModel, "ollama-model", "llama3.2",
+		"(consumer role only) Ollama model name for ConsumerChoice selection. "+
+			"Ignored when --ollama-url is empty.")
+	flag.DurationVar(&ollamaTimeout, "ollama-timeout", 120*time.Second,
+		"(consumer role only) Upper bound on one ConsumerChoice LLM call. A call that "+
+			"exceeds it falls back to the deterministic strategy; a small model on CPU "+
+			"needs tens of seconds. Ignored when --ollama-url is empty.")
 
 	opts := zap.Options{Development: true}
 	opts.BindFlags(flag.CommandLine)
@@ -299,6 +321,9 @@ func main() {
 			LocalAPIAddr:      localAPIAddr,
 			HeartbeatInterval: heartbeatInterval,
 			ConsoleAddr:       consoleAddr,
+			OllamaURL:         ollamaURL,
+			OllamaModel:       ollamaModel,
+			OllamaTimeout:     ollamaTimeout,
 			Namespace:         namespace,
 			NodeName:          nodeName,
 			AdvertisedIP:      advertisedIP,
@@ -322,6 +347,7 @@ func main() {
 			NodeName:              nodeName,
 			AdvertisedIP:          advertisedIP,
 			MockEcoURL:            mockEcoURL,
+			EcoCacheTTL:           ecoCacheTTL,
 			MockGeoURL:            mockGeoURL,
 			ProbeUDPPort:          probeUDPPort,
 			AdvertisementInterval: advertisementInterval,

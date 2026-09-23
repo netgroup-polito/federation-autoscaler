@@ -38,6 +38,68 @@ ok()   { printf '\033[1;32m  ✔\033[0m %s\n' "$*"; }
 warn() { printf '\033[1;33m  ! \033[0m %s\n' "$*"; }
 die()  { printf '\033[1;31mERROR:\033[0m %s\n' "$*" >&2; exit 1; }
 
+# retry <max_attempts> <sleep_seconds> <cmd...> — run cmd, retrying on
+# failure up to max_attempts times with a fixed sleep between attempts.
+# Meant for steps that touch external network resources (e.g. `liqoctl
+# install` pulling release assets from GitHub), which can transiently fail —
+# especially under the background load a large comparative-eco/latency run
+# with many already-running Kind clusters generates on the host's own DNS
+# resolver / outbound network.
+retry() {
+  local max="$1" sleep_s="$2"; shift 2
+  local attempt=1
+  until "$@"; do
+    if (( attempt >= max )); then
+      return 1
+    fi
+    warn "command failed (attempt ${attempt}/${max}), retrying in ${sleep_s}s: $*"
+    sleep "$sleep_s"
+    attempt=$((attempt + 1))
+  done
+}
+
+# retry_liqo_install <liqoctl install args...> — like retry(), but purges any
+# partial install between attempts. A `liqoctl install` that times out (e.g.
+# under the resource pressure of many already-running Kind clusters) can
+# leave the 'liqo' namespace populated with objects no Helm release tracks
+# anymore (liqoctl's own auto-rollback removes the release but not every
+# object). Without a purge, every subsequent `liqoctl install` fails
+# instantly with `"liqo" has no deployed releases` instead of getting a real
+# fresh attempt, so the retry loop burns its whole budget doing nothing —
+# observed at ~50-cluster scale where the first install alone timed out.
+retry_liqo_install() {
+  # max=2, not 3: each attempt can now run up to --timeout (20m), and this
+  # already nests inside retryDeploy's own 3 outer attempts (federation-tests/testlib) —
+  # 3x3 at 20m each would let one stuck cluster stall for hours before the
+  # run finally gives up on it.
+  local max=2 sleep_s=15
+  local attempt=1
+  until liqoctl "$@"; do
+    if (( attempt >= max )); then
+      return 1
+    fi
+    warn "liqoctl install failed (attempt ${attempt}/${max}) — purging the partial install, retrying in ${sleep_s}s"
+    liqoctl uninstall --skip-confirm >/dev/null 2>&1 || true
+    if kubectl get namespace liqo >/dev/null 2>&1; then
+      kubectl delete namespace liqo --ignore-not-found --wait=true --timeout=120s >/dev/null 2>&1 || true
+      if kubectl get namespace liqo >/dev/null 2>&1; then
+        # Still there: it's stuck Terminating, almost always because some Liqo
+        # CR's finalizer never got cleared (its controller pod is already
+        # gone). Force-clear the namespace's own finalizer so it disappears
+        # regardless — the standard escape hatch for a stuck namespace.
+        warn "namespace 'liqo' stuck terminating — force-clearing its finalizer"
+        kubectl patch namespace liqo --type=merge -p '{"spec":{"finalizers":[]}}' --subresource=finalize >/dev/null 2>&1 || true
+        for _ in $(seq 1 12); do
+          kubectl get namespace liqo >/dev/null 2>&1 || break
+          sleep 5
+        done
+      fi
+    fi
+    sleep "$sleep_s"
+    attempt=$((attempt + 1))
+  done
+}
+
 # ----------------------------------------------------------------------------
 # Environment / tools
 # ----------------------------------------------------------------------------

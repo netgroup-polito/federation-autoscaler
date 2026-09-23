@@ -41,6 +41,14 @@ fa_mock_address: "{{ hostvars[groups['mocks'][0]].ansible_host if (groups['mocks
 fa_mock_eco_url: "{{ ('http://' + fa_mock_address + ':' + (fa_mock_eco_node_port | string)) if fa_mock_address else '' }}"
 fa_mock_geo_url: "{{ ('http://' + fa_mock_address + ':' + (fa_mock_geo_node_port | string)) if fa_mock_address else '' }}"
 
+# ConsumerChoice LLM for consumer agents (patched into agent-config). Set
+# fa_ollama_url to an Ollama server the consumer agents can reach to let a
+# ConsumerChoice policy ask the LLM; empty ⇒ ConsumerChoice uses its
+# deterministic fallback. fa_ollama_timeout bounds one LLM call.
+fa_ollama_url: ""
+fa_ollama_model: "llama3.2"
+fa_ollama_timeout: "120s"
+
 # -----------------------------------------------------------------------------
 # Software versions
 # -----------------------------------------------------------------------------

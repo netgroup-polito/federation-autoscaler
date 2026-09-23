@@ -125,6 +125,11 @@ spec:
             configMapKeyRef:
               name: agent-config
               key: mockEcoUrl
+        - name: ECO_CACHE_TTL
+          valueFrom:
+            configMapKeyRef:
+              name: agent-config
+              key: ecoCacheTtl
         - name: MOCK_GEO_URL
           valueFrom:
             configMapKeyRef:

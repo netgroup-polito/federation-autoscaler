@@ -338,6 +338,14 @@ type NodeGroupView struct {
 	HasMetric       bool              `json:"hasMetric,omitempty"`
 	Labels          map[string]string `json:"labels,omitempty"`
 	Taints          []corev1.Taint    `json:"taints,omitempty"`
+	// CarbonIntensity is the provider's advertised carbon intensity (gCO2eq/kWh).
+	// Populated when the provider advertises it; nil otherwise. Used by the
+	// ConsumerChoice AI strategy to evaluate eco-friendliness.
+	CarbonIntensity *float64 `json:"carbonIntensity,omitempty"`
+	// UnitPrices are the provider's raw per-resource unit prices (informational).
+	// Populated when the provider advertises prices; nil otherwise. Used by the
+	// ConsumerChoice AI strategy to evaluate cost.
+	UnitPrices corev1.ResourceList `json:"unitPrices,omitempty"`
 }
 
 type NodeGroupListResponse struct {

@@ -71,10 +71,22 @@ type Client struct {
 
 // NewClient returns an eco Client caching for 1 h with a 5 s per-request timeout.
 func NewClient() *Client {
+	return NewClientWithTTL(time.Hour)
+}
+
+// NewClientWithTTL returns an eco Client caching for the given TTL (production
+// values change at most hourly, hence NewClient's 1h; a test harness that
+// re-randomizes mock-eco's values on a shorter cycle should pass a TTL no
+// longer than that cycle so providers actually observe the changes). ttl <= 0
+// falls back to the 1h default.
+func NewClientWithTTL(ttl time.Duration) *Client {
+	if ttl <= 0 {
+		ttl = time.Hour
+	}
 	return &Client{
 		cache:  make(map[string]cacheEntry),
 		fcache: make(map[string]forecastEntry),
-		ttl:    time.Hour,
+		ttl:    ttl,
 		now:    time.Now,
 		http:   &http.Client{Timeout: 5 * time.Second},
 	}

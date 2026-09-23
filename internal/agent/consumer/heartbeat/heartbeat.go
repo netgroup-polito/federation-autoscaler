@@ -31,6 +31,7 @@ import (
 	"context"
 	"errors"
 	"math"
+	"sync"
 	"time"
 
 	"github.com/go-logr/logr"
@@ -129,6 +130,23 @@ type Heartbeater struct {
 	interval      time.Duration
 	log           logr.Logger
 	onResult      func(success bool)
+
+	// location is the last position the geo lookup produced. Unlike everything
+	// else here it is read from another goroutine (LastLocation), hence the lock.
+	locMu    sync.Mutex
+	location *geo.Location
+}
+
+// LastLocation returns the consumer's most recently discovered location -- the
+// one the heartbeat reports to the Broker -- and whether one is known yet. A
+// failed lookup keeps the previous value: the cluster does not move.
+func (h *Heartbeater) LastLocation() (lat, lon float64, region string, ok bool) {
+	h.locMu.Lock()
+	defer h.locMu.Unlock()
+	if h.location == nil {
+		return 0, 0, "", false
+	}
+	return h.location.Lat, h.location.Lon, h.location.Region, true
 }
 
 // New validates opts and returns a Heartbeater ready to Run. It
@@ -226,6 +244,9 @@ func (h *Heartbeater) beatOnce(ctx context.Context) {
 		req.Region = loc.Region
 		req.City = loc.City
 		req.Latitude, req.Longitude = &lat, &lon
+		h.locMu.Lock()
+		h.location = &loc
+		h.locMu.Unlock()
 	}
 	// Report the last measured-latency result (informational, for the dashboard).
 	if h.prober != nil {

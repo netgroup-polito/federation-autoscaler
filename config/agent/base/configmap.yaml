@@ -26,3 +26,16 @@ data:
   # steering lever). Empty ⇒ the agent geolocates its own node IP. Set to a value
   # inside a mock-geo CIDR to force this cluster's discovered location.
   advertisedIp: ""
+  # ecoCacheTtl (provider-only) is how long a region's carbon intensity is
+  # cached before re-fetching from mockEcoUrl. Production carbon data changes
+  # at most hourly, hence 1h; comparative-eco test runs patch this down to
+  # match their carbonRefreshInterval (see federation-tests/testlib/deploy.go) so
+  # providers actually observe the harness's periodic re-randomization.
+  ecoCacheTtl: "1h"
+  # ConsumerChoice LLM (consumer-only). ollamaUrl is the base URL of an Ollama
+  # server the agent can reach; empty ⇒ ConsumerChoice never asks an LLM and
+  # uses its deterministic fallback. ollamaTimeout bounds one LLM call.
+  # consumer-up.sh --ollama-url / the fa_consumer role set these.
+  ollamaUrl: ""
+  ollamaModel: "llama3.2"
+  ollamaTimeout: "120s"

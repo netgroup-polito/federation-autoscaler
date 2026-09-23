@@ -1,0 +1,6 @@
+# Generated at runtime — do not commit
+certs/
+results/
+bin/
+.kubeconfig-*
+.broker.pid

@@ -16,6 +16,7 @@
 #                  [--tag <tag>] [--registry <reg>] [--kubeconfig <path>]
 #                  [--namespace <ns>] [--public-endpoint <ip|host>]
 #                  [--mock-eco-url <url>] [--mock-geo-url <url>]
+#                  [--eco-cache-ttl <duration>]
 #                  [--pod-cidr <cidr>] [--service-cidr <cidr>]
 #                  [--liqo-provider <k3s|kubeadm|…>] [--skip-liqo]
 #
@@ -25,6 +26,9 @@
 #                  and be unique + DNS-safe across the federation.
 #   --mock-*-url   Optional carbon/coordinate endpoints (from mock-up.sh) enabling
 #                  the eco/latency strategies; omit for a price-only provider.
+#   --eco-cache-ttl  How long carbon intensity is cached before re-fetching from
+#                  --mock-eco-url (Go duration, e.g. "3m"). Omit to keep the
+#                  agent's 1h production default.
 #   --pod-cidr / --service-cidr  Passed to `liqoctl install`; MUST be globally
 #                  non-overlapping across the federation (Liqo network plane).
 #   --skip-liqo    Assume Liqo is already installed on this cluster.
@@ -43,6 +47,7 @@ KUBECONFIG_FLAG=""
 PUBLIC_ENDPOINT=""
 MOCK_ECO_URL=""
 MOCK_GEO_URL=""
+ECO_CACHE_TTL=""
 POD_CIDR=""
 SERVICE_CIDR=""
 LIQO_PROVIDER="k3s"
@@ -61,6 +66,7 @@ while [[ $# -gt 0 ]]; do
     --public-endpoint) PUBLIC_ENDPOINT="$2"; shift 2 ;;
     --mock-eco-url)    MOCK_ECO_URL="$2"; shift 2 ;;
     --mock-geo-url)    MOCK_GEO_URL="$2"; shift 2 ;;
+    --eco-cache-ttl)   ECO_CACHE_TTL="$2"; shift 2 ;;
     --pod-cidr)        POD_CIDR="$2"; shift 2 ;;
     --service-cidr)    SERVICE_CIDR="$2"; shift 2 ;;
     --liqo-provider)   LIQO_PROVIDER="$2"; shift 2 ;;
@@ -86,17 +92,30 @@ BROKER_URL="$(cat "$work/broker-url")"
 log "Provider deploy — cluster-id ${CLUSTER_ID}, broker ${BROKER_URL}"
 
 # 2. Liqo control plane (peering itself is on-demand at reservation time).
+# The readiness check (not just existence) matters: a liqoctl install that
+# timed out mid-way can leave the liqo-controller-manager Deployment object
+# created but never Available (its pods never come up, Helm's own release
+# tracking may even show "no deployed releases"). An existence-only check
+# would see that broken object, call it "already installed", and skip
+# retrying liqoctl forever — burning every retry attempt on a cluster that
+# can never recover on its own.
 if [[ -n "$SKIP_LIQO" ]]; then
   warn "skipping Liqo install (--skip-liqo)"
-elif kubectl get deploy liqo-controller-manager -n liqo >/dev/null 2>&1; then
-  ok "Liqo already installed — skipping"
+elif kubectl get deploy liqo-controller-manager -n liqo >/dev/null 2>&1 && \
+     kubectl -n liqo wait --for=condition=Available deploy/liqo-controller-manager --timeout=10s >/dev/null 2>&1; then
+  ok "Liqo already installed and healthy — skipping"
 else
   ensure_tools liqoctl
   log "Installing Liqo (cluster-id ${CLUSTER_ID})"
-  liqo_args=(install "$LIQO_PROVIDER" --cluster-id "$CLUSTER_ID" --timeout 10m)
+  liqo_args=(install "$LIQO_PROVIDER" --cluster-id "$CLUSTER_ID" --timeout 20m)
   [[ -n "$POD_CIDR"     ]] && liqo_args+=(--pod-cidr "$POD_CIDR")
   [[ -n "$SERVICE_CIDR" ]] && liqo_args+=(--service-cidr "$SERVICE_CIDR")
-  liqoctl "${liqo_args[@]}"
+  # Retries transient network hiccups (e.g. DNS lookup timeouts to GitHub for
+  # release assets) and purges any partial install between attempts (see
+  # retry_liqo_install in common.sh) — observed under the background load of
+  # a large comparative-eco/latency run with many already-running Kind
+  # clusters.
+  retry_liqo_install "${liqo_args[@]}"
 fi
 
 # 3. Namespace + the agent's mTLS client Secret (before the overlay mounts it).
@@ -110,10 +129,11 @@ apply_overlay "${FA_REPO_ROOT}/config/standalone/agent-provider" "agent"
 # 5. Point the agent at the broker + mocks, then restart to pick up the config.
 log "Configuring agent-config (broker + mock URLs)"
 kubectl -n "$NAMESPACE" patch configmap agent-config --type merge -p \
-  "$(printf '{"data":{"clusterId":"%s","liqoClusterId":"%s","brokerUrl":"%s","mockEcoUrl":"%s","mockGeoUrl":"%s"}}' \
-      "$CLUSTER_ID" "$CLUSTER_ID" "$BROKER_URL" "$MOCK_ECO_URL" "$MOCK_GEO_URL")" >/dev/null
+  "$(printf '{"data":{"clusterId":"%s","liqoClusterId":"%s","brokerUrl":"%s","mockEcoUrl":"%s","mockGeoUrl":"%s"%s}}' \
+      "$CLUSTER_ID" "$CLUSTER_ID" "$BROKER_URL" "$MOCK_ECO_URL" "$MOCK_GEO_URL" \
+      "${ECO_CACHE_TTL:+,\"ecoCacheTtl\":\"$ECO_CACHE_TTL\"}")" >/dev/null
 kubectl -n "$NAMESPACE" rollout restart deploy/agent
-kubectl -n "$NAMESPACE" rollout status deploy/agent --timeout=120s
+kubectl -n "$NAMESPACE" rollout status deploy/agent --timeout=300s
 
 # ----------------------------------------------------------------------------
 # Done

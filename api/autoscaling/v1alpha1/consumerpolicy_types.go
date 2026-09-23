@@ -27,7 +27,7 @@ import (
 // strategy is set the Broker ranks on that single metric instead; the Cluster
 // Autoscaler never sees the ranking metric (price, carbon, distance, or the
 // composite score).
-// +kubebuilder:validation:Enum=Standard;Price;Eco;Latency
+// +kubebuilder:validation:Enum=Standard;Price;Eco;Latency;ConsumerChoice;Random
 type PlacementStrategy string
 
 const (
@@ -56,6 +56,21 @@ const (
 	// just distance). If the consumer has not advertised a location, the Broker
 	// applies no preference (all providers stay exposed).
 	PlacementStrategyLatency PlacementStrategy = "Latency"
+
+	// PlacementStrategyConsumerChoice delegates provider selection to a local
+	// LLM (e.g. Ollama) running on the consumer cluster. The Broker returns
+	// all available providers (no masking), and the Consumer Agent passes the
+	// list plus the user's natural-language request (ConsumerPolicySpec.UserPrompt)
+	// to the AI, which picks one. Falls back deterministically if the AI is
+	// unreachable or returns an invalid choice.
+	PlacementStrategyConsumerChoice PlacementStrategy = "ConsumerChoice"
+
+	// PlacementStrategyRandom makes the Broker pick, for this consumer, a
+	// random provider with available capacity within each chunk type. Pure
+	// random on every call — no sticky cache, no ranking metric. The
+	// simplest policy, useful when the consumer has no preference and wants
+	// to minimise broker computation.
+	PlacementStrategyRandom PlacementStrategy = "Random"
 )
 
 // PlacementPolicy is the placement policy a consumer declares for itself. It is
@@ -63,8 +78,9 @@ const (
 type PlacementPolicy struct {
 	// Type selects the placement strategy. Empty means the Broker default — the
 	// "Standard" composite (balance free capacity, prefer renewable). Supported
-	// values are "Standard", "Price" (cheapest), "Eco" (lowest carbon), and
-	// "Latency" (closest).
+	// values are "Standard", "Price" (cheapest), "Eco" (lowest carbon),
+	// "Latency" (closest), "ConsumerChoice" (a local LLM chooses from the
+	// user's natural-language request), and "Random".
 	// +optional
 	Type PlacementStrategy `json:"type,omitempty"`
 }
@@ -78,6 +94,15 @@ type ConsumerPolicySpec struct {
 	// consumer's requests.
 	// +optional
 	Placement PlacementPolicy `json:"placement,omitempty,omitzero"`
+
+	// UserPrompt is the natural-language selection request used by the
+	// ConsumerChoice strategy. The Consumer Agent passes it alongside the
+	// provider list to a local LLM (e.g. Ollama) which interprets it and
+	// selects a single provider. Ignored for other strategies. Example:
+	// "I want the cheapest provider that is also reasonably green".
+	// Re-read every heartbeat so changes take effect without a restart.
+	// +optional
+	UserPrompt string `json:"userPrompt,omitempty"`
 }
 
 // +kubebuilder:object:root=true

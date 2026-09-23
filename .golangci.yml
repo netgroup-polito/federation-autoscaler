@@ -36,6 +36,10 @@ linters:
           - dupl
           - lll
         path: internal/*
+      - linters:
+          - dupl
+          - lll
+        path: federation-tests/*
     paths:
       - third_party$
       - builtin$

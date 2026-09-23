@@ -20,6 +20,7 @@
 #                  [--tag <tag>] [--registry <reg>] [--kubeconfig <path>]
 #                  [--namespace <ns>] [--public-endpoint <ip|host>]
 #                  [--mock-geo-url <url>]
+#                  [--ollama-url <url>] [--ollama-model <name>] [--ollama-timeout <dur>]
 #                  [--pod-cidr <cidr>] [--service-cidr <cidr>]
 #                  [--liqo-provider <k3s|kubeadm|…>] [--skip-liqo]
 #                  [--ca-image <img>] [--scale-down-unneeded-time <dur>]
@@ -31,10 +32,20 @@
 #                  unique + DNS-safe across the federation.
 #   --mock-geo-url Optional coordinate endpoint (from mock-up.sh) enabling the
 #                  latency strategy for this consumer; omit to opt out.
+#   --ollama-url   Optional base URL of an Ollama server the agent can reach (e.g.
+#                  http://10.0.0.5:11434). With it, a ConsumerChoice policy asks
+#                  that LLM to choose the provider; without it, ConsumerChoice
+#                  uses the deterministic fallback. --ollama-model (default
+#                  llama3.2) and --ollama-timeout (default 120s, per LLM call)
+#                  apply only when it is set.
 #   --pod-cidr / --service-cidr  Passed to `liqoctl install`; MUST be globally
 #                  non-overlapping across the federation.
 #   --scale-down-unneeded-time  CA scale-down window (default 5m; use ~1m for a
 #                  snappy demo, longer for production).
+#   --skip-cluster-autoscaler  Don't deploy Cluster Autoscaler at all (it plays
+#                  no role when something else drives scaling directly, e.g. a
+#                  test harness that talks to the broker/API and never lets CA
+#                  run — deploying it there is pure startup risk for nothing).
 #
 # By default this also installs the ArubaKube Liqo dashboard via Helm (peerings /
 # virtual nodes / offloaded pods, Ingress host liqo-dashboard.local) — pass
@@ -55,6 +66,9 @@ CLUSTER_ID=""
 KUBECONFIG_FLAG=""
 PUBLIC_ENDPOINT=""
 MOCK_GEO_URL=""
+OLLAMA_URL=""
+OLLAMA_MODEL="llama3.2"
+OLLAMA_TIMEOUT="120s"
 POD_CIDR=""
 SERVICE_CIDR=""
 LIQO_PROVIDER="k3s"
@@ -62,6 +76,7 @@ SKIP_LIQO=""
 CA_IMAGE="registry.k8s.io/autoscaling/cluster-autoscaler:v1.32.0"
 SCALE_DOWN_UNNEEDED_TIME="5m"
 SKIP_LIQO_DASHBOARD=""
+SKIP_CLUSTER_AUTOSCALER=""
 INSTALL_METRICS_SERVER=""
 LIQO_DASHBOARD_DIR="${HOME}/liqo-dashboard"
 
@@ -77,6 +92,9 @@ while [[ $# -gt 0 ]]; do
     --namespace)                 NAMESPACE="$2"; shift 2 ;;
     --public-endpoint)           PUBLIC_ENDPOINT="$2"; shift 2 ;;
     --mock-geo-url)              MOCK_GEO_URL="$2"; shift 2 ;;
+    --ollama-url)                OLLAMA_URL="$2"; shift 2 ;;
+    --ollama-model)              OLLAMA_MODEL="$2"; shift 2 ;;
+    --ollama-timeout)            OLLAMA_TIMEOUT="$2"; shift 2 ;;
     --pod-cidr)                  POD_CIDR="$2"; shift 2 ;;
     --service-cidr)              SERVICE_CIDR="$2"; shift 2 ;;
     --liqo-provider)             LIQO_PROVIDER="$2"; shift 2 ;;
@@ -84,6 +102,7 @@ while [[ $# -gt 0 ]]; do
     --ca-image)                  CA_IMAGE="$2"; shift 2 ;;
     --scale-down-unneeded-time)  SCALE_DOWN_UNNEEDED_TIME="$2"; shift 2 ;;
     --skip-liqo-dashboard)       SKIP_LIQO_DASHBOARD=1; shift ;;
+    --skip-cluster-autoscaler)   SKIP_CLUSTER_AUTOSCALER=1; shift ;;
     --install-metrics-server)    INSTALL_METRICS_SERVER=1; shift ;;
     --liqo-dashboard-dir)        LIQO_DASHBOARD_DIR="$2"; shift 2 ;;
     -h|--help)                   usage 0 ;;
@@ -153,17 +172,30 @@ BROKER_URL="$(cat "$work/broker-url")"
 log "Consumer deploy — cluster-id ${CLUSTER_ID}, broker ${BROKER_URL}"
 
 # 2. Liqo control plane (peering itself is on-demand at reservation time).
+# The readiness check (not just existence) matters: a liqoctl install that
+# timed out mid-way can leave the liqo-controller-manager Deployment object
+# created but never Available (its pods never come up, Helm's own release
+# tracking may even show "no deployed releases"). An existence-only check
+# would see that broken object, call it "already installed", and skip
+# retrying liqoctl forever — burning every retry attempt on a cluster that
+# can never recover on its own.
 if [[ -n "$SKIP_LIQO" ]]; then
   warn "skipping Liqo install (--skip-liqo)"
-elif kubectl get deploy liqo-controller-manager -n liqo >/dev/null 2>&1; then
-  ok "Liqo already installed — skipping"
+elif kubectl get deploy liqo-controller-manager -n liqo >/dev/null 2>&1 && \
+     kubectl -n liqo wait --for=condition=Available deploy/liqo-controller-manager --timeout=10s >/dev/null 2>&1; then
+  ok "Liqo already installed and healthy — skipping"
 else
   ensure_tools liqoctl
   log "Installing Liqo (cluster-id ${CLUSTER_ID})"
-  liqo_args=(install "$LIQO_PROVIDER" --cluster-id "$CLUSTER_ID" --timeout 10m)
+  liqo_args=(install "$LIQO_PROVIDER" --cluster-id "$CLUSTER_ID" --timeout 20m)
   [[ -n "$POD_CIDR"     ]] && liqo_args+=(--pod-cidr "$POD_CIDR")
   [[ -n "$SERVICE_CIDR" ]] && liqo_args+=(--service-cidr "$SERVICE_CIDR")
-  liqoctl "${liqo_args[@]}"
+  # Retries transient network hiccups (e.g. DNS lookup timeouts to GitHub for
+  # release assets) and purges any partial install between attempts (see
+  # retry_liqo_install in common.sh) — observed under the background load of
+  # a large comparative-eco/latency run with many already-running Kind
+  # clusters.
+  retry_liqo_install "${liqo_args[@]}"
 fi
 
 # 3. CRDs (VirtualNodeState + ConsumerPolicy are used on the consumer) + namespace.
@@ -189,28 +221,34 @@ apply_overlay "${FA_REPO_ROOT}/config/standalone/agent-consumer" "agent"
 log "Applying gRPC server overlay"
 apply_overlay "${FA_REPO_ROOT}/config/standalone/grpc-server" "grpc-server"
 
-# 7. Point the agent at the broker + mock-geo (consumers use mock-geo only).
-log "Configuring agent-config (broker + mock-geo URL)"
+# 7. Point the agent at the broker + mock-geo (consumers use mock-geo only) and,
+#    optionally, at the Ollama server ConsumerChoice asks (empty URL = no LLM).
+log "Configuring agent-config (broker + mock-geo URL$([[ -z "$OLLAMA_URL" ]] || echo ' + Ollama'))"
 kubectl -n "$NAMESPACE" patch configmap agent-config --type merge -p \
-  "$(printf '{"data":{"clusterId":"%s","liqoClusterId":"%s","brokerUrl":"%s","mockEcoUrl":"","mockGeoUrl":"%s"}}' \
-      "$CLUSTER_ID" "$CLUSTER_ID" "$BROKER_URL" "$MOCK_GEO_URL")" >/dev/null
+  "$(printf '{"data":{"clusterId":"%s","liqoClusterId":"%s","brokerUrl":"%s","mockEcoUrl":"","mockGeoUrl":"%s","ollamaUrl":"%s","ollamaModel":"%s","ollamaTimeout":"%s"}}' \
+      "$CLUSTER_ID" "$CLUSTER_ID" "$BROKER_URL" "$MOCK_GEO_URL" \
+      "$OLLAMA_URL" "$OLLAMA_MODEL" "$OLLAMA_TIMEOUT")" >/dev/null
 
 # 8. Cluster Autoscaler (externalgrpc -> gRPC server) + Liqo NamespaceOffloading.
-log "Applying Cluster Autoscaler"
-sed -e "s#__NAMESPACE__#${NAMESPACE}#g" \
-    -e "s#__CA_IMAGE__#${CA_IMAGE}#g" \
-    -e "s#__GRPC_ADDR__#${GRPC_ADDR}#g" \
-    -e "s#__SCALE_DOWN_UNNEEDED_TIME__#${SCALE_DOWN_UNNEEDED_TIME}#g" \
-    "${FA_STANDALONE_DIR}/manifests/cluster-autoscaler.yaml" | kubectl apply -f -
+if [[ -n "$SKIP_CLUSTER_AUTOSCALER" ]]; then
+  warn "skipping Cluster Autoscaler (--skip-cluster-autoscaler)"
+else
+  log "Applying Cluster Autoscaler"
+  sed -e "s#__NAMESPACE__#${NAMESPACE}#g" \
+      -e "s#__CA_IMAGE__#${CA_IMAGE}#g" \
+      -e "s#__GRPC_ADDR__#${GRPC_ADDR}#g" \
+      -e "s#__SCALE_DOWN_UNNEEDED_TIME__#${SCALE_DOWN_UNNEEDED_TIME}#g" \
+      "${FA_STANDALONE_DIR}/manifests/cluster-autoscaler.yaml" | kubectl apply -f -
+fi
 log "Stamping Liqo NamespaceOffloading for the default namespace"
 kubectl apply -f "${FA_STANDALONE_DIR}/manifests/namespaceoffloading.yaml"
 
 # 9. Restart the agent (to pick up agent-config) and wait for everything.
 kubectl -n "$NAMESPACE" rollout restart deploy/agent
-log "Waiting for agent / gRPC server / Cluster Autoscaler to become Available"
-kubectl -n "$NAMESPACE" rollout status deploy/agent --timeout=120s
-kubectl -n "$NAMESPACE" rollout status deploy/grpc-server --timeout=120s
-kubectl -n "$NAMESPACE" rollout status deploy/cluster-autoscaler --timeout=120s
+log "Waiting for agent / gRPC server$([[ -n "$SKIP_CLUSTER_AUTOSCALER" ]] || echo ' / Cluster Autoscaler') to become Available"
+kubectl -n "$NAMESPACE" rollout status deploy/agent --timeout=300s
+kubectl -n "$NAMESPACE" rollout status deploy/grpc-server --timeout=300s
+[[ -n "$SKIP_CLUSTER_AUTOSCALER" ]] || kubectl -n "$NAMESPACE" rollout status deploy/cluster-autoscaler --timeout=300s
 
 # 10. Liqo dashboard (peerings / virtual nodes / offloaded pods) — as the Ansible
 #     liqo_dashboard role installs it on consumers.

@@ -50,6 +50,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"math"
 	"net/http"
 	"strconv"
 	"strings"
@@ -66,6 +67,7 @@ import (
 	corev1 "k8s.io/api/core/v1"
 
 	autoscalingv1alpha1 "github.com/netgroup-polito/federation-autoscaler/api/autoscaling/v1alpha1"
+	"github.com/netgroup-polito/federation-autoscaler/internal/agent/consumer/latency"
 	"github.com/netgroup-polito/federation-autoscaler/internal/agent/geo"
 )
 
@@ -150,6 +152,11 @@ type Options struct {
 	AdvertisedIP string
 	MockGeoURL   string
 
+	// Prober is the shared latency prober (consumer role only, optional). When
+	// set, the console exposes POST /api/probe so test harnesses can trigger
+	// UDP RTT measurements from the agent's network namespace.
+	Prober *latency.Prober
+
 	// Logger is the structured logger every handler logs through. Defaults to
 	// controller-runtime's logger named "console".
 	Logger logr.Logger
@@ -171,6 +178,7 @@ type Server struct {
 	advertisedIP  string
 	mockGeoURL    string
 	geoClient     *geo.Client
+	prober        *latency.Prober
 	log           logr.Logger
 	shutdown      time.Duration
 
@@ -212,6 +220,7 @@ func New(opts Options) (*Server, error) {
 		advertisedIP:  opts.AdvertisedIP,
 		mockGeoURL:    opts.MockGeoURL,
 		geoClient:     geo.NewClient(),
+		prober:        opts.Prober,
 		log:           logger,
 		shutdown:      shutdown,
 	}
@@ -242,6 +251,9 @@ func (s *Server) handler() http.Handler {
 		mux.HandleFunc("POST /api/policy", s.handlePolicy)
 		mux.HandleFunc("POST /api/workload", s.handleWorkload)
 		mux.HandleFunc("POST /api/reservation", s.handleReservation)
+		if s.prober != nil {
+			mux.HandleFunc("POST /api/probe", s.handleProbe)
+		}
 	case RoleProvider:
 		mux.HandleFunc("POST /api/prices", s.handlePrices)
 		mux.HandleFunc("POST /api/capacity", s.handleCapacity)
@@ -303,7 +315,8 @@ func (s *Server) handlePolicy(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var body struct {
-		Type string `json:"type"`
+		Type       string `json:"type"`
+		UserPrompt string `json:"userPrompt"`
 	}
 	if !s.decode(w, r, &body) {
 		return
@@ -316,8 +329,10 @@ func (s *Server) handlePolicy(w http.ResponseWriter, r *http.Request) {
 		}
 	case string(autoscalingv1alpha1.PlacementStrategyPrice),
 		string(autoscalingv1alpha1.PlacementStrategyEco),
-		string(autoscalingv1alpha1.PlacementStrategyLatency):
-		if err := s.upsertConsumerPolicy(r.Context(), autoscalingv1alpha1.PlacementStrategy(t)); err != nil {
+		string(autoscalingv1alpha1.PlacementStrategyLatency),
+		string(autoscalingv1alpha1.PlacementStrategyConsumerChoice),
+		string(autoscalingv1alpha1.PlacementStrategyRandom):
+		if err := s.upsertConsumerPolicy(r.Context(), autoscalingv1alpha1.PlacementStrategy(t), body.UserPrompt); err != nil {
 			s.writeError(w, http.StatusInternalServerError, "write ConsumerPolicy: "+err.Error())
 			return
 		}
@@ -427,6 +442,63 @@ func (s *Server) handleReservation(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	s.ok(w)
+}
+
+// handleProbe triggers UDP RTT measurement from this agent's network namespace
+// using the shared latency.Prober. Test harnesses call this so measurements
+// reflect the Consumer Agent's actual network perspective.
+func (s *Server) handleProbe(w http.ResponseWriter, r *http.Request) {
+	if s.prober == nil {
+		s.writeError(w, http.StatusServiceUnavailable, "prober not configured")
+		return
+	}
+	var body struct {
+		Candidates []struct {
+			ProviderClusterID string `json:"providerClusterId"`
+			Endpoint          string `json:"endpoint"`
+		} `json:"candidates"`
+	}
+	if !s.decode(w, r, &body) {
+		return
+	}
+	if len(body.Candidates) == 0 {
+		s.writeError(w, http.StatusBadRequest, "candidates list is empty")
+		return
+	}
+
+	cands := make([]latency.Candidate, len(body.Candidates))
+	for i, c := range body.Candidates {
+		cands[i] = latency.Candidate{
+			ProviderClusterID: c.ProviderClusterID,
+			Endpoint:          c.Endpoint,
+		}
+	}
+
+	start := time.Now()
+	result := s.prober.MeasureAndPick(r.Context(), cands)
+	durationMs := float64(time.Since(start).Microseconds()) / 1000.0
+
+	// latency.Prober scores an unreachable candidate +Inf (see its Result doc
+	// comment) so it always loses the pick — but encoding/json cannot
+	// marshal +Inf/-Inf/NaN, and by the time Encode hits one deep inside the
+	// map it has already committed http.StatusOK via WriteHeader, so the
+	// failure just truncates the body to nothing instead of ever reaching
+	// the client as an error. Omit non-finite entries instead: callers
+	// already do a comma-ok map lookup (e.g. federation-tests/comparative-latency
+	// reading RTTs[Chosen]), so a missing key for "never answered" is
+	// already the expected, handled shape.
+	rtts := make(map[string]float64, len(result.RTTs))
+	for id, rtt := range result.RTTs {
+		if !math.IsInf(rtt, 0) && !math.IsNaN(rtt) {
+			rtts[id] = rtt
+		}
+	}
+
+	s.writeJSON(w, http.StatusOK, map[string]any{
+		"chosen":     result.Chosen,
+		"rtts":       rtts,
+		"durationMs": durationMs,
+	})
 }
 
 // createManualReservation creates a new, uniquely-named, console-labelled
@@ -618,13 +690,16 @@ func (s *Server) upsertConfigMap(ctx context.Context, name, key, value string) e
 	return s.local.Update(ctx, &cm)
 }
 
-func (s *Server) upsertConsumerPolicy(ctx context.Context, t autoscalingv1alpha1.PlacementStrategy) error {
+func (s *Server) upsertConsumerPolicy(ctx context.Context, t autoscalingv1alpha1.PlacementStrategy, userPrompt string) error {
 	var cp autoscalingv1alpha1.ConsumerPolicy
 	err := s.local.Get(ctx, types.NamespacedName{Namespace: s.ns, Name: consumerPolicyName}, &cp)
 	if apierrors.IsNotFound(err) {
 		cp = autoscalingv1alpha1.ConsumerPolicy{
 			ObjectMeta: metav1.ObjectMeta{Name: consumerPolicyName, Namespace: s.ns},
-			Spec:       autoscalingv1alpha1.ConsumerPolicySpec{Placement: autoscalingv1alpha1.PlacementPolicy{Type: t}},
+			Spec: autoscalingv1alpha1.ConsumerPolicySpec{
+				Placement:  autoscalingv1alpha1.PlacementPolicy{Type: t},
+				UserPrompt: userPrompt,
+			},
 		}
 		return s.local.Create(ctx, &cp)
 	}
@@ -632,6 +707,7 @@ func (s *Server) upsertConsumerPolicy(ctx context.Context, t autoscalingv1alpha1
 		return err
 	}
 	cp.Spec.Placement.Type = t
+	cp.Spec.UserPrompt = userPrompt
 	return s.local.Update(ctx, &cp)
 }
 

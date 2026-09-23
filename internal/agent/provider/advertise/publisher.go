@@ -113,6 +113,12 @@ type Options struct {
 	// http://mock-eco:8081). Empty ⇒ the provider advertises no carbon intensity.
 	MockEcoURL string
 
+	// EcoCacheTTL overrides how long a region's carbon intensity/forecast is
+	// cached before re-fetching from MockEcoURL. <= 0 ⇒ the eco package's 1h
+	// default (production values change at most hourly). A test harness that
+	// re-randomizes mock-eco on a shorter cycle sets this to match.
+	EcoCacheTTL time.Duration
+
 	// MockGeoURL is the base URL of the geo-IP service (e.g. http://mock-geo:8080).
 	// The provider's node IP is looked up here to derive its region + coordinates.
 	// Empty ⇒ the provider advertises no location (neither eco nor latency).
@@ -195,7 +201,7 @@ func New(opts Options) (*Publisher, error) {
 		mockEcoURL:    opts.MockEcoURL,
 		mockGeoURL:    opts.MockGeoURL,
 		probeUDPPort:  opts.ProbeUDPPort,
-		ecoClient:     eco.NewClient(),
+		ecoClient:     eco.NewClientWithTTL(opts.EcoCacheTTL),
 		geoClient:     geo.NewClient(),
 		interval:      interval,
 		log:           logger,

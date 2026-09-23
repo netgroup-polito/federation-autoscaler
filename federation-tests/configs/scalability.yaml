@@ -1,0 +1,10 @@
+# Broker scalability test: how many synthetic agents talk to one Broker.
+#
+# These two numbers are the only settings to change between runs; everything
+# else (duration, request intervals, timeouts, monitoring, ...) is fixed in
+# federation-tests/scalability/run-scalability-test.sh -- see federation-tests/scalability/README.md.
+#
+# Run it with:
+#   bash federation-tests/scalability/run-scalability-test.sh
+consumers: 5
+providers: 5

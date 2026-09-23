@@ -18,6 +18,7 @@ package api
 
 import (
 	"context"
+	"math/rand"
 	"net/http"
 	"sort"
 
@@ -86,7 +87,8 @@ func (s *Server) handleNodeGroupsList(w http.ResponseWriter, r *http.Request) {
 	// Per-consumer placement preference: narrow to the single best provider with
 	// capacity within each chunk type. "best" is the composite Standard default
 	// (most free capacity, renewable bonus) when no policy is set, or cheapest
-	// (Price) / greenest (Eco) / closest (Latency) when one is.
+	// (Price) / greenest (Eco) / closest (Latency) when one is. ConsumerChoice
+	// is the exception: it leaves the whole list unmasked for the consumer to choose.
 	consumerID := ClusterIDFromContext(ctx)
 	entry, _ := s.consumers.Lookup(consumerID) // zero ConsumerEntry ⇒ Standard default
 
@@ -110,6 +112,8 @@ func (s *Server) handleNodeGroupsList(w http.ResponseWriter, r *http.Request) {
 	case autoscalingv1alpha1.PlacementStrategyEco:
 		applyEcoPreference(views, carbons, hasCarbon, inflight)
 		setPlacementMetric(views, carbons, hasCarbon)
+	case autoscalingv1alpha1.PlacementStrategyRandom:
+		applyRandomPreference(views, inflight)
 	case autoscalingv1alpha1.PlacementStrategyLatency:
 		// Latency is a consumer↔provider PAIR metric: distance depends on the
 		// calling consumer's own location (from its heartbeat). Unlike the other
@@ -120,6 +124,17 @@ func (s *Server) handleNodeGroupsList(w http.ResponseWriter, r *http.Request) {
 		distances, hasDist := consumerProviderDistances(entry, avail)
 		latencyShortlist = applyLatencyTopN(views, distances, hasDist, inflight, latencyShortlistSize)
 		setPlacementMetric(views, distances, hasDist)
+	case autoscalingv1alpha1.PlacementStrategyConsumerChoice:
+		// The choice belongs to the consumer: its agent hands every candidate
+		// plus the operator's natural-language request to a local LLM
+		// (internal/agent/ollama), so the Broker must NOT pre-pick one here
+		// (docs/design.md, placement table). No masking at all: every available
+		// provider keeps MaxSize = TotalChunks, which already leaves a full
+		// provider non-growable (MaxSize == CurrentReserved) without any help,
+		// and unavailable ones were dropped above. The in-flight gate is not
+		// applied either -- it only exists to stop a single-winner policy from
+		// spilling to the runner-up, and there is no runner-up to spill to.
+		// No PlacementMetric: there is no single metric the choice ranks on.
 	default:
 		// Empty (no ConsumerPolicy) or "Standard" → the composite default. No stable
 		// per-provider metric is exposed (Standard's most-free score wanders as
@@ -229,6 +244,43 @@ func ecoWeightedScore(forecast []float64) (float64, bool) {
 // provider of that chunk type is exhausted (mirrors the unpriced tail).
 func applyEcoPreference(views []NodeGroupView, carbons []float64, hasCarbon []bool, inflight map[string]bool) {
 	applyMetricPreference(views, carbons, hasCarbon, inflight)
+}
+
+// applyRandomPreference masks the node-group view for a random-preferring
+// consumer: within each chunk type it collects providers with available capacity
+// and picks one at random, masking all others (MaxSize = CurrentReserved). No
+// metric is set — Random has no ranking value. The in-flight gate is respected:
+// if the randomly-chosen provider is full but still peering, nothing growable is
+// exposed in that type.
+func applyRandomPreference(views []NodeGroupView, inflight map[string]bool) {
+	byType := map[brokerv1alpha1.ChunkType][]int{}
+	for i := range views {
+		byType[views[i].Type] = append(byType[views[i].Type], i)
+	}
+	for _, idxs := range byType {
+		var withCapacity []int
+		hasInflight := false
+		for _, i := range idxs {
+			if views[i].MaxSize-views[i].CurrentReserved > 0 {
+				withCapacity = append(withCapacity, i)
+			} else if inflight[views[i].ProviderClusterID] {
+				hasInflight = true
+			}
+		}
+		switch {
+		case len(withCapacity) == 0 && hasInflight:
+			for _, i := range idxs {
+				views[i].MaxSize = views[i].CurrentReserved
+			}
+		case len(withCapacity) > 0:
+			chosen := withCapacity[rand.Intn(len(withCapacity))]
+			for _, i := range idxs {
+				if i != chosen {
+					views[i].MaxSize = views[i].CurrentReserved
+				}
+			}
+		}
+	}
 }
 
 // applyLatencyPreference masks the node-group view for a latency-preferring
@@ -459,7 +511,7 @@ func consumerProviderDistances(entry ConsumerEntry, avail []*brokerv1alpha1.Clus
 		if t == nil || (t.Latitude == 0 && t.Longitude == 0) {
 			continue
 		}
-		distances[i] = haversineKm(entry.Latitude, entry.Longitude, t.Latitude, t.Longitude)
+		distances[i] = HaversineKm(entry.Latitude, entry.Longitude, t.Latitude, t.Longitude)
 		hasDist[i] = true
 	}
 	return distances, hasDist
@@ -530,6 +582,8 @@ func (s *Server) nodeGroupViewFromAdvertisement(
 		Cost:                  costQuantity(cost, priced),
 		Topology:              cadv.Spec.Topology,
 		ProbeEndpoint:         cadv.Spec.ProbeEndpoint,
+		CarbonIntensity:       cadv.Spec.CarbonIntensity,
+		UnitPrices:            cadv.Spec.UnitPrices,
 		// LiqoLabels / LiqoTaints aren't on ClusterAdvertisementSpec yet
 		// (designed but pending). When they land, populate Labels /
 		// Taints straight from the spec; for now, leave them nil.

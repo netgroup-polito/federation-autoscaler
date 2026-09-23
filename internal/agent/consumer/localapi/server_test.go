@@ -43,6 +43,7 @@ import (
 	brokerv1alpha1 "github.com/netgroup-polito/federation-autoscaler/api/broker/v1alpha1"
 	agentclient "github.com/netgroup-polito/federation-autoscaler/internal/agent/client"
 	"github.com/netgroup-polito/federation-autoscaler/internal/agent/consumer/latency"
+	"github.com/netgroup-polito/federation-autoscaler/internal/agent/ollama"
 	brokerapi "github.com/netgroup-polito/federation-autoscaler/internal/broker/api"
 )
 
@@ -169,6 +170,105 @@ func TestNodeGroups_Shortlist_AllUnreachable_NoInterference(t *testing.T) {
 	hr := headroom(getNodeGroups(t, ts))
 	if hr["p1"] != 4 || hr["p2"] != 4 {
 		t.Errorf("all-unreachable must not mask the shortlist; got %+v", hr)
+	}
+}
+
+// unmaskedResp is what the Broker returns under the given policy when it does
+// not narrow the list: three providers, all with head-room.
+func unmaskedResp(policy autoscalingv1alpha1.PlacementStrategy) brokerapi.NodeGroupListResponse {
+	dirty, green := 650.0, 25.0
+	return brokerapi.NodeGroupListResponse{
+		AppliedPlacement: policy,
+		NodeGroups: []brokerapi.NodeGroupView{
+			{ID: "ng-p1-standard", ProviderClusterID: "p1", Type: brokerv1alpha1.ChunkTypeStandard, MaxSize: 3, CarbonIntensity: &dirty},
+			{ID: "ng-p2-standard", ProviderClusterID: "p2", Type: brokerv1alpha1.ChunkTypeStandard, MaxSize: 3, CarbonIntensity: &green},
+			{ID: "ng-p3-standard", ProviderClusterID: "p3", Type: brokerv1alpha1.ChunkTypeStandard, MaxSize: 3},
+		},
+	}
+}
+
+// The Broker leaves a ConsumerChoice list unmasked for the consumer to decide.
+// With no LLM configured, the local API must still narrow it to one provider --
+// otherwise the Cluster Autoscaler would be offered all three at once.
+func TestNodeGroups_ConsumerChoiceWithoutOllama_MasksToDeterministicFallback(t *testing.T) {
+	fb := newFakeBroker(t)
+	fb.setHandler(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", brokerapi.ContentTypeJSON)
+		_ = json.NewEncoder(w).Encode(unmaskedResp(autoscalingv1alpha1.PlacementStrategyConsumerChoice))
+	})
+	ts := localTestServer(t, fb) // no Ollama client
+
+	hr := headroom(getNodeGroups(t, ts))
+	// None is priced, so DeterministicFallback ranks carbon-advertised providers
+	// first and the lowest carbon wins: p2.
+	if hr["p2"] != 3 {
+		t.Errorf("deterministic fallback winner p2 must stay growable; got %+v", hr)
+	}
+	if hr["p1"] != 0 || hr["p3"] != 0 {
+		t.Errorf("every other provider must be masked; got %+v", hr)
+	}
+}
+
+func TestNodeGroups_ConsumerChoiceWithoutOllama_NoCapacity_MasksEverything(t *testing.T) {
+	fb := newFakeBroker(t)
+	fb.setHandler(func(w http.ResponseWriter, _ *http.Request) {
+		r := unmaskedResp(autoscalingv1alpha1.PlacementStrategyConsumerChoice)
+		for i := range r.NodeGroups {
+			r.NodeGroups[i].CurrentReserved = r.NodeGroups[i].MaxSize
+		}
+		w.Header().Set("Content-Type", brokerapi.ContentTypeJSON)
+		_ = json.NewEncoder(w).Encode(r)
+	})
+	ts := localTestServer(t, fb)
+
+	for id, h := range headroom(getNodeGroups(t, ts)) {
+		if h != 0 {
+			t.Errorf("with no capacity anywhere nothing may be growable; %s has %d", id, h)
+		}
+	}
+}
+
+// With an LLM configured the AI path runs only when the local ConsumerPolicy
+// says ConsumerChoice. When it does not -- unreadable, or already switched while
+// the Broker is still a heartbeat behind -- the Broker's unmasked list must not
+// reach the Cluster Autoscaler either.
+func TestNodeGroups_ConsumerChoiceWithOllamaButNoLocalPolicy_MasksToDeterministicFallback(t *testing.T) {
+	fb := newFakeBroker(t)
+	fb.setHandler(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", brokerapi.ContentTypeJSON)
+		_ = json.NewEncoder(w).Encode(unmaskedResp(autoscalingv1alpha1.PlacementStrategyConsumerChoice))
+	})
+	s, err := New(Options{
+		BindAddress:  "127.0.0.1:0",
+		Client:       fb.buildClient(t),
+		LocalClient:  newFakeKubeClient(), // no ConsumerPolicy
+		OllamaClient: ollama.New("http://127.0.0.1:1", "unused"),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ts := httptest.NewServer(s.Handler())
+	t.Cleanup(ts.Close)
+
+	hr := headroom(getNodeGroups(t, ts))
+	if hr["p2"] != 3 || hr["p1"] != 0 || hr["p3"] != 0 {
+		t.Errorf("only the deterministic fallback winner p2 may stay growable; got %+v", hr)
+	}
+}
+
+// The fallback is scoped to ConsumerChoice: any other policy's list is the
+// Broker's decision and must reach the Cluster Autoscaler untouched.
+func TestNodeGroups_OtherPolicyWithoutOllama_PassesThrough(t *testing.T) {
+	fb := newFakeBroker(t)
+	fb.setHandler(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", brokerapi.ContentTypeJSON)
+		_ = json.NewEncoder(w).Encode(unmaskedResp(autoscalingv1alpha1.PlacementStrategyEco))
+	})
+	ts := localTestServer(t, fb)
+
+	hr := headroom(getNodeGroups(t, ts))
+	if hr["p1"] != 3 || hr["p2"] != 3 || hr["p3"] != 3 {
+		t.Errorf("a non-ConsumerChoice list must pass through unchanged; got %+v", hr)
 	}
 }
 

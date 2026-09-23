@@ -182,6 +182,41 @@ func TestHeartbeater_BeatsImmediately_AndPostsCorrectBody(t *testing.T) {
 	}
 }
 
+// The location the heartbeat discovers is also what the ConsumerChoice LLM is
+// told about where the consumer is, so it must be readable once a beat found it.
+func TestHeartbeater_LastLocation(t *testing.T) {
+	geoSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte(`{"status":"success","region":"LOM","city":"Milan","lat":45.4642,"lon":9.19}`))
+	}))
+	t.Cleanup(geoSrv.Close)
+
+	fb := newFakeBroker(t)
+	h, err := New(Options{
+		Client:        fb.buildClient(t),
+		ClusterID:     "c",
+		LiqoClusterID: "liqo-c",
+		Interval:      time.Hour,
+		AdvertisedIP:  "203.0.113.7",
+		MockGeoURL:    geoSrv.URL,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, _, _, ok := h.LastLocation(); ok {
+		t.Fatal("no location may be reported before any heartbeat looked it up")
+	}
+
+	h.beatOnce(context.Background())
+
+	lat, lon, region, ok := h.LastLocation()
+	if !ok || lat != 45.4642 || lon != 9.19 || region != "LOM" {
+		t.Errorf("LastLocation = %v, %v, %q, %v; want 45.4642, 9.19, LOM, true", lat, lon, region, ok)
+	}
+	if posted := fb.snapshotPosted(); len(posted) != 1 || posted[0].Latitude == nil || *posted[0].Latitude != lat {
+		t.Errorf("the heartbeat and LastLocation must report the same position: %+v", posted)
+	}
+}
+
 func TestHeartbeater_ReportsMeasuredLatency(t *testing.T) {
 	fb := newFakeBroker(t)
 	h, err := New(Options{

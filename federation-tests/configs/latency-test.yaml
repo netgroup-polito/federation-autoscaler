@@ -1,0 +1,38 @@
+consumers: 3
+providers: 7
+
+experiment:
+  mode: reserve
+  duration: time
+  # An hour per phase: with the 2m latencyRefreshInterval below, that is ~30
+  # distinct delay matrices per phase. See eco-test.yaml for the same note.
+  timer: 1h
+  iterations: 15 # ignored while duration: time; kept as a fallback value
+  phasePause: 35s
+  policyPropagationWait: 35s
+  advertisementLag: 35s
+
+  # Same reasoning as eco-test.yaml's carbonRefreshInterval, with a shorter
+  # observation lag: a redrawn tc delay reaches a Consumer as soon as its
+  # prober cache expires (DefaultCacheTTL, 15s) because the Consumer probes
+  # the provider's UDP echo endpoint directly -- there is no advertisement
+  # cycle in this path. At the old 30s the lag was half a tick, so a probe at
+  # the same elapsed time in the two phases could land on either side of a
+  # redraw; at 2m it is an eighth, and Phase B's replayed delays are observed
+  # where Phase A's were.
+  latencyRefreshInterval: 2m
+  # Simulated one-way delay per (consumer, provider) pair, redrawn from this
+  # range on every refresh. The ceiling stays under the prober's 300ms
+  # per-probe deadline, above which a provider reads as unreachable and its
+  # RTT never reaches the CSVs.
+  latencyMinMs: 30
+  latencyMaxMs: 250
+
+infra:
+  readinessTimeout: 10m
+  liqoProvider: kind
+
+cleanup: true
+
+output:
+  dir: results
