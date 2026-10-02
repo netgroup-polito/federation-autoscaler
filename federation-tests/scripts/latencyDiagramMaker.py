@@ -13,10 +13,10 @@ X axis, so "N minutes into the phase" compares directly between the two
 policies -- e.g. "at minute 5, were Consumers closer to their provider under
 Random or under Latency?".
 
-Method, identical to ecoDiagramMaker.py: every Consumer carries its latest
-measured RTT to the provider it is peered with, forward-filled until its next
-successful reservation event; that per-Consumer state is resampled onto a
-regular grid and aggregated across Consumers.
+Method: every Consumer carries its latest measured RTT to the provider it is
+peered with, forward-filled until its next successful reservation; that
+per-Consumer state is resampled onto a regular grid and averaged across
+Consumers.
 
 One deliberate difference: the Y axis is the MEAN RTT across active Consumers,
 where the eco chart plots a SUM of carbon intensities. A sum of milliseconds has
@@ -31,6 +31,29 @@ the same command works unchanged for every experiment size, e.g.:
     python3 federation-tests/scripts/latencyDiagramMaker.py --input results/3c-7p/reservations.csv
     python3 federation-tests/scripts/latencyDiagramMaker.py --input results/30c-70p/reservations.csv
 
+Behind the two curves it shades an OBSERVED RANGE, the latency counterpart of
+the achievable range in the eco chart: at every point in time, the mean of the
+x fastest RTTs measured anywhere in the federation and the mean of the x
+slowest, where x is the number of Consumers placing then.
+
+"Observed", not "achievable": the simulated delays are never written to a CSV,
+so only the RTTs someone actually measured can be ranked -- a Consumer probes
+one provider per iteration under Random and its three nearest under Latency,
+never all of them. The floor is therefore the best anybody happened to measure,
+which is at or above the best there was, so the policy looks no better than it
+is. The summary reports the coverage (measured pairs out of all of them); the
+true optimum would need the harness to export its tc delay matrix.
+
+Probes are grouped by refresh window -- the delay of a pair is redrawn once per
+window and constant in between -- with the window boundaries estimated from the
+data rather than assumed, since the refresh ticker starts after the policy wait,
+not at minute zero. Getting that alignment wrong mixes two draws of the same
+pair and drags the floor around.
+
+Curve and range are therefore measured a few tens of seconds apart, so nothing
+forces the curve inside the range; the summary reports how many points fall
+outside (none, on the runs in this thesis).
+
 Outputs (default: an `analysis/` directory next to the input file; override
 with --output-dir):
 
@@ -39,7 +62,9 @@ with --output-dir):
     latency_comparison.csv   -- the underlying per-phase timeline data
     latency_summary.md       -- text summary + sanity-check warnings
 
-Only `reservations.csv` is read; no other experiment output file is required.
+`reservations.csv` is the only required input. `probes.csv` (picked up
+automatically from the same directory, or passed with --probes) adds the
+observed range; without it the chart is drawn exactly as before.
 
 Requires: Python 3, pandas, matplotlib (standard library otherwise).
 """
@@ -57,6 +82,14 @@ import matplotlib
 
 matplotlib.use("Agg")  # headless-safe: no display needed (e.g. on a remote server)
 import matplotlib.pyplot as plt  # noqa: E402  (must follow matplotlib.use)
+
+# Where the refresh boundaries fall is already solved, carefully, by the
+# alignment checker next door: every pair is redrawn by one ticker, so each
+# value change brackets the same boundary, and the brackets are averaged
+# circularly. Importing it keeps one implementation of that reasoning.
+from verifyLatencyReplayAlignment import estimate_grid_offset  # noqa: E402
+
+import pgfplotsWriter  # noqa: E402  (shared LaTeX output; see its docstring)
 
 # Columns this script expects to find in the input CSV. A comparative-latency
 # reservations.csv always carries all of them (see ReservationRecord in
@@ -78,6 +111,17 @@ REQUIRED_COLUMNS = [
 # column instead of being passed in.
 PHASE_A = "phase-a"
 PHASE_B = "phase-b"
+
+# Columns read from probes.csv, the optional second input that carries every
+# RTT the Consumers measured, not just the one they ended up peering with (see
+# WriteProbeCSV in federation-tests/testlib/writer.go).
+PROBE_COLUMNS = [
+    "timestamp",
+    "consumer_id",
+    "phase",
+    "provider_id",
+    "rtt_ms",
+]
 
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
@@ -126,9 +170,39 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         default=1.0,
         help="Grid spacing in minutes when --grid=regular (default: 1.0).",
     )
+    parser.add_argument(
+        "--probes",
+        type=Path,
+        default=None,
+        help=(
+            "Path to the run's probes.csv, used to shade the observed RTT "
+            "range (default: probes.csv next to --input; the range is simply "
+            "left out if that file is not there)."
+        ),
+    )
+    parser.add_argument(
+        "--range-window-minutes",
+        type=float,
+        default=2.0,
+        help=(
+            "Window the probes are grouped into for the observed range, i.e. how "
+            "often the harness redraws its tc delays (latencyRefreshInterval, 2m "
+            "in every shipped config -- default: 2.0). A pair's delay is constant "
+            "inside one window, so every probe in it measures the same condition; "
+            "grouping any finer just splits the same measurements into windows that "
+            "miss some pairs."
+        ),
+    )
+    parser.add_argument(
+        "--no-range",
+        action="store_true",
+        help="Draw only the two policy curves, even if probes.csv is available.",
+    )
     args = parser.parse_args(argv)
     if args.grid == "regular" and args.grid_minutes <= 0:
         parser.error("--grid-minutes must be a positive number")
+    if args.range_window_minutes <= 0:
+        parser.error("--range-window-minutes must be a positive number")
     return args
 
 
@@ -311,6 +385,234 @@ def build_phase_local_timeline(
     ]
 
 
+def load_probes(path: Path) -> pd.DataFrame | None:
+    """Reads probes.csv, every RTT the Consumers measured.
+
+    Returns None -- with a warning, never an error -- when the file is absent
+    or unusable: the observed range is an addition to the chart, and a run from
+    before this file existed must still plot."""
+    if not path.is_file():
+        print(
+            f"warning: {path} not found; the chart will show the two policy "
+            "curves without the observed RTT range.",
+            file=sys.stderr,
+        )
+        return None
+
+    try:
+        df = pd.read_csv(path, dtype=str)
+    except Exception as exc:  # noqa: BLE001 -- surfaced to the user as-is
+        print(f"warning: failed to read '{path}' ({exc}); skipping the observed range.", file=sys.stderr)
+        return None
+
+    missing = [c for c in PROBE_COLUMNS if c not in df.columns]
+    if missing:
+        print(
+            f"warning: '{path}' is missing column(s) {', '.join(missing)}; skipping the observed range.",
+            file=sys.stderr,
+        )
+        return None
+
+    df["timestamp"] = pd.to_datetime(df["timestamp"], utc=True, errors="coerce")
+    df["rtt_ms"] = pd.to_numeric(df["rtt_ms"], errors="coerce")
+    # A zero RTT is the writer's placeholder for "no measurement", the same
+    # convention has_rtt_reading() applies to reservations.csv.
+    keep = (
+        df["timestamp"].notna()
+        & df["rtt_ms"].notna()
+        & (df["rtt_ms"] > 0)
+        & df["consumer_id"].notna()
+        & df["provider_id"].notna()
+    )
+    df = df[keep]
+    if df.empty:
+        print(f"warning: '{path}' has no usable RTT readings; skipping the observed range.", file=sys.stderr)
+        return None
+    return df
+
+
+# An offset is trusted when enough value changes agree on it. Under Random a
+# pair is probed once and then dropped, so that phase rarely brackets anything
+# and borrows the policy phase's estimate -- the two phases run the same
+# schedule, which is what the replay is built on.
+MIN_OFFSET_BRACKETS = 20
+MIN_OFFSET_CONFIDENCE = 0.5
+
+
+def probe_rows(probes: pd.DataFrame, phase_value: str, t0: pd.Timestamp) -> pd.DataFrame:
+    """One phase's probes, stamped with minutes elapsed since its start."""
+    rows = probes[probes["phase"] == phase_value].copy()
+    if rows.empty:
+        return rows
+    rows["elapsed_minutes"] = (rows["timestamp"] - t0).dt.total_seconds() / 60.0
+    return rows[rows["elapsed_minutes"] >= 0].copy()
+
+
+def estimate_window_offset(rows: pd.DataFrame, window_minutes: float) -> tuple[float, float, int]:
+    """Where this phase's refresh boundaries fall, in minutes since its start.
+
+    The boundaries are not at minute 0, 2, 4...: the refresh ticker starts
+    after the policy wait and the prober-cache drain, so windows nailed to the
+    first reservation straddle two real ones and mix two draws of the same
+    pair -- which is exactly what made the floor cross the curve. Every pair is
+    redrawn by one ticker, so each value change brackets the same boundary;
+    estimate_grid_offset averages those brackets circularly.
+
+    Only changes bracketed within half a window are used: a wider bracket may
+    contain a boundary anywhere inside it and just blurs the estimate."""
+    if rows.empty:
+        return 0.0, 0.0, 0
+    step = window_minutes if window_minutes > 0 else 1.0
+    samples: dict[tuple[str, str], list[tuple[float, float]]] = {}
+    for (consumer_id, provider_id), group in rows.sort_values("elapsed_minutes").groupby(
+        ["consumer_id", "provider_id"]
+    ):
+        samples[(consumer_id, provider_id)] = list(
+            zip(group["elapsed_minutes"] * 60.0, group["rtt_ms"])
+        )
+    # tolerance 1 ms: a pair re-measured under the same delay lands within a
+    # fraction of a millisecond, a redraw moves it by tens.
+    offset_s, resultant, used = estimate_grid_offset(
+        samples, tick=step * 60.0, tolerance=1.0, max_bracket=step * 30.0
+    )
+    return offset_s / 60.0, resultant, used
+
+
+def assign_windows(rows: pd.DataFrame, window_minutes: float, offset: float) -> pd.DataFrame:
+    """Labels each probe with the refresh window it belongs to. Pooling by
+    window is what lets the two phases be compared: the replay puts them in
+    front of the same environment at the same elapsed time."""
+    if rows.empty:
+        return rows
+    step = window_minutes if window_minutes > 0 else 1.0
+    out = rows.copy()
+    out["bin"] = (((out["elapsed_minutes"] - offset) // step) * step + offset).round(6)
+    return out
+
+
+def pool_by_window(binned: pd.DataFrame) -> dict[float, tuple[list[float], int]]:
+    """Every RTT measured in each refresh window, sorted, with how many
+    distinct Consumer-provider pairs it came from."""
+    pools: dict[float, tuple[list[float], int]] = {}
+    for bin_value, group in binned.groupby("bin"):
+        values = sorted(float(v) for v in group["rtt_ms"].to_numpy())
+        pairs = int(group.groupby(["consumer_id", "provider_id"]).ngroups)
+        pools[float(bin_value)] = (values, pairs)
+    return pools
+
+
+def observed_range(
+    pools: dict[float, tuple[list[float], int]],
+    timeline: pd.DataFrame,
+    window_minutes: float,
+    window_offset: float,
+    pairs_possible: int,
+) -> pd.DataFrame | None:
+    """Mean of the x fastest and the x slowest RTTs measured in the window a
+    point falls in, with x the number of Consumers that point averages.
+
+    x has to be the point's own count, not the window's largest: these edges
+    are means, so a floor computed over more values than the curve averages
+    would sit above it. With the same x, and with every value the curve uses
+    present in the pool, floor <= curve <= ceiling holds at every point.
+
+    `coverage` says how much of the Consumer-provider matrix the pool covers:
+    the lower it is, the more the floor is "the best anybody happened to
+    measure" rather than the best there was."""
+    if timeline is None or timeline.empty or not pools:
+        return None
+
+    step = window_minutes if window_minutes > 0 else 1.0
+    records = []
+    for elapsed, x in zip(timeline["elapsed_minutes"], timeline["active_consumers"]):
+        key = round(((float(elapsed) - window_offset) // step) * step + window_offset, 6)
+        pool = pools.get(key)
+        if pool is None:
+            continue
+        values, pairs = pool
+        take = min(int(x), len(values))
+        if take <= 0:
+            continue
+        records.append(
+            {
+                "elapsed_minutes": float(elapsed),
+                "floor": sum(values[:take]) / take,
+                "ceiling": sum(values[-take:]) / take,
+                "x_used": take,
+                "observed_pairs": pairs,
+                "coverage": (pairs / pairs_possible) if pairs_possible > 0 else float("nan"),
+            }
+        )
+    if not records:
+        return None
+    return pd.DataFrame(records).sort_values("elapsed_minutes").reset_index(drop=True)
+
+
+def merge_bands(band_a: pd.DataFrame | None, band_b: pd.DataFrame | None) -> pd.DataFrame | None:
+    """One band out of the two phases: the replay puts both in front of the
+    same environment, so their edges are averaged point by point on elapsed
+    time; where only one phase reaches a minute, that phase's value is used."""
+    parts = [b for b in (band_a, band_b) if b is not None and not b.empty]
+    if not parts:
+        return None
+    joined = pd.concat(parts, ignore_index=True)
+    joined["elapsed_minutes"] = joined["elapsed_minutes"].round(6)
+    merged = (
+        joined.groupby("elapsed_minutes", as_index=False)
+        .agg(
+            floor=("floor", "mean"),
+            ceiling=("ceiling", "mean"),
+            x_used=("x_used", "max"),
+            observed_pairs=("observed_pairs", "max"),
+            coverage=("coverage", "mean"),
+        )
+        .sort_values("elapsed_minutes")
+        .reset_index(drop=True)
+    )
+    return merged.dropna(subset=["floor", "ceiling"])
+
+
+def attach_band_columns(
+    timeline_out: pd.DataFrame,
+    band: pd.DataFrame | None,
+    band_a: pd.DataFrame | None,
+    band_b: pd.DataFrame | None,
+    window_minutes: float,
+) -> pd.DataFrame:
+    """Adds the range to the exported timeline: the drawn band (both phases
+    pooled) with its coverage, and next to it each phase's own edges."""
+    out = timeline_out.copy()
+    step = window_minutes if window_minutes > 0 else 1.0
+    key = ((out["elapsed_minutes"] // step) * step).round(6)
+
+    for column in (
+        "band_floor",
+        "band_ceiling",
+        "band_observed_pairs",
+        "band_coverage",
+        "phase_band_floor",
+        "phase_band_ceiling",
+    ):
+        out[column] = float("nan")
+    if band is None or band.empty:
+        return out
+
+    drawn = band.drop_duplicates(subset="elapsed_minutes").set_index("elapsed_minutes")
+    out["band_floor"] = key.map(drawn["floor"]).to_numpy()
+    out["band_ceiling"] = key.map(drawn["ceiling"]).to_numpy()
+    out["band_observed_pairs"] = key.map(drawn["observed_pairs"]).to_numpy()
+    out["band_coverage"] = key.map(drawn["coverage"]).to_numpy()
+
+    for phase_value, phase_band in ((PHASE_A, band_a), (PHASE_B, band_b)):
+        if phase_band is None or phase_band.empty:
+            continue
+        own = phase_band.drop_duplicates(subset="elapsed_minutes").set_index("elapsed_minutes")
+        rows = out["phase"] == phase_value
+        out.loc[rows, "phase_band_floor"] = key[rows].map(own["floor"]).to_numpy()
+        out.loc[rows, "phase_band_ceiling"] = key[rows].map(own["ceiling"]).to_numpy()
+    return out
+
+
 def make_comparison_chart(
     timeline_a: pd.DataFrame | None,
     timeline_b: pd.DataFrame | None,
@@ -319,6 +621,7 @@ def make_comparison_chart(
     phase_b_label: str,
     png_out: Path,
     pdf_out: Path,
+    band: pd.DataFrame | None = None,
 ) -> None:
     plt.rcParams.update(
         {
@@ -334,7 +637,33 @@ def make_comparison_chart(
             "savefig.facecolor": "white",
         }
     )
-    fig, ax = plt.subplots(figsize=(10, 5.5))
+    fig, ax = plt.subplots(figsize=(11, 5.5))
+
+    # Drawn first and with a low zorder so the two policy curves stay readable
+    # on top of it. Same shading as ecoDiagramMaker.py.
+    if band is not None and not band.empty:
+        ax.fill_between(
+            band["elapsed_minutes"],
+            band["floor"],
+            band["ceiling"],
+            step="post",
+            color="#d9c37a",
+            alpha=0.28,
+            linewidth=0,
+            zorder=0,
+            label="Observed range",
+        )
+        for edge in ("floor", "ceiling"):
+            ax.step(
+                band["elapsed_minutes"],
+                band[edge],
+                where="post",
+                color="#a8862c",
+                linewidth=0.9,
+                linestyle="--",
+                alpha=0.85,
+                zorder=1,
+            )
 
     # Same colours as ecoDiagramMaker.py -- Random red, policy under test green
     # -- so both thesis figures read with one legend in mind.
@@ -346,6 +675,7 @@ def make_comparison_chart(
             color="#c0392b",
             linewidth=1.8,
             label=f"{phase_a_label} (Phase A)",
+            zorder=3,
         )
     if timeline_b is not None and not timeline_b.empty:
         ax.step(
@@ -355,6 +685,7 @@ def make_comparison_chart(
             color="#1e8449",
             linewidth=1.8,
             label=f"{phase_b_label} (Phase B)",
+            zorder=3,
         )
 
     ax.set_xlabel("Elapsed time since phase start [minutes]")
@@ -363,10 +694,21 @@ def make_comparison_chart(
     ax.set_ylim(bottom=0)
 
     fig.suptitle("Latency Indicator by Policy — Direct Comparison", fontsize=13, fontweight="bold", y=0.98)
-    ax.set_title(subtitle, fontsize=9.5, color="#555555", pad=10)
+    ax.set_title(subtitle, fontsize=9.5, color="#555555", pad=10, loc="left")
 
-    ax.legend(loc="best", frameon=True, framealpha=0.9)
-    fig.tight_layout(rect=(0, 0, 1, 0.94))
+    # Above the plotting area, right-aligned on the same line as the subtitle:
+    # inside the axes it sat on top of the curves it is meant to explain.
+    ax.legend(
+        loc="lower right",
+        bbox_to_anchor=(1.0, 1.0),
+        ncol=3,
+        frameon=False,
+        fontsize=9,
+        handlelength=1.6,
+        columnspacing=1.2,
+        borderaxespad=0.4,
+    )
+    fig.tight_layout(rect=(0, 0, 1, 0.93))
 
     fig.savefig(png_out, dpi=300)
     fig.savefig(pdf_out)
@@ -390,6 +732,11 @@ def write_summary(
     timeline: pd.DataFrame,
     grid_mode: str,
     grid_minutes: float,
+    band: pd.DataFrame | None = None,
+    pairs_possible: int = 0,
+    outside_band: int = 0,
+    borrowed_offsets: list[str] | None = None,
+    range_note: str | None = None,
 ) -> None:
     def fmt_td(td: pd.Timedelta | None) -> str:
         if td is None:
@@ -412,7 +759,80 @@ def write_summary(
         direction = "lower, i.e. closer providers" if abs_diff < 0 else "higher, i.e. farther providers"
         diff_line = f"- Difference (A -> B): {abs_diff:+.2f} ms ({pct}; Phase B {direction})\n"
 
+    # Where each policy sat inside the observed range: 100% means it matched
+    # the fastest RTT anyone measured, 0% means it did as badly as the slowest.
+    def captured_pct(curve_mean: float, floor_mean: float, ceiling_mean: float) -> float:
+        span = ceiling_mean - floor_mean
+        if pd.isna(curve_mean) or pd.isna(span) or span <= 0:
+            return float("nan")
+        return (ceiling_mean - curve_mean) / span * 100.0
+
+    # Each phase is scored against ITS OWN floor and ceiling, not against the
+    # drawn band, which pools both phases.
+    def phase_band_means(phase_value: str) -> tuple[float, float]:
+        rows = timeline[timeline["phase"] == phase_value]
+        if rows.empty or "phase_band_floor" not in rows.columns:
+            return float("nan"), float("nan")
+        return rows["phase_band_floor"].mean(), rows["phase_band_ceiling"].mean()
+
+    range_lines: list[str] = []
+    coverage_warning: str | None = None
+    if band is not None and not band.empty:
+        mean_floor = band["floor"].mean()
+        mean_ceiling = band["ceiling"].mean()
+        mean_coverage = band["coverage"].mean()
+        x_values = sorted(int(v) for v in band["x_used"].unique() if v > 0)
+        x_desc = str(x_values[0]) if len(x_values) == 1 else f"{x_values[0]}–{x_values[-1]}"
+        floor_a, ceiling_a = phase_band_means(PHASE_A)
+        floor_b, ceiling_b = phase_band_means(PHASE_B)
+        pct_a = captured_pct(mean_a, floor_a, ceiling_a)
+        pct_b = captured_pct(mean_b, floor_b, ceiling_b)
+        range_lines = [
+            "\n## Observed RTT range\n\n",
+            "At each point in time the range runs from the mean of the x fastest RTTs "
+            "measured anywhere in the federation to the mean of the x slowest, with x the "
+            "number of Consumers placing then.\n\n",
+            f"- RTTs averaged per edge (x): {x_desc}\n",
+            f"- Mean floor (fastest measured): {fmt_ms(mean_floor)}\n",
+            f"- Mean ceiling (slowest measured): {fmt_ms(mean_ceiling)}\n",
+            f"- Share of the range captured by Phase A ({phase_a_label}): "
+            + (f"{pct_a:.1f}%\n" if pd.notna(pct_a) else "n/a\n"),
+            f"- Share of the range captured by Phase B ({phase_b_label}): "
+            + (f"{pct_b:.1f}%\n" if pd.notna(pct_b) else "n/a\n"),
+            "- The curve is each Consumer's RTT as measured when it peered, while the range "
+            "is built from every probe of the refresh window a point falls in: the two read "
+            "the same environment a few tens of seconds apart, so a curve outside the range "
+            f"is possible in principle. Points where that happens: {outside_band}.\n",
+            f"- Mean coverage: "
+            + (f"{mean_coverage * 100:.1f}%" if pd.notna(mean_coverage) else "n/a")
+            + f" of the {pairs_possible} Consumer-provider pairs were measured per point\n",
+            "\n**Read this range as a floor on what was possible, not the real optimum.** "
+            "The simulated delays are not recorded anywhere, so only the pairs the Consumers "
+            "actually probed can be ranked: under Random that is the one provider the Broker "
+            "masked to, under Latency the three nearest. The fastest pair that nobody probed "
+            "is missing from the floor, which therefore sits higher than the true best, and "
+            "the policy looks closer to optimal than it is. Exporting the tc delay matrix "
+            "from the harness and re-running would remove the caveat.\n",
+        ]
+        if pd.notna(mean_coverage) and mean_coverage < 0.5:
+            coverage_warning = (
+                f"- The observed range covers only {mean_coverage * 100:.1f}% of the "
+                "Consumer-provider pairs on average: treat its floor as optimistic.\n"
+            )
+
     warnings_lines: list[str] = []
+    if borrowed_offsets:
+        warnings_lines.append(
+            "- "
+            + ", ".join(borrowed_offsets)
+            + " had too few value changes of its own to locate the refresh boundaries, so it "
+            "uses the other phase's estimate. Both phases run the same schedule, which is "
+            "what the replay rests on, but a range there is only as good as that assumption.\n"
+        )
+    if range_note:
+        warnings_lines.append(f"- {range_note}\n")
+    if coverage_warning:
+        warnings_lines.append(coverage_warning)
     min_active = int(timeline["active_consumers"].min()) if not timeline.empty else 0
     max_active = int(timeline["active_consumers"].max()) if not timeline.empty else 0
     if min_active != max_active:
@@ -455,6 +875,7 @@ def write_summary(
         f"- Phase A ({phase_a_label}): {fmt_ms(mean_a)}\n",
         f"- Phase B ({phase_b_label}): {fmt_ms(mean_b)}\n",
         diff_line,
+        *range_lines,
         "\n## Warnings\n\n",
         *warnings_lines,
         "\n## Reproduce\n\n",
@@ -505,6 +926,77 @@ def main(argv: list[str] | None = None) -> None:
     parts = [t for t in (timeline_a, timeline_b) if t is not None]
     timeline = pd.concat(parts, ignore_index=True)
 
+    # --- Observed RTT range (optional second input) ---
+    band = band_a = band_b = None
+    pairs_possible = 0
+    borrowed_offsets: list[str] = []
+    range_note: str | None = None
+    if args.no_range:
+        range_note = "Observed range left out on request (--no-range)."
+    else:
+        probes_path = args.probes or (input_path.parent / "probes.csv")
+        probes = load_probes(probes_path)
+        if probes is None:
+            range_note = f"Observed range not shown: {probes_path} is missing or has no RTT readings."
+        else:
+            pairs_possible = int(
+                probes["consumer_id"].nunique() * probes["provider_id"].nunique()
+            )
+            # Where the refresh boundaries fall, estimated per phase and then
+            # shared: under Random a pair is probed once and dropped, so that
+            # phase brackets almost nothing and takes the policy phase's
+            # estimate, which the replay makes the right one to borrow.
+            raw_rows: dict[str, pd.DataFrame] = {}
+            estimates: dict[str, tuple[float, float, int]] = {}
+            for phase_value, phase_timeline in ((PHASE_A, timeline_a), (PHASE_B, timeline_b)):
+                if phase_timeline is None or phase_timeline.empty:
+                    continue
+                rows = probe_rows(probes, phase_value, phase_timeline["timestamp"].min())
+                raw_rows[phase_value] = rows
+                estimates[phase_value] = estimate_window_offset(rows, args.range_window_minutes)
+
+            trusted = {
+                phase: est[0]
+                for phase, est in estimates.items()
+                if est[2] >= MIN_OFFSET_BRACKETS and est[1] >= MIN_OFFSET_CONFIDENCE
+            }
+            borrowed_offsets = sorted(set(estimates) - set(trusted))
+            shared = next(iter(trusted.values()), 0.0)
+            window_offsets = {phase: trusted.get(phase, shared) for phase in estimates}
+
+            binned_parts = [
+                (phase, assign_windows(rows, args.range_window_minutes, window_offsets[phase]))
+                for phase, rows in raw_rows.items()
+            ]
+            # Both phases measure the same replayed environment, so their
+            # probes are pooled into one sample per window: that covers more of
+            # the Consumer-provider matrix than either phase alone.
+            #
+            # The curves themselves are left untouched -- each Consumer's RTT
+            # as measured when it peered, carried until it peers again.
+            # Rebuilding them on the window's measurements would put them
+            # inside the range by construction, but it would also move the
+            # numbers this thesis already reports, and on these runs they sit
+            # inside it anyway (counted below, and written to the summary).
+            pooled = [rows for _, rows in binned_parts if not rows.empty]
+            pools = pool_by_window(pd.concat(pooled, ignore_index=True)) if pooled else {}
+            band_a = observed_range(
+                pools, timeline_a, args.range_window_minutes,
+                window_offsets.get(PHASE_A, 0.0), pairs_possible,
+            )
+            band_b = observed_range(
+                pools, timeline_b, args.range_window_minutes,
+                window_offsets.get(PHASE_B, 0.0), pairs_possible,
+            )
+            band = merge_bands(band_a, band_b)
+            if band is None or band.empty:
+                band = None
+                range_note = (
+                    "Observed range not shown: no probe fell on the phases' timelines."
+                )
+
+    # Computed after the rebuild: it is the rebuilt curve that says how many
+    # Consumers each point actually counts.
     active_range = timeline["active_consumers"]
     min_active, max_active = int(active_range.min()), int(active_range.max())
     if min_active == max_active:
@@ -515,13 +1007,51 @@ def main(argv: list[str] | None = None) -> None:
     png_out = output_dir / "latency_comparison.png"
     pdf_out = output_dir / "latency_comparison.pdf"
     csv_out = output_dir / "latency_comparison.csv"
+    tex_out = output_dir / "latency_comparison.tex"
     summary_out = output_dir / "latency_summary.md"
 
-    make_comparison_chart(timeline_a, timeline_b, subtitle, phase_a_label, phase_b_label, png_out, pdf_out)
+    make_comparison_chart(
+        timeline_a,
+        timeline_b,
+        subtitle,
+        phase_a_label,
+        phase_b_label,
+        png_out,
+        pdf_out,
+        band=band,
+    )
+
+    # The timeline carries the band that was drawn (both phases pooled) with
+    # its coverage, plus each phase's own edges, so the figure can be checked
+    # and each phase scored against its own range.
+    timeline = attach_band_columns(timeline, band, band_a, band_b, args.range_window_minutes)
+
+    # Curve and range are measured a few tens of seconds apart, so this is a
+    # check, not a guarantee: the summary reports it either way.
+    checkable = timeline.dropna(subset=["phase_band_floor", "phase_band_ceiling"])
+    outside_band = int(
+        (checkable["mean_rtt_ms"] < checkable["phase_band_floor"] - 1e-6).sum()
+        + (checkable["mean_rtt_ms"] > checkable["phase_band_ceiling"] + 1e-6).sum()
+    )
 
     timeline_out = timeline.copy()
     timeline_out["timestamp"] = timeline_out["timestamp"].dt.strftime("%Y-%m-%dT%H:%M:%S.%f%z")
     timeline_out.to_csv(csv_out, index=False)
+
+    # The same figure as LaTeX source, from the same objects the PNG was drawn
+    # from, so the two cannot drift apart.
+    pgfplotsWriter.write_line_chart(
+        tex_out,
+        series=[
+            (f"{phase_a_label} (Phase A)", "phaseRandom", timeline_a, "mean_rtt_ms"),
+            (f"{phase_b_label} (Phase B)", "phasePolicy", timeline_b, "mean_rtt_ms"),
+        ],
+        band=band,
+        band_label="Observed range",
+        x_label="Elapsed time since phase start [minutes]",
+        y_label="Mean RTT to selected provider [ms]",
+        source=Path(__file__).name,
+    )
 
     write_summary(
         summary_out,
@@ -539,10 +1069,15 @@ def main(argv: list[str] | None = None) -> None:
         timeline=timeline,
         grid_mode=args.grid,
         grid_minutes=args.grid_minutes,
+        band=band,
+        pairs_possible=pairs_possible,
+        outside_band=outside_band,
+        borrowed_offsets=borrowed_offsets,
+        range_note=range_note,
     )
 
     print("Wrote:")
-    for p in (png_out, pdf_out, csv_out, summary_out):
+    for p in (png_out, pdf_out, csv_out, summary_out, tex_out):
         print(f"  {p}")
 
 

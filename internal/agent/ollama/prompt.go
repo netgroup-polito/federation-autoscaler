@@ -92,10 +92,11 @@ Rules:
 - Choose only from the providers in the list.
 - Never invent provider IDs or field values.
 - Before ranking, copy from the list, for EVERY provider, the values of the fields the request is about; then rank by those values.
-- Return only valid JSON matching this schema: {"reason": "<one short sentence: what the request asks for>", "values": [{"providerId": "<id>", "<field>": <value copied from the list>}, ...], "rankedList": ["<best>", "<2nd>", ...], "providerId": "<best>", "confidence": <number from 0 to 1>}
+- Return only valid JSON matching this schema: {"reason": "<one short sentence: what the request asks for>", "values": [{"providerId": "<id>", "<field>": <value copied from the list>}, ...], "rankedList": ["<best>", "<2nd>", ...], "providerId": "<best>", "confidence": <number from 0 to 1>, "reasoning": "<two or three sentences, written last: why the first provider won>"}
 - rankedList must contain ALL provider IDs, each exactly once, ordered best first.
 - providerId must equal the first element of rankedList.
-- reason and confidence are optional.
+- reasoning explains the ranking you just wrote: name the chosen provider, the field values that made it beat the others, and what you traded away. Write it in full sentences, starting with "I chose".
+- reason, confidence and reasoning are optional.
 - No markdown and no text outside the JSON object.`
 
 // ProviderInfo is the structured JSON the LLM sees per provider. It contains
@@ -136,16 +137,25 @@ type Location struct {
 // ProviderID field is kept for backward compatibility with older models
 // that return only one.
 //
-// Reason and Confidence are the model's own account of its choice. They are
-// kept for a human to read and are never used to decide anything: a model can
-// state a fluent reason for a wrong answer. The "values" the model copies
-// before ranking are its working, not part of the answer: they are not decoded
-// and stay readable in the raw response.
+// Reason, Reasoning and Confidence are the model's own account of its choice.
+// They are kept for a human to read and are never used to decide anything: a
+// model can state a fluent reason for a wrong answer. The "values" the model
+// copies before ranking are its working, not part of the answer: they are not
+// decoded and stay readable in the raw response.
+//
+// Reason and Reasoning sit on either side of the ranking, and that is the whole
+// difference between them. Reason is written first and is the plan -- what the
+// request asks for -- which is there because a small model that ranks first and
+// explains afterwards ranks badly (see the note above SystemPrompt). Reasoning
+// is written last, once the ranking exists, and is the account of it: which
+// provider won and on what values. Asking for that account before the ranking
+// would mean asking why a choice was made that has not been made yet.
 type SelectionResponse struct {
 	ProviderID string   `json:"providerId"`
 	RankedList []string `json:"rankedList,omitempty"`
 	Reason     string   `json:"reason,omitempty"`
 	Confidence *float64 `json:"confidence,omitempty"`
+	Reasoning  string   `json:"reasoning,omitempty"`
 }
 
 // NodeGroupViewToProviderInfo converts a broker NodeGroupView into the

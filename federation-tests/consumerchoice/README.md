@@ -290,8 +290,16 @@ Each scenario can also define `referenceWeights`: a transparent weighted sum of
 min-max-normalised carbon, distance and cost. The selected provider's rank on it is
 reported as a yardstick, never as the right answer.
 
-The model's own `reason` and `confidence` are saved for a human to read. They are **never**
-used to judge a choice.
+The model's own `reason`, `reasoning` and `confidence` are saved for a human to read. They
+are **never** used to judge a choice.
+
+`reason` and `reasoning` sit on either side of the ranking, and that is the whole difference
+between them. `reason` is written first and is the plan — what the request asks for — which
+is there because a small model that ranks first and explains afterwards ranks badly.
+`reasoning` is written last, once the ranking exists, and is the account of it: which
+provider won, on what values, and what was traded away. Asking for that account before the
+ranking would mean asking why a choice was made that has not been made yet. Both are
+optional, so a model that omits one is not a failed decision.
 
 ---
 
@@ -308,6 +316,8 @@ providers.csv             the federation once: one row per provider (region, cit
                           "eco-oriented (3/6) - ambiguous (4/6)", out of each scenario's decisions
                           (recorded repetitions plus agent path); fallback picks do not count
 federation.csv            one row per scenario × repetition × candidate, with the reservation outcome
+reasoning.txt             every decision of the run in plain text, one block each: the prompt, the
+                          provider chosen, and the model's own account of why (see below)
 logs/                     broker, consumer agent, grpc-server, every provider agent, Ollama
 scenarios/<scenario>/
   prompt.txt              system prompt, user request, consumer location, provider list, output format
@@ -321,6 +331,30 @@ scenarios/<scenario>/
     resource_request.json   manual reservation: phases with timestamps, reserved provider,
                             criterion, release, failures, passed
 ```
+
+### reasoning.txt
+
+The one artifact meant to be read straight through. Every decision of the run, in the order
+it was made — each scenario's repetitions, then its agent-path decision, so six blocks per
+prompt on the thesis run:
+
+```
+Prompt: Prioritize the greenest provider. Latency is secondary.
+Chosen provider: provider-9
+Reasoning: I chose provider-9 because its carbon intensity of 25 gCO2eq/kWh is the lowest
+in the list, ahead of provider-7 at 35; it is 6 130 km away, which the request makes secondary.
+-------
+```
+
+The agent-path decision is included because it is the same model answering the same prompt,
+only asked by the agent instead of by the harness. When the choice was not the model's, the
+block says so on the provider line — `[the deterministic fallback chose instead (invalid
+json)]`, or `[the model was not asked: only one provider had capacity]` — so the file never
+credits the model with a provider it did not pick. A model that omitted the field gets
+`Reasoning: (the model wrote none)` rather than a blank line.
+
+Everything else about a decision is in `summary.json` and the `model_response.json` beside it;
+this file deliberately carries nothing else, not even repetition numbers.
 
 Every profile is held fixed for the whole run and capacity returns to the baseline after every
 reservation, so every decision is made on the same federation, and every repetition of a scenario

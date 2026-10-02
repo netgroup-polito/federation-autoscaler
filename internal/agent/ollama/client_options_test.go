@@ -178,6 +178,12 @@ func TestSystemPrompt_ValuesBeforeRanking(t *testing.T) {
 		t.Errorf("the schema must list reason, values, rankedList in this order:\n%s", schema)
 	}
 
+	// The account of the choice goes last, after the ranking it accounts for:
+	// asked before it, the model would be explaining a choice it has not made.
+	if reasoning := strings.Index(schema, `"reasoning"`); reasoning < ranked {
+		t.Errorf("reasoning must come after rankedList in the schema:\n%s", schema)
+	}
+
 	start, end := strings.Index(SystemPrompt, "How words in the request map to fields:"), strings.Index(SystemPrompt, "Rules:")
 	if start < 0 || end < start {
 		t.Fatalf("the prompt must map request words to fields before the rules:\n%s", SystemPrompt)
@@ -260,7 +266,7 @@ func TestWithConsumerLocation_CopiesTheClient(t *testing.T) {
 func TestSelectDetailed_CapturesTrace(t *testing.T) {
 	envelope := ollamaResponse{
 		Model:         "m",
-		Response:      `{"rankedList":["provider-2","provider-1"],"providerId":"provider-2","reason":"greener","confidence":0.8}`,
+		Response:      `{"rankedList":["provider-2","provider-1"],"providerId":"provider-2","reason":"greener","confidence":0.8,"reasoning":"I chose provider-2 because 45 is the lowest carbonIntensity."}`,
 		Done:          true,
 		TotalDuration: 1_500_000_000,
 		EvalCount:     37,
@@ -278,6 +284,12 @@ func TestSelectDetailed_CapturesTrace(t *testing.T) {
 	}
 	if trace.Parsed == nil || trace.Parsed.Reason != "greener" || trace.Parsed.Confidence == nil || *trace.Parsed.Confidence != 0.8 {
 		t.Errorf("reason/confidence not parsed: %+v", trace.Parsed)
+	}
+	// The model's account of the choice it just made, written after the
+	// ranking. It is what reasoning.txt is built from, so losing it here
+	// would empty that file without failing anything else.
+	if trace.Parsed == nil || !strings.HasPrefix(trace.Parsed.Reasoning, "I chose provider-2") {
+		t.Errorf("reasoning not parsed: %+v", trace.Parsed)
 	}
 	if trace.Envelope == nil || trace.Envelope.EvalCount != 37 || trace.Envelope.TotalDuration != 1_500_000_000 {
 		t.Errorf("runtime metadata not captured: %+v", trace.Envelope)

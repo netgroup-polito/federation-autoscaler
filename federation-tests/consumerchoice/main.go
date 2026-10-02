@@ -404,6 +404,10 @@ func (s *suiteRun) finish(fatal error) error {
 	if err := testlib.WriteJSONFile(out, "summary.json", summary); err != nil {
 		writeErrs = append(writeErrs, err)
 	}
+	reasoning := reasoningEntries(s.cc.Scenarios, s.records, s.agentPaths)
+	if err := writeReasoning(filepath.Join(out, "reasoning.txt"), reasoning); err != nil {
+		writeErrs = append(writeErrs, err)
+	}
 	if err := writeSummaryMarkdown(filepath.Join(out, "summary.md"), summary, s.cc, s.records); err != nil {
 		writeErrs = append(writeErrs, err)
 	}

@@ -125,7 +125,7 @@ func modelResponse(trace *ollama.Trace, rt *ollamaRuntime, d *Decision) map[stri
 		"envelope":          trace.Envelope,
 		"errorKind":         trace.ErrorKind,
 		"error":             trace.Error,
-		"note":              "reason and confidence are the model's own account and were not used to judge the choice",
+		"note":              "reason, reasoning and confidence are the model's own account and were not used to judge the choice",
 	}
 	if trace.RawErrorBody != "" {
 		out["rawErrorBody"] = trace.RawErrorBody
