@@ -134,7 +134,7 @@ Three kinds of cluster take part, plus an optional fourth for demo mock services
 
 Every ranking input (price, carbon, renewable flag, capacity, coordinates) is **self-declared by the provider and verified by nobody**; only cluster identity is authenticated. The chosen ranking value is stamped on each view as `placementMetric`/`hasMetric`, which is what the migration loop (§5) later compares.
 
-> **Implemented in:** `cmd/broker/`, `internal/broker/api/` (`server.go` routes, `nodegroups.go` placement + masking, `pricing.go`, `geo.go`, `registry.go`, `advertisement.go`, `heartbeat.go`, `reservation.go`, `instructions.go`, `middleware.go`, `tls.go`, `dashboard.go` + `dashboard_runnable.go`), `internal/broker/chunk/`, `internal/agent/ollama/` (ConsumerChoice: prompt, LLM client, answer validation, deterministic fallback), `internal/controller/broker/` (`reservation_controller.go` phase machine + terminal GC, `clusteradvertisement_controller.go` freshness), `internal/controller/autoscaling/` (`providerinstruction_controller.go`, `reservationinstruction_controller.go`, `instruction.go`). Deployed via `config/broker/`.
+> **Implemented in:** `cmd/broker/`, `internal/broker/api/` (`server.go` routes, `placement.go` (`BuildNodeGroups`, the I/O-free placement decision), `nodegroups.go` handler + per-policy masking, `pricing.go`, `geo.go`, `registry.go`, `advertisement.go`, `heartbeat.go`, `reservation.go`, `instructions.go`, `middleware.go`, `tls.go`, `dashboard.go` + `dashboard_runnable.go`), `internal/broker/chunk/`, `internal/agent/ollama/` (ConsumerChoice: prompt, LLM client, answer validation, deterministic fallback), `internal/controller/broker/` (`reservation_controller.go` phase machine + terminal GC, `clusteradvertisement_controller.go` freshness), `internal/controller/autoscaling/` (`providerinstruction_controller.go`, `reservationinstruction_controller.go`, `instruction.go`). Deployed via `config/broker/`.
 
 ---
 
@@ -435,6 +435,7 @@ Three wire surfaces exist. There is no Broker-to-agent surface; see the [communi
 | `POST /api/v1/reservations` | consumer | synchronous reserve, one chunk; 201 (or 200 on idempotent replay) |
 | `GET /api/v1/reservations/{id}` | participant | reservation lookup (consumer or provider of that reservation) |
 | `DELETE /api/v1/reservations/{id}` | consumer | release; 202, phase → `Unpeering` |
+| `GET /api/v1/reservations` | consumer | the caller's own reservations (as consumer), every phase, sorted by ID; lets a consumer-side brain rebuild its in-flight and reserved counts |
 | `GET /api/v1/instructions` | both, 5 s | pending un-enforced instructions for the caller; `Peer` carries the kubeconfig inlined |
 | `POST /api/v1/instructions/{id}/result` | both | report outcome; advances the reservation phase machine |
 

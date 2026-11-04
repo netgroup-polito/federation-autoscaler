@@ -402,6 +402,13 @@ type ReservationResponse struct {
 	Message               string                          `json:"message,omitempty"`
 }
 
+// ReservationListResponse is returned by GET /api/v1/reservations (§7.3.10):
+// every reservation the calling cluster holds as the consumer, in any phase,
+// sorted by ReservationID. Reservations is never null (an empty list is []).
+type ReservationListResponse struct {
+	Reservations []ReservationResponse `json:"reservations"`
+}
+
 // -----------------------------------------------------------------------------
 // 7.3.6 — GET /api/v1/instructions   (Both agents → Broker, every 5 s)
 // -----------------------------------------------------------------------------

@@ -218,6 +218,29 @@ func TestDeleteReservation(t *testing.T) {
 	}
 }
 
+func TestListReservations(t *testing.T) {
+	fb := newFakeBroker(t, func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", brokerapi.ContentTypeJSON)
+		_ = json.NewEncoder(w).Encode(brokerapi.ReservationListResponse{
+			Reservations: []brokerapi.ReservationResponse{
+				{ReservationID: "res-a", Status: brokerv1alpha1.ReservationPhasePeered, ProviderClusterID: "provider-a"},
+				{ReservationID: "res-b", Status: brokerv1alpha1.ReservationPhasePeering, ProviderClusterID: "provider-b"},
+			},
+		})
+	})
+
+	resp, err := fb.client().ListReservations(context.Background())
+	if err != nil {
+		t.Fatalf("ListReservations: %v", err)
+	}
+	if fb.method != http.MethodGet || fb.path != "/api/v1/reservations" {
+		t.Errorf("wrong method/path: %s %s", fb.method, fb.path)
+	}
+	if len(resp.Reservations) != 2 || resp.Reservations[1].Status != brokerv1alpha1.ReservationPhasePeering {
+		t.Errorf("decode mismatch: %+v", resp)
+	}
+}
+
 func TestDeleteReservation_RejectsEmptyID(t *testing.T) {
 	c := newTestClient(t, httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {
 		t.Fatal("server should not be reached when reservationID is empty")

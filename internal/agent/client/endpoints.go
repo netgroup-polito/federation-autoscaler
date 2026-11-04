@@ -140,6 +140,22 @@ func (c *Client) DeleteReservation(
 	return out, nil
 }
 
+// ListReservations returns every reservation this cluster holds as the
+// consumer, in any phase (GET /api/v1/reservations, §7.3.10). The local brain
+// uses it to rebuild its in-flight and reserved chunk counts per provider,
+// including after an agent restart.
+func (c *Client) ListReservations(
+	ctx context.Context,
+) (*brokerapi.ReservationListResponse, error) {
+	out := &brokerapi.ReservationListResponse{}
+	if err := c.do(ctx, http.MethodGet, "/api/v1/reservations", nil, out, requestOptions{
+		idempotent: true,
+	}); err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 // GetInstructions polls the broker for outstanding instructions targeted
 // at this caller (GET /api/v1/instructions, §7.3.6). Called every
 // --poll-interval (default 5 s) by both the consumer- and provider-role

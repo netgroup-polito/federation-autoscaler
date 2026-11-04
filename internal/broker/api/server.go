@@ -153,6 +153,9 @@ func (s *Server) Handler() http.Handler {
 	// 7.3.9 — DELETE /api/v1/reservations/{id} (Consumer Agent)
 	mux.HandleFunc("DELETE /api/v1/reservations/{id}", s.handleReservationRelease)
 
+	// 7.3.10 — GET /api/v1/reservations (Consumer Agent: its own reservations)
+	mux.HandleFunc("GET /api/v1/reservations", s.handleReservationList)
+
 	return mux
 }
 

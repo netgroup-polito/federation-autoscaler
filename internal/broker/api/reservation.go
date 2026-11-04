@@ -21,6 +21,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -31,6 +32,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/apimachinery/pkg/util/validation"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	brokerv1alpha1 "github.com/netgroup-polito/federation-autoscaler/api/broker/v1alpha1"
 )
@@ -474,6 +476,41 @@ func (s *Server) handleReservationGet(w http.ResponseWriter, r *http.Request) {
 
 func isReservationParticipant(clusterID string, resv *brokerv1alpha1.Reservation) bool {
 	return clusterID == resv.Spec.ConsumerClusterID || clusterID == resv.Spec.ProviderClusterID
+}
+
+// -----------------------------------------------------------------------------
+// 7.3.10 — GET /api/v1/reservations   (Consumer Agent)
+// -----------------------------------------------------------------------------
+
+// handleReservationList returns every reservation the caller holds as the
+// consumer, in any phase, sorted by ID. A consumer-side brain uses it to know
+// its own in-flight and reserved chunks per provider, including after an agent
+// restart; the Broker computes the same facts internally for its own placement
+// (inFlightByProvider).
+func (s *Server) handleReservationList(w http.ResponseWriter, r *http.Request) {
+	ctx := r.Context()
+	requestID := r.Header.Get(HeaderRequestID)
+	callerID := ClusterIDFromContext(ctx)
+
+	var list brokerv1alpha1.ReservationList
+	if err := s.client.List(ctx, &list, client.InNamespace(s.namespace)); err != nil {
+		s.log.Error(err, "list Reservations failed", "requestId", requestID)
+		writeError(w, http.StatusInternalServerError, ErrorResponse{
+			Code: ErrCodeInternalError, Message: "reservation list failed", RequestID: requestID,
+		})
+		return
+	}
+
+	out := ReservationListResponse{Reservations: []ReservationResponse{}}
+	for i := range list.Items {
+		if list.Items[i].Spec.ConsumerClusterID == callerID {
+			out.Reservations = append(out.Reservations, reservationResponseFromCR(&list.Items[i]))
+		}
+	}
+	sort.Slice(out.Reservations, func(i, j int) bool {
+		return out.Reservations[i].ReservationID < out.Reservations[j].ReservationID
+	})
+	writeJSON(w, http.StatusOK, out)
 }
 
 // -----------------------------------------------------------------------------
