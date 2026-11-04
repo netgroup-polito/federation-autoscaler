@@ -314,16 +314,7 @@ func buildReservation(
 // field. Returns an empty list if the sizer produced nothing — callers
 // should validate against zero before calling Create on the CR.
 func (s *Server) perChunkResources(cadv *brokerv1alpha1.ClusterAdvertisement) corev1.ResourceList {
-	results := s.sizer.Size(cadv.Spec.Resources.Allocatable)
-	for _, r := range results {
-		if r.Type == cadv.Spec.ClusterType {
-			return r.PerChunk
-		}
-	}
-	if len(results) > 0 {
-		return results[0].PerChunk
-	}
-	return corev1.ResourceList{}
+	return perChunkResourcesWith(s.sizer, cadv)
 }
 
 // initReservationStatus stamps Phase=Pending plus CreatedAt/ExpiresAt so

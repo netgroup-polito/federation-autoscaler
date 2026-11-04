@@ -22,10 +22,8 @@ import (
 	"net/http"
 	"sort"
 
-	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
-	autoscalingv1alpha1 "github.com/netgroup-polito/federation-autoscaler/api/autoscaling/v1alpha1"
 	brokerv1alpha1 "github.com/netgroup-polito/federation-autoscaler/api/broker/v1alpha1"
 )
 
@@ -47,6 +45,10 @@ import (
 // for the exact, strictly-additive rules). Views are per-consumer because each
 // consumer's Agent authenticates with its own mTLS identity.
 //
+// The handler only gathers the inputs (advertisements, the caller's registry
+// entry, its in-flight reservations); the decision itself is BuildNodeGroups
+// (placement.go), which has no I/O so a consumer-side brain can reuse it.
+//
 // Sort order is stable: (clusterId ASC, chunkType ASC).
 
 func (s *Server) handleNodeGroupsList(w http.ResponseWriter, r *http.Request) {
@@ -64,38 +66,14 @@ func (s *Server) handleNodeGroupsList(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Project every Available advertisement, computing its per-chunk cost once
-	// so both the view's Cost field and the price-preference masking reuse it.
-	avail := make([]*brokerv1alpha1.ClusterAdvertisement, 0, len(list.Items))
+	advs := make([]*brokerv1alpha1.ClusterAdvertisement, len(list.Items))
 	for i := range list.Items {
-		if list.Items[i].Status.Available {
-			avail = append(avail, &list.Items[i])
-		}
-	}
-	views := make([]NodeGroupView, len(avail))
-	costs := make([]float64, len(avail))
-	priced := make([]bool, len(avail))
-	carbons := make([]float64, len(avail))
-	hasCarbon := make([]bool, len(avail))
-	for i, cadv := range avail {
-		cost, ok := s.perChunkCost(cadv)
-		costs[i], priced[i] = cost, ok
-		carbons[i], hasCarbon[i] = weightedCarbon(cadv)
-		views[i] = s.nodeGroupViewFromAdvertisement(cadv, cost, ok)
+		advs[i] = &list.Items[i]
 	}
 
-	// Per-consumer placement preference: narrow to the single best provider with
-	// capacity within each chunk type. "best" is the composite Standard default
-	// (most free capacity, renewable bonus) when no policy is set, or cheapest
-	// (Price) / greenest (Eco) / closest (Latency) when one is. ConsumerChoice
-	// is the exception: it leaves the whole list unmasked for the consumer to choose.
 	consumerID := ClusterIDFromContext(ctx)
 	entry, _ := s.consumers.Lookup(consumerID) // zero ConsumerEntry ⇒ Standard default
 
-	// In-flight reservations gate the "spill to the next-best" step so we don't
-	// prematurely expose a worse provider while the chosen one's chunk is still
-	// peering (CA would grab it and then have to unpeer it). The gate is
-	// policy-agnostic, so every strategy shares it.
 	inflight, err := s.inFlightByProvider(ctx, consumerID)
 	if err != nil {
 		s.log.Error(err, "list Reservations for placement gate failed", "requestId", requestID)
@@ -104,59 +82,13 @@ func (s *Server) handleNodeGroupsList(w http.ResponseWriter, r *http.Request) {
 		})
 		return
 	}
-	latencyShortlist := false
-	switch entry.Placement.Type {
-	case autoscalingv1alpha1.PlacementStrategyPrice:
-		applyPricePreference(views, costs, priced, inflight)
-		setPlacementMetric(views, costs, priced)
-	case autoscalingv1alpha1.PlacementStrategyEco:
-		applyEcoPreference(views, carbons, hasCarbon, inflight)
-		setPlacementMetric(views, carbons, hasCarbon)
-	case autoscalingv1alpha1.PlacementStrategyRandom:
-		applyRandomPreference(views, inflight)
-	case autoscalingv1alpha1.PlacementStrategyLatency:
-		// Latency is a consumer↔provider PAIR metric: distance depends on the
-		// calling consumer's own location (from its heartbeat). Unlike the other
-		// policies the Broker does NOT narrow to one here — it exposes the top-N
-		// nearest-with-capacity as a shortlist and lets the Consumer Agent UDP-probe
-		// them and grow the lowest-RTT one. If the consumer has no location, this is
-		// a no-op (all providers stay exposed) and no shortlist is signalled.
-		distances, hasDist := consumerProviderDistances(entry, avail)
-		latencyShortlist = applyLatencyTopN(views, distances, hasDist, inflight, latencyShortlistSize)
-		setPlacementMetric(views, distances, hasDist)
-	case autoscalingv1alpha1.PlacementStrategyConsumerChoice:
-		// The choice belongs to the consumer: its agent hands every candidate
-		// plus the operator's natural-language request to a local LLM
-		// (internal/agent/ollama), so the Broker must NOT pre-pick one here
-		// (docs/design.md, placement table). No masking at all: every available
-		// provider keeps MaxSize = TotalChunks, which already leaves a full
-		// provider non-growable (MaxSize == CurrentReserved) without any help,
-		// and unavailable ones were dropped above. The in-flight gate is not
-		// applied either -- it only exists to stop a single-winner policy from
-		// spilling to the runner-up, and there is no runner-up to spill to.
-		// No PlacementMetric: there is no single metric the choice ranks on.
-	default:
-		// Empty (no ConsumerPolicy) or "Standard" → the composite default. No stable
-		// per-provider metric is exposed (Standard's most-free score wanders as
-		// capacity fills), so the re-eval loop never migrates a Standard reservation.
-		applyStandardPreference(views, avail, inflight)
-	}
 
-	sort.SliceStable(views, func(i, j int) bool {
-		if views[i].ProviderClusterID != views[j].ProviderClusterID {
-			return views[i].ProviderClusterID < views[j].ProviderClusterID
-		}
-		return string(views[i].Type) < string(views[j].Type)
-	})
-
-	writeJSON(w, http.StatusOK, NodeGroupListResponse{
-		NodeGroups:       views,
-		LatencyShortlist: latencyShortlist,
-		AppliedPlacement: entry.Placement.Type,
-		Generation:       0, // step 5b will surface a real revision once the reconciler watches CRs.
-		ServedAt:         metav1.Now(),
-		CacheAgeSeconds:  0,
-	})
+	writeJSON(w, http.StatusOK, BuildNodeGroups(PlacementInput{
+		Advertisements: advs,
+		Consumer:       entry,
+		InFlight:       inflight,
+		Sizer:          s.sizer,
+	}))
 }
 
 // setPlacementMetric records, on each view, the value the applied policy ranked it
@@ -550,42 +482,5 @@ func reservationInFlight(p brokerv1alpha1.ReservationPhase) bool {
 		return true
 	default:
 		return false
-	}
-}
-
-// nodeGroupViewFromAdvertisement projects one ClusterAdvertisement onto the
-// wire shape consumed by the Consumer Agent (and ultimately by the Cluster
-// Autoscaler via the gRPC server).
-//
-// MinSize is hard-coded to 0 — chunks are always optional. MaxSize is the
-// provider's total chunk count (Option B in docs/design.md): the consumer
-// can reserve up to that, no further. CurrentReserved tracks how many of
-// those chunks are already bound to active reservations.
-//
-// ChunkResources is recovered by re-running the configured sizer over the
-// advertisement so callers see the same per-chunk shape that downstream
-// node templates will report. Cost is the Broker-computed per-chunk cost
-// (nil when the provider is unpriced), kept for the dashboard and the gRPC
-// server's PricingNodePrice back-compat.
-func (s *Server) nodeGroupViewFromAdvertisement(
-	cadv *brokerv1alpha1.ClusterAdvertisement, cost float64, priced bool,
-) NodeGroupView {
-	return NodeGroupView{
-		ID:                    nodeGroupID(cadv.Spec.ClusterID, cadv.Spec.ClusterType),
-		ProviderClusterID:     cadv.Spec.ClusterID,
-		ProviderLiqoClusterID: cadv.Spec.LiqoClusterID,
-		Type:                  cadv.Spec.ClusterType,
-		MinSize:               0,
-		MaxSize:               cadv.Status.TotalChunks,
-		CurrentReserved:       cadv.Status.ReservedChunks,
-		ChunkResources:        s.perChunkResources(cadv),
-		Cost:                  costQuantity(cost, priced),
-		Topology:              cadv.Spec.Topology,
-		ProbeEndpoint:         cadv.Spec.ProbeEndpoint,
-		CarbonIntensity:       cadv.Spec.CarbonIntensity,
-		UnitPrices:            cadv.Spec.UnitPrices,
-		// LiqoLabels / LiqoTaints aren't on ClusterAdvertisementSpec yet
-		// (designed but pending). When they land, populate Labels /
-		// Taints straight from the spec; for now, leave them nil.
 	}
 }

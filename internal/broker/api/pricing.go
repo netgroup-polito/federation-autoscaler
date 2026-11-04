@@ -21,6 +21,7 @@ import (
 	"k8s.io/apimachinery/pkg/api/resource"
 
 	brokerv1alpha1 "github.com/netgroup-polito/federation-autoscaler/api/broker/v1alpha1"
+	"github.com/netgroup-polito/federation-autoscaler/internal/broker/chunk"
 )
 
 // memBytesPerGiB is the divisor that turns a memory Quantity (bytes) into the
@@ -39,17 +40,23 @@ const memBytesPerGiB = 1024 * 1024 * 1024
 // misconfigured provider masquerade as the cheapest, so callers treat such
 // providers as a last resort rather than ranking them.
 func (s *Server) perChunkCost(cadv *brokerv1alpha1.ClusterAdvertisement) (float64, bool) {
+	return perChunkCostWith(s.sizer, cadv)
+}
+
+// perChunkCostWith is perChunkCost with an explicit sizer, so the placement
+// core (BuildNodeGroups) can price a chunk without a *Server.
+func perChunkCostWith(sizer chunk.Sizer, cadv *brokerv1alpha1.ClusterAdvertisement) (float64, bool) {
 	prices := cadv.Spec.UnitPrices
 	if len(prices) == 0 {
 		return 0, false
 	}
-	chunk := s.perChunkResources(cadv)
-	if len(chunk) == 0 {
+	perChunk := perChunkResourcesWith(sizer, cadv)
+	if len(perChunk) == 0 {
 		return 0, false
 	}
 
 	var total float64
-	for name, qty := range chunk {
+	for name, qty := range perChunk {
 		price, ok := prices[name]
 		if !ok || price.Sign() < 0 {
 			return 0, false // missing or negative price → not (fully) priced
