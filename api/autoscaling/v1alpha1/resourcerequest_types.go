@@ -48,6 +48,12 @@ type ResourceRequestSpec struct {
 	// it.
 	// +optional
 	Priority int32 `json:"priority,omitempty"`
+
+	// LatencyBound overrides the ConsumerPolicy latency bound for this request
+	// only, e.g. "max 3 ms from Asti". Empty means the ConsumerPolicy bound (if
+	// any) applies. Used only when the brain runs on the consumer (local mode).
+	// +optional
+	LatencyBound *LatencyBound `json:"latencyBound,omitempty"`
 }
 
 // ResourceRequestPhase is the coarse lifecycle state of a manual request.

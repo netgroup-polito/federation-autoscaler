@@ -103,6 +103,48 @@ type ConsumerPolicySpec struct {
 	// Re-read every heartbeat so changes take effect without a restart.
 	// +optional
 	UserPrompt string `json:"userPrompt,omitempty"`
+
+	// LatencyBound limits the providers the consumer-side brain may choose to
+	// those within a latency bound of a reference point, e.g. "max 3 ms from
+	// Asti". The brain filters out providers outside the bound, then ranks the
+	// rest with Placement. Used only when the brain runs on the consumer
+	// (local mode); the central Broker ignores it. A ResourceRequest may
+	// override it per request.
+	// +optional
+	LatencyBound *LatencyBound `json:"latencyBound,omitempty"`
+}
+
+// LatencyBound caps the estimated latency between a reference point and the
+// chosen provider.
+type LatencyBound struct {
+	// MaxLatencyMs is the bound, in milliseconds.
+	// +kubebuilder:validation:Minimum=1
+	// +required
+	MaxLatencyMs int32 `json:"maxLatencyMs"`
+
+	// From is the reference point the bound is measured from. Empty means the
+	// consumer cluster's own location.
+	// +optional
+	From *GeoPoint `json:"from,omitempty"`
+}
+
+// GeoPoint is a named location given by its coordinates.
+type GeoPoint struct {
+	// Name is a human-readable label for the point (e.g. "Asti"); informational.
+	// +optional
+	Name string `json:"name,omitempty"`
+
+	// Latitude in decimal degrees.
+	// +kubebuilder:validation:Minimum=-90
+	// +kubebuilder:validation:Maximum=90
+	// +required
+	Latitude float64 `json:"latitude"`
+
+	// Longitude in decimal degrees.
+	// +kubebuilder:validation:Minimum=-180
+	// +kubebuilder:validation:Maximum=180
+	// +required
+	Longitude float64 `json:"longitude"`
 }
 
 // +kubebuilder:object:root=true

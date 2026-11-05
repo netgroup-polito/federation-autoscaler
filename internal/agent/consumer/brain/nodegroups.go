@@ -26,6 +26,7 @@ import (
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
+	autoscalingv1alpha1 "github.com/netgroup-polito/federation-autoscaler/api/autoscaling/v1alpha1"
 	brokerv1alpha1 "github.com/netgroup-polito/federation-autoscaler/api/broker/v1alpha1"
 	brokerapi "github.com/netgroup-polito/federation-autoscaler/internal/broker/api"
 	"github.com/netgroup-polito/federation-autoscaler/internal/broker/chunk"
@@ -48,22 +49,55 @@ type Input struct {
 	// Consumer carries this consumer's placement policy and location.
 	Consumer brokerapi.ConsumerEntry
 
+	// LatencyBound, when set, drops every site whose latency from the bound's
+	// reference point exceeds the bound, before the policy ranks the rest.
+	// Use EffectiveBound to pick between the policy's and a request's bound.
+	LatencyBound *autoscalingv1alpha1.LatencyBound
+
+	// MeasuredLatencyMs[provider] is the round-trip time this consumer measured
+	// to that provider. It replaces the distance estimate when LatencyBound is
+	// measured from the consumer's own location.
+	MeasuredLatencyMs map[string]float64
+
 	// Sizer turns capacity into chunks. Nil means the default sizer, the same
 	// one the Broker uses.
 	Sizer chunk.Sizer
 }
 
-// NodeGroups builds the node-group view from the catalog offers. It converts
-// the offers into one in-memory advertisement per provider (see
-// Advertisements) and runs the shared placement core, so every policy behaves
-// exactly as it does on the Broker.
+// NodeGroups builds the node-group view from the catalog offers. It applies
+// the latency bound (if any), converts the remaining offers into one in-memory
+// advertisement per provider (see Advertisements) and runs the shared placement
+// core, so every policy behaves exactly as it does on the Broker.
 func NodeGroups(in Input) brokerapi.NodeGroupListResponse {
 	sizer := in.Sizer
 	if sizer == nil {
 		sizer = chunk.NewDefaultSizer()
 	}
+
+	offers := in.Offers
+	var held map[string]bool
+	if in.LatencyBound != nil {
+		kept := withinBound(in.Offers, in.LatencyBound, in.Consumer, in.MeasuredLatencyMs)
+		held = heldOutsideBound(in.Offers, kept, in.OwnReserved)
+		for _, o := range in.Offers {
+			if held[o.ProviderID] {
+				kept = append(kept, o)
+			}
+		}
+		offers = kept
+	}
+
+	advs := Advertisements(offers, in.OwnReserved, sizer)
+	for _, a := range advs {
+		if held[a.Spec.ClusterID] {
+			// Outside the bound but holding our chunks: listed, not growable.
+			a.Status.TotalChunks = a.Status.ReservedChunks
+			a.Status.AvailableChunks = 0
+		}
+	}
+
 	return brokerapi.BuildNodeGroups(brokerapi.PlacementInput{
-		Advertisements: Advertisements(in.Offers, in.OwnReserved, sizer),
+		Advertisements: advs,
 		Consumer:       in.Consumer,
 		InFlight:       in.InFlight,
 		Sizer:          sizer,

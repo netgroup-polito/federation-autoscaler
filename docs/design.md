@@ -368,11 +368,25 @@ metadata:
 spec:
   placement:
     type: Price     # Standard | Price | Eco | Latency; empty or absent = Standard
+  latencyBound:     # optional; consumer-side brain only (the central Broker ignores it)
+    maxLatencyMs: 3
+    from:           # optional reference point; absent = the consumer's own location
+      name: Asti
+      latitude: 44.9008
+      longitude: 8.2064
 ```
+
+`latencyBound` lets the consumer-side brain (local mode) drop every provider site whose estimated latency from the reference point exceeds `maxLatencyMs`, then rank the rest with `placement`. It is not pushed on the heartbeat. The rules:
+
+- **Estimate:** round-trip ms = straight-line km ÷ 100 (fibre, there and back). Real paths are longer, so the estimate is optimistic: "max 3 ms from Asti" keeps sites within about 300 km of Asti.
+- **Measured RTT wins:** when `from` is absent (the consumer's own location), a round-trip time the agent measured to a provider replaces the estimate.
+- **Strict:** a site with no coordinates, or a bound with no usable reference point, does not qualify.
+- **Per site, before pooling:** only qualifying sites count toward a provider's free chunks.
+- **Held providers stay listed:** a provider outside the bound on which the consumer already holds chunks stays listed with no free chunks, so the autoscaler keeps mapping those nodes but cannot grow them.
 
 ### 6.4 ResourceRequest (consumer)
 
-The manual reservation described in §5. Spec: `resources` (what to borrow), plus `duration` and `priority` (recorded but not yet enforced). Status: `phase` (`Pending | Reserved | Active | Migrating | Failed`), `reservationId`, `providerClusterId`, `chunkCount`, `migrationCount`, `message`.
+The manual reservation described in §5. Spec: `resources` (what to borrow), plus `duration` and `priority` (recorded but not yet enforced), and an optional `latencyBound` (same shape as on ConsumerPolicy) that overrides the policy's bound for this request in local mode. Status: `phase` (`Pending | Reserved | Active | Migrating | Failed`), `reservationId`, `providerClusterId`, `chunkCount`, `migrationCount`, `message`.
 
 ### 6.5 VirtualNodeState (consumer)
 
