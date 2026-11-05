@@ -42,8 +42,17 @@ type PlacementInput struct {
 	Consumer ConsumerEntry
 
 	// InFlight[provider] is true while this consumer has a reservation on that
-	// provider that is still being provisioned (see reservationInFlight).
+	// provider that is still being provisioned (see ReservationInFlight).
 	InFlight map[string]bool
+
+	// OwnReserved[provider] is how many chunks THIS consumer holds there. When
+	// non-nil, each view reports the consumer's own nodes: CurrentReserved =
+	// own and MaxSize = own + free, where free = TotalChunks - ReservedChunks
+	// (the provider-wide count). Head-room (MaxSize - CurrentReserved) stays
+	// the provider's free chunks, so every placement decision is unchanged;
+	// only the target size the Cluster Autoscaler sees becomes this consumer's
+	// own. Nil keeps the provider-wide counts.
+	OwnReserved map[string]int32
 
 	// Sizer recovers the per-chunk shape of each advertisement. Nil means the
 	// default sizer.
@@ -84,6 +93,12 @@ func BuildNodeGroups(in PlacementInput) NodeGroupListResponse {
 		costs[i], priced[i] = cost, ok
 		carbons[i], hasCarbon[i] = weightedCarbon(cadv)
 		views[i] = nodeGroupView(sizer, cadv, cost, ok)
+		if in.OwnReserved != nil {
+			own := in.OwnReserved[cadv.Spec.ClusterID]
+			free := max(cadv.Status.TotalChunks-cadv.Status.ReservedChunks, 0)
+			views[i].CurrentReserved = own
+			views[i].MaxSize = own + free
+		}
 	}
 
 	// In-flight reservations gate the "spill to the next-best" step so we don't

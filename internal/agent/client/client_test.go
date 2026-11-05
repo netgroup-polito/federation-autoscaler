@@ -20,6 +20,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -244,6 +245,7 @@ func TestDo_ClassifiesErrorBody(t *testing.T) {
 		{"forbidden", http.StatusForbidden, brokerapi.ErrCodeForbidden, IsForbidden},
 		{"not found", http.StatusNotFound, brokerapi.ErrCodeNotFound, IsNotFound},
 		{"conflict", http.StatusConflict, brokerapi.ErrCodeConflict, IsConflict},
+		{"insufficient capacity", http.StatusConflict, brokerapi.ErrCodeInsufficientCapacity, IsInsufficientCapacity},
 		{"precondition", http.StatusPreconditionFailed, brokerapi.ErrCodeServiceUnavailable, IsPreconditionFailed},
 		{"too many", http.StatusTooManyRequests, brokerapi.ErrCodeTooManyRequests, IsTooManyRequests},
 	}
@@ -277,6 +279,22 @@ func TestDo_ClassifiesErrorBody(t *testing.T) {
 				t.Errorf("request id: want req-1, got %q", typed.RequestID)
 			}
 		})
+	}
+}
+
+// TestIsInsufficientCapacity_NarrowerThanConflict: both are HTTP 409, but only
+// the InsufficientCapacity code means "this provider is full".
+func TestIsInsufficientCapacity_NarrowerThanConflict(t *testing.T) {
+	idempotencyClash := &Error{Category: CategoryConflict, Status: http.StatusConflict, Code: brokerapi.ErrCodeConflict}
+	if IsInsufficientCapacity(idempotencyClash) {
+		t.Error("an idempotency conflict is not \"provider full\"")
+	}
+	full := &Error{Category: CategoryConflict, Status: http.StatusConflict, Code: brokerapi.ErrCodeInsufficientCapacity}
+	if !IsInsufficientCapacity(fmt.Errorf("reserve: %w", full)) {
+		t.Error("a wrapped InsufficientCapacity error must be recognised")
+	}
+	if IsInsufficientCapacity(nil) || IsInsufficientCapacity(errors.New("boom")) {
+		t.Error("nil and untyped errors are not InsufficientCapacity")
 	}
 }
 

@@ -96,6 +96,9 @@ var _ = Describe("Step 11 end-to-end: Peer → VirtualNodeState → reconciler �
 		vn.SetName(liqoVNName)
 		vn.SetNamespace(suiteNamespace)
 		_ = k8sClient.Delete(suiteCtx, vn)
+		_ = k8sClient.Delete(suiteCtx, &brokerv1alpha1.Reservation{
+			ObjectMeta: metav1.ObjectMeta{Name: reservationID, Namespace: suiteNamespace},
+		})
 		_ = k8sClient.Delete(suiteCtx, &brokerv1alpha1.ClusterAdvertisement{
 			ObjectMeta: metav1.ObjectMeta{Name: providerCluster, Namespace: suiteNamespace},
 		})
@@ -139,6 +142,36 @@ var _ = Describe("Step 11 end-to-end: Peer → VirtualNodeState → reconciler �
 			c.Status.ReservedChunks = 1
 			c.Status.AvailableChunks = 1
 			return k8sClient.Status().Update(suiteCtx, c)
+		}, suiteTimeout, suiteInterval).Should(Succeed())
+
+		By("seeding this consumer's Peered reservation behind that reserved chunk")
+		// NodeGroupTargetSize reports the CALLING consumer's own chunks (its
+		// Reservations), not the provider-wide counter, so the chunk must be
+		// backed by a reservation owned by consumerCluster.
+		resv := &brokerv1alpha1.Reservation{
+			ObjectMeta: metav1.ObjectMeta{Name: reservationID, Namespace: suiteNamespace},
+			Spec: brokerv1alpha1.ReservationSpec{
+				ConsumerClusterID:     consumerCluster,
+				ConsumerLiqoClusterID: "liqo-" + consumerCluster,
+				ProviderClusterID:     providerCluster,
+				ProviderLiqoClusterID: "liqo-" + providerCluster,
+				ChunkCount:            1,
+				ChunkType:             brokerv1alpha1.ChunkTypeStandard,
+				Resources: corev1.ResourceList{
+					corev1.ResourceCPU:    resource.MustParse("2"),
+					corev1.ResourceMemory: resource.MustParse("4Gi"),
+				},
+			},
+		}
+		Expect(k8sClient.Create(suiteCtx, resv)).To(Succeed())
+		Eventually(func() error {
+			r := &brokerv1alpha1.Reservation{}
+			if err := k8sClient.Get(suiteCtx,
+				types.NamespacedName{Name: reservationID, Namespace: suiteNamespace}, r); err != nil {
+				return err
+			}
+			r.Status.Phase = brokerv1alpha1.ReservationPhasePeered
+			return k8sClient.Status().Update(suiteCtx, r)
 		}, suiteTimeout, suiteInterval).Should(Succeed())
 
 		By("creating the provider's Liqo tenant namespace, as liqoctl peer's auth phase would")

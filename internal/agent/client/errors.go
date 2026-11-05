@@ -121,6 +121,18 @@ func IsConflict(err error) bool           { return is(err, CategoryConflict) }
 func IsPreconditionFailed(err error) bool { return is(err, CategoryPreconditionFailed) }
 func IsTooManyRequests(err error) bool    { return is(err, CategoryTooManyRequests) }
 
+// IsInsufficientCapacity reports whether the broker refused a reservation
+// because the provider has no free chunk left (409 InsufficientCapacity). It
+// is narrower than IsConflict, which also covers an idempotency key reused
+// with a different payload.
+func IsInsufficientCapacity(err error) bool {
+	var e *Error
+	if !errors.As(err, &e) {
+		return false
+	}
+	return e.Code == brokerapi.ErrCodeInsufficientCapacity
+}
+
 func is(err error, want Category) bool {
 	var e *Error
 	if !errors.As(err, &e) {

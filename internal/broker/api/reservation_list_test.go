@@ -60,6 +60,34 @@ func callReservationList(t *testing.T, s *Server, callerID string) (ReservationL
 	return out, rec.Body.String()
 }
 
+// TestNodeGroupsReportOwnChunksPerConsumer: two consumers share provider p1
+// (3 chunks, 2 reserved: one each). Each consumer's view must report only its
+// own chunk as CurrentReserved (the Cluster Autoscaler's target size), while
+// the head-room stays the provider's 1 free chunk for both.
+func TestNodeGroupsReportOwnChunksPerConsumer(t *testing.T) {
+	s := newDashboardTestServer(t,
+		stdAdv("p1", 2, nil),
+		listResv("res-a", consumerCluster, "p1", brokerv1alpha1.ReservationPhasePeered),
+		listResv("res-b", "consumer-b", "p1", brokerv1alpha1.ReservationPhasePeered),
+		listResv("res-a-old", consumerCluster, "p1", brokerv1alpha1.ReservationPhaseReleased),
+	)
+	for _, consumer := range []string{consumerCluster, "consumer-b"} {
+		req := httptest.NewRequest(http.MethodGet, "/api/v1/nodegroups", nil)
+		req = req.WithContext(NewContextWithClusterID(req.Context(), consumer))
+		rec := httptest.NewRecorder()
+		s.handleNodeGroupsList(rec, req)
+		var out NodeGroupListResponse
+		if err := json.Unmarshal(rec.Body.Bytes(), &out); err != nil || len(out.NodeGroups) != 1 {
+			t.Fatalf("%s: status %d, body %s", consumer, rec.Code, rec.Body.String())
+		}
+		v := out.NodeGroups[0]
+		if v.CurrentReserved != 1 || v.MaxSize != 2 {
+			t.Errorf("%s: CurrentReserved/MaxSize = %d/%d, want 1/2 (own chunk + 1 free)",
+				consumer, v.CurrentReserved, v.MaxSize)
+		}
+	}
+}
+
 func TestReservationList(t *testing.T) {
 	s := newDashboardTestServer(t,
 		listResv("res-b", consumerCluster, "p1", brokerv1alpha1.ReservationPhasePeering),

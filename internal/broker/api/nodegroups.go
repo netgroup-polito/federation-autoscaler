@@ -74,7 +74,7 @@ func (s *Server) handleNodeGroupsList(w http.ResponseWriter, r *http.Request) {
 	consumerID := ClusterIDFromContext(ctx)
 	entry, _ := s.consumers.Lookup(consumerID) // zero ConsumerEntry ⇒ Standard default
 
-	inflight, err := s.inFlightByProvider(ctx, consumerID)
+	own, inflight, err := s.ownByProvider(ctx, consumerID)
 	if err != nil {
 		s.log.Error(err, "list Reservations for placement gate failed", "requestId", requestID)
 		writeError(w, http.StatusInternalServerError, ErrorResponse{
@@ -86,6 +86,7 @@ func (s *Server) handleNodeGroupsList(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, BuildNodeGroups(PlacementInput{
 		Advertisements: advs,
 		Consumer:       entry,
+		OwnReserved:    own,
 		InFlight:       inflight,
 		Sizer:          s.sizer,
 	}))
@@ -449,30 +450,61 @@ func consumerProviderDistances(entry ConsumerEntry, avail []*brokerv1alpha1.Clus
 	return distances, hasDist
 }
 
-// inFlightByProvider reports, per provider, whether THIS consumer has a
-// reservation still being provisioned — created/peering but whose Liqo virtual
-// node has not materialised yet (not Peered, not terminal). The placement
-// masking uses it to keep the consumer on its chosen provider while that
-// provider's chunk finishes peering, rather than spilling onto a dearer one.
-func (s *Server) inFlightByProvider(ctx context.Context, consumerID string) (map[string]bool, error) {
+// ownByProvider reports, per provider, THIS consumer's own bookings:
+//   - own[provider] is how many chunks it holds there (ReservationHoldsChunk),
+//     which becomes the view's CurrentReserved so the consumer's Cluster
+//     Autoscaler sees only its own nodes, never other consumers' chunks;
+//   - inFlight[provider] is true while one of them is still being provisioned
+//     (not Peered, not terminal). The placement masking uses it to keep the
+//     consumer on its chosen provider while that provider's chunk finishes
+//     peering, rather than spilling onto a dearer one.
+func (s *Server) ownByProvider(ctx context.Context, consumerID string) (map[string]int32, map[string]bool, error) {
 	var list brokerv1alpha1.ReservationList
 	if err := s.client.List(ctx, &list, client.InNamespace(s.namespace)); err != nil {
-		return nil, err
+		return nil, nil, err
 	}
-	out := map[string]bool{}
+	own := map[string]int32{}
+	inFlight := map[string]bool{}
 	for i := range list.Items {
 		r := &list.Items[i]
-		if r.Spec.ConsumerClusterID == consumerID && reservationInFlight(r.Status.Phase) {
-			out[r.Spec.ProviderClusterID] = true
+		if r.Spec.ConsumerClusterID != consumerID {
+			continue
+		}
+		if ReservationHoldsChunk(r.Status.Phase) {
+			n := r.Spec.ChunkCount
+			if n <= 0 {
+				n = 1 // one reservation is one chunk
+			}
+			own[r.Spec.ProviderClusterID] += n
+		}
+		if ReservationInFlight(r.Status.Phase) {
+			inFlight[r.Spec.ProviderClusterID] = true
 		}
 	}
-	return out, nil
+	return own, inFlight, nil
 }
 
-// reservationInFlight is true while a Reservation's chunk is being provisioned —
+// ReservationHoldsChunk mirrors the Broker's chunk accounting: a reservation
+// holds its chunk from creation until it is released. A release (DELETE) moves
+// it to Unpeering and frees the chunk at once; the terminal phases hold nothing.
+func ReservationHoldsChunk(p brokerv1alpha1.ReservationPhase) bool {
+	switch p {
+	case "",
+		brokerv1alpha1.ReservationPhasePending,
+		brokerv1alpha1.ReservationPhaseGeneratingKubeconfig,
+		brokerv1alpha1.ReservationPhaseKubeconfigReady,
+		brokerv1alpha1.ReservationPhasePeering,
+		brokerv1alpha1.ReservationPhasePeered:
+		return true
+	default:
+		return false
+	}
+}
+
+// ReservationInFlight is true while a Reservation's chunk is being provisioned —
 // before its virtual node is ready (Peered) and before any terminal phase.
 // Peered / Unpeering / Released / Failed / Expired are NOT in flight.
-func reservationInFlight(p brokerv1alpha1.ReservationPhase) bool {
+func ReservationInFlight(p brokerv1alpha1.ReservationPhase) bool {
 	switch p {
 	case "",
 		brokerv1alpha1.ReservationPhasePending,

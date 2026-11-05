@@ -59,6 +59,11 @@ type Input struct {
 	// measured from the consumer's own location.
 	MeasuredLatencyMs map[string]float64
 
+	// Full[provider] is true when the Broker recently refused a reservation on
+	// it for lack of capacity (see FullProviders). Such a provider stays listed
+	// but cannot grow, so the policy moves on to the next-best one.
+	Full map[string]bool
+
 	// Sizer turns capacity into chunks. Nil means the default sizer, the same
 	// one the Broker uses.
 	Sizer chunk.Sizer
@@ -89,8 +94,9 @@ func NodeGroups(in Input) brokerapi.NodeGroupListResponse {
 
 	advs := Advertisements(offers, in.OwnReserved, sizer)
 	for _, a := range advs {
-		if held[a.Spec.ClusterID] {
-			// Outside the bound but holding our chunks: listed, not growable.
+		if held[a.Spec.ClusterID] || in.Full[a.Spec.ClusterID] {
+			// Outside the bound but holding our chunks, or recently refused
+			// for lack of capacity: listed, not growable.
 			a.Status.TotalChunks = a.Status.ReservedChunks
 			a.Status.AvailableChunks = 0
 		}
