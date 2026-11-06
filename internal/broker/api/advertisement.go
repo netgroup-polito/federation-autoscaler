@@ -108,6 +108,17 @@ func (s *Server) handleAdvertisementUpsert(w http.ResponseWriter, r *http.Reques
 			"err", err.Error(), "clusterId", clusterID, "requestId", requestID)
 	}
 
+	// Record the same offer in the Store, when one is wired in. This is
+	// additive: the ClusterAdvertisement above remains the source of
+	// truth, and a failure here is logged rather than returned, so the
+	// provider sees exactly the response it saw before this call existed.
+	if s.store != nil {
+		if _, err := s.store.UpsertOffer(ctx, offerFromRequest(&req, chunkResult)); err != nil {
+			s.log.Info("store upsert failed (advertisement still accepted)",
+				"err", err.Error(), "clusterId", clusterID, "requestId", requestID)
+		}
+	}
+
 	// Piggyback any pending instructions for this provider onto the
 	// advertisement response (docs/design.md §7.3.1) so common-case
 	// instruction latency is bounded by the 30 s advertisement cadence.

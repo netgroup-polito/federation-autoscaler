@@ -27,6 +27,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	"github.com/netgroup-polito/federation-autoscaler/internal/broker/chunk"
+	"github.com/netgroup-polito/federation-autoscaler/internal/broker/store"
 )
 
 // Server is the Broker's REST surface (docs/design.md §7.3). It wires every
@@ -44,6 +45,11 @@ type Server struct {
 	sizer              chunk.Sizer
 	consumers          *ConsumerRegistry
 	reservationTimeout time.Duration
+
+	// store is the catalog behind the Store interface. It is nil unless
+	// one is supplied, and every use of it is guarded by that check, so
+	// the Broker behaves exactly as before when nobody wires one in.
+	store store.OfferStore
 }
 
 // ServerOptions bundles the construction-time settings of a Server. Empty
@@ -79,6 +85,17 @@ type ServerOptions struct {
 	// origin value force-expired active reservations and is not safe as a
 	// default.
 	ReservationTimeout time.Duration
+
+	// Store, when set, also receives every advertisement the Broker
+	// accepts, alongside the ClusterAdvertisement write that remains the
+	// source of truth.
+	//
+	// It deliberately has no default. Defaulting it to a store backed by
+	// the same custom resources would make the handler write the same
+	// object twice on every thirty-second heartbeat — redundant, and a
+	// behaviour change where this step is meant to introduce none. Left
+	// unset, the Store path is inert; set it to exercise a backend.
+	Store store.OfferStore
 }
 
 // NewServer returns a Server ready to serve traffic via Handler(). Panics if
@@ -110,6 +127,7 @@ func NewServer(opts ServerOptions) *Server {
 		sizer:              sizer,
 		consumers:          NewConsumerRegistry(),
 		reservationTimeout: resvTimeout,
+		store:              opts.Store,
 	}
 }
 
