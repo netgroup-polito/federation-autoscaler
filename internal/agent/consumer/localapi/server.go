@@ -22,7 +22,8 @@ limitations under the License.
 //
 // Routes:
 //
-//	GET    /local/nodegroups             proxy to client.GetNodeGroups
+//	GET    /local/nodegroups             proxy to client.GetNodeGroups, or built
+//	                                     by the local brain in local mode
 //	POST   /local/reservations           proxy to client.PostReservation
 //	DELETE /local/reservations/{id}      proxy to client.DeleteReservation
 //	GET    /local/virtual-nodes          list VirtualNodeState CRs in the
@@ -52,6 +53,7 @@ import (
 
 	autoscalingv1alpha1 "github.com/netgroup-polito/federation-autoscaler/api/autoscaling/v1alpha1"
 	agentclient "github.com/netgroup-polito/federation-autoscaler/internal/agent/client"
+	"github.com/netgroup-polito/federation-autoscaler/internal/agent/consumer/brain"
 	"github.com/netgroup-polito/federation-autoscaler/internal/agent/consumer/latency"
 	"github.com/netgroup-polito/federation-autoscaler/internal/agent/ollama"
 	brokerapi "github.com/netgroup-polito/federation-autoscaler/internal/broker/api"
@@ -108,6 +110,12 @@ type Options struct {
 	// func: no location is sent.
 	ConsumerLocation func() *ollama.Location
 
+	// Brain, when set, makes the placement decision locally (local mode):
+	// GET /local/nodegroups is built from the catalog by the brain instead of
+	// being fetched from the Broker. Booking still goes through the Broker.
+	// Nil means central mode (the Broker decides).
+	Brain *brain.Brain
+
 	// ShutdownTimeout caps how long Run waits for in-flight requests
 	// to drain when ctx is cancelled. Defaults to 5 s.
 	ShutdownTimeout time.Duration
@@ -131,6 +139,8 @@ type Server struct {
 	aiPrompt    string
 	ollama      *ollama.Client
 	location    func() *ollama.Location
+
+	brain *brain.Brain // nil in central mode
 }
 
 // New validates opts and returns a Server ready to Run. It performs no
@@ -162,6 +172,7 @@ func New(opts Options) (*Server, error) {
 		shutdown: shutdown,
 		ollama:   opts.OllamaClient,
 		location: opts.ConsumerLocation,
+		brain:    opts.Brain,
 	}
 	s.srv = &http.Server{
 		Addr:              opts.BindAddress,
@@ -216,7 +227,13 @@ func (s *Server) Run(ctx context.Context) error {
 // -----------------------------------------------------------------------------
 
 func (s *Server) handleNodeGroups(w http.ResponseWriter, r *http.Request) {
-	resp, err := s.client.GetNodeGroups(r.Context())
+	// A ResourceRequest may carry its own latency bound for this one call.
+	bound, err := DecodeLatencyBound(r.URL.Query())
+	if err != nil {
+		s.writeRawError(w, http.StatusBadRequest, brokerapi.ErrCodeInvalidRequest, err.Error())
+		return
+	}
+	resp, err := s.nodeGroups(r.Context(), bound)
 	if err != nil {
 		s.writeError(w, err)
 		return
@@ -340,6 +357,24 @@ func (s *Server) handleNodeGroups(w http.ResponseWriter, r *http.Request) {
 	}
 
 	s.writeJSON(w, http.StatusOK, resp)
+}
+
+// nodeGroups returns the node-group view to serve: built by the local brain in
+// local mode, fetched from the Broker in central mode. Everything after it
+// (latency re-mask, ConsumerChoice) is the same in both modes. bound is a
+// per-request latency bound (nil for none); only the local brain applies it,
+// the central Broker does not support bounds.
+func (s *Server) nodeGroups(
+	ctx context.Context, bound *autoscalingv1alpha1.LatencyBound,
+) (*brokerapi.NodeGroupListResponse, error) {
+	if s.brain != nil {
+		return s.brain.NodeGroupsWithin(ctx, bound)
+	}
+	if bound != nil {
+		s.log.V(1).Info("latency bound ignored: the central Broker does not apply bounds (use --brain=local)",
+			"maxLatencyMs", bound.MaxLatencyMs)
+	}
+	return s.client.GetNodeGroups(ctx)
 }
 
 // maskToMeasuredWinner probes the growable, probeable providers in a latency
@@ -478,6 +513,11 @@ func (s *Server) handleReservationCreate(w http.ResponseWriter, r *http.Request)
 
 	resp, err := s.client.PostReservation(r.Context(), reservationID, &req)
 	if err != nil {
+		if s.brain != nil {
+			// The brain chose on a catalog that can be a few seconds old; a
+			// "no free chunk" refusal makes its next decision move on.
+			s.brain.ObserveReservation(req.ProviderClusterID, err)
+		}
 		s.writeError(w, err)
 		return
 	}

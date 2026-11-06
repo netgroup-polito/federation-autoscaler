@@ -28,6 +28,7 @@ import (
 	clientfake "sigs.k8s.io/controller-runtime/pkg/client/fake"
 
 	agentclient "github.com/netgroup-polito/federation-autoscaler/internal/agent/client"
+	"github.com/netgroup-polito/federation-autoscaler/internal/agent/consumer/brain"
 	"github.com/netgroup-polito/federation-autoscaler/internal/agent/health"
 	"github.com/netgroup-polito/federation-autoscaler/internal/agent/poller"
 )
@@ -95,6 +96,8 @@ func TestRun_RejectsMissingFields(t *testing.T) {
 		{"missing liqo id", func(o *Options) { o.LiqoClusterID = "" }, "LiqoClusterID is required"},
 		{"missing local api addr", func(o *Options) { o.LocalAPIAddr = "" }, "LocalAPIAddr is required"},
 		{"missing probe", func(o *Options) { o.Probe = nil }, "Probe is required"},
+		{"unknown brain mode", func(o *Options) { o.BrainMode = "smart" }, "BrainMode must be"},
+		{"local brain without catalog", func(o *Options) { o.BrainMode = BrainLocal }, "needs a catalog"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -122,5 +125,17 @@ func TestRun_BootstrapSucceedsWithValidOptions(t *testing.T) {
 
 	if err := Run(ctx, validOptions(t)); err != nil {
 		t.Fatalf("Run with valid options should succeed; got %v", err)
+	}
+}
+
+func TestRun_LocalBrainWithCatalogBootstraps(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	opts := validOptions(t)
+	opts.BrainMode = BrainLocal
+	opts.Catalog = brain.NewMemoryCatalog()
+	if err := Run(ctx, opts); err != nil {
+		t.Fatalf("brain=local with a catalog should bootstrap; got %v", err)
 	}
 }

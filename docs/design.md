@@ -150,7 +150,7 @@ A **2-second read cache** in front of the node-groups fetch collapses CA's burst
 |---|---|
 | `NodeGroups` | Maps the (already policy-masked) node-group views to proto: one group per provider × chunk type, `minSize 0`, `maxSize` = that provider's chunk count as this consumer sees it. |
 | `NodeGroupForNode` | Returns the group for one of our virtual nodes, or an empty group ID for nodes that are not ours (CA then ignores them). |
-| `NodeGroupTargetSize` | Returns **`currentReserved`**: the number of reserved chunks, including ones still peering. Counting only materialised nodes would report 0 during the ~100 s peering window and make CA re-request nodes up to `maxSize`. |
+| `NodeGroupTargetSize` | Returns **`currentReserved`**: the number of chunks **this consumer** holds on that provider, including ones still peering. Counting only materialised nodes would report 0 during the ~100 s peering window and make CA re-request nodes up to `maxSize`. It never includes other consumers' chunks on the same provider: the Broker (and the local brain) report `currentReserved` = own chunks and `maxSize` = own + the provider's free chunks, so head-room is the provider's free capacity while CA's target matches the nodes it actually has. |
 | `NodeGroupIncreaseSize` | Fans out **delta separate single-chunk reservations** (`POST /local/reservations`, id `res-<uuid>` each) and returns; it does not wait for peering. One reservation = one chunk = one node. Partial failures are surfaced as an error so CA retries. |
 | `NodeGroupDeleteNodes` | Maps each node name to its reservation via `GET /local/virtual-nodes`, then issues one `DELETE /local/reservations/{id}` per distinct reservation. |
 | `NodeGroupDecreaseTargetSize` | Rejects non-negative deltas; otherwise a no-op, because target size counts reservations and this model has no phantom instances to cancel. |
@@ -176,11 +176,13 @@ One replica, `strategy: Recreate`, no leader election. The consumer cluster's **
 
 | Method | Endpoint | Description |
 |---|---|---|
-| GET | `/local/nodegroups` | Synchronous proxy of the Broker's `GET /api/v1/nodegroups`. When the response is a latency shortlist, the agent UDP-probes the candidates (5 probes, 300 ms timeout, median, 15 s result cache) and re-masks to the measured winner before returning. |
-| POST | `/local/reservations` | Forwards to the Broker's `POST /api/v1/reservations` synchronously; the Broker's HTTP status, error code, and message pass through (the optional error `details` object is dropped in transit). |
+| GET | `/local/nodegroups` | Synchronous proxy of the Broker's `GET /api/v1/nodegroups` (central mode), or built by the local brain from the catalog (`--brain=local`, see below). Optional query `?maxLatencyMs=&fromLat=&fromLon=&fromName=` carries a ResourceRequest's `latencyBound`; the local brain applies it over the ConsumerPolicy bound, the central Broker ignores it, and a malformed bound is a 400. When the response is a latency shortlist, the agent UDP-probes the candidates (5 probes, 300 ms timeout, median, 15 s result cache) and re-masks to the measured winner before returning. |
+| POST | `/local/reservations` | Forwards to the Broker's `POST /api/v1/reservations` synchronously; the Broker's HTTP status, error code, and message pass through (the optional error `details` object is dropped in transit). In local mode a 409 `InsufficientCapacity` also marks that provider full for 30 s, so the next decision moves on. |
 | DELETE | `/local/reservations/{id}` | Forwards to the Broker's `DELETE /api/v1/reservations/{id}` synchronously. |
 | GET | `/local/virtual-nodes` | Lists the local `VirtualNodeState` resources as views (node name falls back to the CR name while still `Creating`). |
 | GET | `/healthz` | Liveness. |
+
+**Who decides (`--brain`).** With `--brain=central` (the default) the Broker makes the placement decision, as described in §3. With `--brain=local` the agent decides itself, in `internal/agent/consumer/brain`: it reads the provider offers from the catalog, its own reservations (`GET /api/v1/reservations`), and its `ConsumerPolicy` (policy plus optional `latencyBound`), then runs the same placement core the Broker uses (`BuildNodeGroups`). Each provider's sites are pooled into one node group; free chunks are counted per site; `CurrentReserved` is this consumer's own chunks (never another consumer's). Booking still goes through the Broker in both modes. Until the catalog backend (Redis, `internal/catalog`) lands, `--brain=local` is refused at startup.
 
 **Broker-facing loops:** a 1 s `GET /api/v1/instructions` poll dispatching to instruction handlers, and a 15 s `POST /api/v1/heartbeat` carrying the current `ConsumerPolicy` (re-read every beat, so a policy change takes effect within ~15 s), the auto-discovered location (node IP resolved from `NODE_NAME` or `--advertised-ip`, geolocated via mock-geo when configured), and the latest measured RTTs plus chosen provider for the dashboard.
 
@@ -193,7 +195,7 @@ One replica, `strategy: Recreate`, no leader election. The consumer cluster's **
 | `Cleanup` | Same local teardown (VirtualNodeState, ResourceSlice, Secret) **without** running `liqoctl`, for cases where the provider may be unreachable. |
 | `Reconcile` | Return a snapshot of local `VirtualNodeState`s. Defined and handled, but the Broker does not emit `Reconcile` instructions yet (§11). |
 
-> **Implemented in:** `cmd/agent/`, `internal/agent/consumer/` (+ `heartbeat/`, `localapi/`, `latency/` UDP prober, `instructions/` Peer/Unpeer/Cleanup/Reconcile + `liqo.go` + `virtualnodestate.go` + `secrets.go`), `internal/agent/{client,poller,health,nodeip,geo}/`. Deployed via `config/agent/consumer/` (`--role=consumer`).
+> **Implemented in:** `cmd/agent/`, `internal/agent/consumer/` (+ `heartbeat/`, `localapi/`, `brain/` local placement decision (with a temporary copy of the catalog contract until `internal/catalog` lands), `latency/` UDP prober, `instructions/` Peer/Unpeer/Cleanup/Reconcile + `liqo.go` + `virtualnodestate.go` + `secrets.go`), `internal/agent/{client,poller,health,nodeip,geo}/`. Deployed via `config/agent/consumer/` (`--role=consumer`).
 
 ---
 

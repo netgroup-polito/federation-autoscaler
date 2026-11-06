@@ -41,6 +41,7 @@ import (
 	"github.com/google/uuid"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
+	autoscalingv1alpha1 "github.com/netgroup-polito/federation-autoscaler/api/autoscaling/v1alpha1"
 	"github.com/netgroup-polito/federation-autoscaler/internal/agent/consumer/localapi"
 	brokerapi "github.com/netgroup-polito/federation-autoscaler/internal/broker/api"
 )
@@ -122,8 +123,21 @@ func New(opts Options) (*Client, error) {
 // GetNodeGroups proxies CA's view of available node groups through the
 // agent (which proxies to the broker's GET /api/v1/nodegroups).
 func (c *Client) GetNodeGroups(ctx context.Context) (*brokerapi.NodeGroupListResponse, error) {
+	return c.GetNodeGroupsWithin(ctx, nil)
+}
+
+// GetNodeGroupsWithin is GetNodeGroups with a per-request latency bound (a
+// ResourceRequest's spec.latencyBound), sent as query parameters. A nil bound
+// is the plain GetNodeGroups. Only the agent's local brain applies the bound.
+func (c *Client) GetNodeGroupsWithin(
+	ctx context.Context, bound *autoscalingv1alpha1.LatencyBound,
+) (*brokerapi.NodeGroupListResponse, error) {
+	path := "/local/nodegroups"
+	if q := localapi.EncodeLatencyBound(bound); q != nil {
+		path += "?" + q.Encode()
+	}
 	out := &brokerapi.NodeGroupListResponse{}
-	if err := c.do(ctx, http.MethodGet, "/local/nodegroups", nil, out, ""); err != nil {
+	if err := c.do(ctx, http.MethodGet, path, nil, out, ""); err != nil {
 		return nil, err
 	}
 	return out, nil
@@ -208,6 +222,9 @@ func (c *Client) do(
 
 	u := *c.baseURL
 	u.Path = path
+	if p, query, ok := strings.Cut(path, "?"); ok {
+		u.Path, u.RawQuery = p, query
+	}
 	req, err := http.NewRequestWithContext(ctx, method, u.String(), bodyReader)
 	if err != nil {
 		return &Error{

@@ -88,10 +88,13 @@ type Options struct {
 type Server struct {
 	protos.UnimplementedCloudProviderServer
 
-	opts     Options
-	log      logr.Logger
-	agent    *agentclient.Client
-	grpcSrv  *grpc.Server
+	opts    Options
+	log     logr.Logger
+	agent   *agentclient.Client
+	grpcSrv *grpc.Server
+
+	// listener is set by Run and read by Addr from other goroutines.
+	lnMu     sync.Mutex
 	listener net.Listener
 
 	// nodeGroups read-through cache. CA calls NodeGroups + NodeGroupTargetSize +
@@ -161,7 +164,9 @@ func (s *Server) Run(ctx context.Context) error {
 	if err != nil {
 		return fmt.Errorf("grpcserver: listen on %q: %w", s.opts.BindAddress, err)
 	}
+	s.lnMu.Lock()
 	s.listener = l
+	s.lnMu.Unlock()
 
 	s.log.Info("starting externalgrpc server", "bindAddress", l.Addr().String())
 
@@ -187,7 +192,9 @@ func (s *Server) Run(ctx context.Context) error {
 			s.log.Info("graceful shutdown deadline exceeded; forcing stop")
 			s.grpcSrv.Stop()
 		}
-		if err := <-serveErr; err != nil {
+		// When the stop wins the race against Serve starting, Serve returns
+		// ErrServerStopped: that is still a clean shutdown, not a failure.
+		if err := <-serveErr; err != nil && !errors.Is(err, grpc.ErrServerStopped) {
 			return fmt.Errorf("grpcserver: serve: %w", err)
 		}
 		return nil
@@ -202,6 +209,8 @@ func (s *Server) Run(ctx context.Context) error {
 // Addr exposes the listener's resolved address; useful in tests that
 // bind to ":0" and need to learn the OS-assigned port.
 func (s *Server) Addr() net.Addr {
+	s.lnMu.Lock()
+	defer s.lnMu.Unlock()
 	if s.listener == nil {
 		return nil
 	}

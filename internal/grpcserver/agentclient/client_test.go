@@ -23,12 +23,14 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"strings"
 	"sync"
 	"testing"
 
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
+	autoscalingv1alpha1 "github.com/netgroup-polito/federation-autoscaler/api/autoscaling/v1alpha1"
 	brokerv1alpha1 "github.com/netgroup-polito/federation-autoscaler/api/broker/v1alpha1"
 	"github.com/netgroup-polito/federation-autoscaler/internal/agent/consumer/localapi"
 	brokerapi "github.com/netgroup-polito/federation-autoscaler/internal/broker/api"
@@ -120,11 +122,47 @@ func TestGetNodeGroups(t *testing.T) {
 		t.Fatalf("GetNodeGroups: %v", err)
 	}
 	m, p, _, _ := fb.snapshot()
-	if m != http.MethodGet || p != "/local/nodegroups" {
+	if m != http.MethodGet || p != nodeGroupsPath {
 		t.Errorf("wrong method/path: %s %s", m, p)
 	}
 	if len(resp.NodeGroups) != 1 || resp.NodeGroups[0].ID != "p1/standard" || resp.Generation != 7 {
 		t.Errorf("decode mismatch: %+v", resp)
+	}
+}
+
+// nodeGroupsPath is the local API route both node-group calls hit.
+const nodeGroupsPath = "/local/nodegroups"
+
+func TestGetNodeGroupsWithinSendsBound(t *testing.T) {
+	var gotQuery string
+	fb := newFakeLocalAPI(t, func(w http.ResponseWriter, r *http.Request) {
+		gotQuery = r.URL.RawQuery
+		w.Header().Set("Content-Type", brokerapi.ContentTypeJSON)
+		_ = json.NewEncoder(w).Encode(brokerapi.NodeGroupListResponse{})
+	})
+	bound := &autoscalingv1alpha1.LatencyBound{
+		MaxLatencyMs: 3,
+		From:         &autoscalingv1alpha1.GeoPoint{Name: "Asti", Latitude: 44.9008, Longitude: 8.2064},
+	}
+	if _, err := fb.client(t).GetNodeGroupsWithin(context.Background(), bound); err != nil {
+		t.Fatalf("GetNodeGroupsWithin: %v", err)
+	}
+	if _, p, _, _ := fb.snapshot(); p != nodeGroupsPath {
+		t.Errorf("path = %q, want /local/nodegroups (query must not be folded into the path)", p)
+	}
+	q, _ := url.ParseQuery(gotQuery)
+	decoded, err := localapi.DecodeLatencyBound(q)
+	if err != nil || decoded == nil || decoded.MaxLatencyMs != 3 || decoded.From == nil ||
+		decoded.From.Name != "Asti" || decoded.From.Latitude != 44.9008 {
+		t.Errorf("bound did not round-trip: query %q → %+v, %v", gotQuery, decoded, err)
+	}
+
+	// No bound: no query at all.
+	if _, err := fb.client(t).GetNodeGroups(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if gotQuery != "" {
+		t.Errorf("GetNodeGroups must send no query, got %q", gotQuery)
 	}
 }
 

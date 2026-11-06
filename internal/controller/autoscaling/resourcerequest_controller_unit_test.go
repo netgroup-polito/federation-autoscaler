@@ -680,3 +680,51 @@ func TestReEvalDisabledByZeroInterval(t *testing.T) {
 		t.Fatalf("re-eval disabled (interval 0) must not migrate; delete=%d", agent.deleteCalls)
 	}
 }
+
+// --- per-request latency bound -----------------------------------------------
+
+// boundedFakeClient is a fakeReservationClient that also accepts a latency
+// bound, like the real agent client, and records what it was asked.
+type boundedFakeClient struct {
+	fakeReservationClient
+	withinCalls int
+	lastBound   *autoscalingv1alpha1.LatencyBound
+}
+
+func (f *boundedFakeClient) GetNodeGroupsWithin(
+	ctx context.Context, bound *autoscalingv1alpha1.LatencyBound,
+) (*brokerapi.NodeGroupListResponse, error) {
+	f.withinCalls++
+	f.lastBound = bound
+	return f.GetNodeGroups(ctx)
+}
+
+func TestNodeGroupsForPassesRequestBound(t *testing.T) {
+	bound := &autoscalingv1alpha1.LatencyBound{
+		MaxLatencyMs: 3,
+		From:         &autoscalingv1alpha1.GeoPoint{Name: "Asti", Latitude: 44.9008, Longitude: 8.2064},
+	}
+	withBound := &autoscalingv1alpha1.ResourceRequest{Spec: autoscalingv1alpha1.ResourceRequestSpec{LatencyBound: bound}}
+	noBound := &autoscalingv1alpha1.ResourceRequest{}
+
+	agent := &boundedFakeClient{}
+	r := &ResourceRequestReconciler{Agent: agent}
+	if _, err := r.nodeGroupsFor(context.Background(), withBound); err != nil {
+		t.Fatal(err)
+	}
+	if agent.withinCalls != 1 || agent.lastBound != bound {
+		t.Errorf("a request's bound must be passed to the agent: calls=%d bound=%+v", agent.withinCalls, agent.lastBound)
+	}
+	if _, err := r.nodeGroupsFor(context.Background(), noBound); err != nil {
+		t.Fatal(err)
+	}
+	if agent.withinCalls != 1 {
+		t.Errorf("a request without a bound must use the plain call, within calls = %d", agent.withinCalls)
+	}
+
+	// A client that cannot take a bound still works (unbounded view).
+	plain := &ResourceRequestReconciler{Agent: &fakeReservationClient{}}
+	if _, err := plain.nodeGroupsFor(context.Background(), withBound); err != nil {
+		t.Errorf("a plain client must fall back to GetNodeGroups: %v", err)
+	}
+}

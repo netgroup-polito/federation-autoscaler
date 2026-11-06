@@ -104,6 +104,7 @@ func main() {
 		ollamaURL             string
 		ollamaModel           string
 		ollamaTimeout         time.Duration
+		brainMode             string
 	)
 
 	flag.StringVar(&role, "role", "",
@@ -200,6 +201,11 @@ func main() {
 		"(consumer role only) Upper bound on one ConsumerChoice LLM call. A call that "+
 			"exceeds it falls back to the deterministic strategy; a small model on CPU "+
 			"needs tens of seconds. Ignored when --ollama-url is empty.")
+	flag.StringVar(&brainMode, "brain", consumer.BrainCentral,
+		"(consumer role only) Who makes the placement decision: \"central\" asks the "+
+			"Broker (default); \"local\" decides on this consumer from the catalog. "+
+			"Booking goes through the Broker in both modes. \"local\" needs a catalog "+
+			"backend, which is not available yet.")
 
 	opts := zap.Options{Development: true}
 	opts.BindFlags(flag.CommandLine)
@@ -330,6 +336,9 @@ func main() {
 			MockGeoURL:        mockGeoURL,
 			Logger:            ctrl.Log.WithName("consumer"),
 			Probe:             probe,
+			BrainMode:         brainMode,
+			// No catalog backend yet: brain=local is refused at startup until
+			// the Redis catalog (internal/catalog) lands.
 		}); err != nil {
 			setupLog.Error(err, "failed to bootstrap consumer role")
 			os.Exit(1)

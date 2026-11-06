@@ -40,6 +40,7 @@ import (
 	autoscalingv1alpha1 "github.com/netgroup-polito/federation-autoscaler/api/autoscaling/v1alpha1"
 	agentclient "github.com/netgroup-polito/federation-autoscaler/internal/agent/client"
 	"github.com/netgroup-polito/federation-autoscaler/internal/agent/console"
+	"github.com/netgroup-polito/federation-autoscaler/internal/agent/consumer/brain"
 	"github.com/netgroup-polito/federation-autoscaler/internal/agent/consumer/heartbeat"
 	"github.com/netgroup-polito/federation-autoscaler/internal/agent/consumer/instructions"
 	"github.com/netgroup-polito/federation-autoscaler/internal/agent/consumer/latency"
@@ -152,7 +153,23 @@ type Options struct {
 	// stalled heartbeat reddens /readyz alongside a stalled instruction
 	// poll.
 	Probe *health.Probe
+
+	// BrainMode selects who makes the placement decision: BrainCentral (or
+	// empty) asks the Broker, as today; BrainLocal decides on this consumer
+	// from the catalog (internal/agent/consumer/brain). Booking goes through
+	// the Broker in both modes.
+	BrainMode string
+
+	// Catalog is where the local brain reads provider offers from. Required
+	// when BrainMode is BrainLocal; ignored otherwise.
+	Catalog brain.Reader
 }
+
+// Brain modes for Options.BrainMode (the agent's --brain flag).
+const (
+	BrainCentral = "central"
+	BrainLocal   = "local"
+)
 
 // Run wires the consumer-role instruction handlers onto opts.Registry
 // and starts the heartbeat poster (and, in subsequent substeps, the
@@ -245,7 +262,28 @@ func Run(ctx context.Context, opts Options) error {
 			"ollamaURL", opts.OllamaURL, "model", opts.OllamaModel, "timeout", opts.OllamaTimeout)
 	}
 
+	// Local mode: the placement decision is made here, from the catalog.
+	var localBrain *brain.Brain
+	if opts.BrainMode == BrainLocal {
+		localBrain, err = brain.New(brain.Options{
+			Catalog:      opts.Catalog,
+			Reservations: opts.Client,
+			LocalClient:  opts.LocalClient,
+			Namespace:    namespace,
+			Location: func() (float64, float64, bool) {
+				lat, lon, _, ok := beater.LastLocation()
+				return lat, lon, ok
+			},
+			MeasuredLatencyMs: func() map[string]float64 { return prober.LastMeasurements().RTTs },
+		})
+		if err != nil {
+			return fmt.Errorf("consumer: build local brain: %w", err)
+		}
+		logger.Info("placement decided locally (brain=local); booking still goes through the Broker")
+	}
+
 	localServer, err := localapi.New(localapi.Options{
+		Brain:        localBrain,
 		Prober:       prober,
 		BindAddress:  opts.LocalAPIAddr,
 		Client:       opts.Client,
@@ -325,6 +363,11 @@ func validate(o Options) error {
 		return errors.New("consumer: LocalAPIAddr is required")
 	case o.Probe == nil:
 		return errors.New("consumer: Probe is required")
+	case o.BrainMode != "" && o.BrainMode != BrainCentral && o.BrainMode != BrainLocal:
+		return fmt.Errorf("consumer: BrainMode must be %q or %q, got %q", BrainCentral, BrainLocal, o.BrainMode)
+	case o.BrainMode == BrainLocal && o.Catalog == nil:
+		return errors.New("consumer: brain=local needs a catalog to read offers from, " +
+			"and no catalog backend is available yet (the Redis catalog, internal/catalog, is pending)")
 	}
 	return nil
 }

@@ -79,6 +79,29 @@ type ReservationClient interface {
 	DeleteReservation(ctx context.Context, reservationID string) (*brokerapi.ReleaseResponse, error)
 }
 
+// boundedNodeGroups is implemented by agent clients that can pass a
+// per-request latency bound to the agent (*agentclient.Client does). It is
+// optional so simple ReservationClient fakes keep working; they get the
+// unbounded view.
+type boundedNodeGroups interface {
+	GetNodeGroupsWithin(
+		ctx context.Context, bound *autoscalingv1alpha1.LatencyBound,
+	) (*brokerapi.NodeGroupListResponse, error)
+}
+
+// nodeGroupsFor fetches the node groups for one ResourceRequest, applying its
+// spec.latencyBound (which overrides the ConsumerPolicy bound in local mode).
+func (r *ResourceRequestReconciler) nodeGroupsFor(
+	ctx context.Context, rr *autoscalingv1alpha1.ResourceRequest,
+) (*brokerapi.NodeGroupListResponse, error) {
+	if rr.Spec.LatencyBound != nil {
+		if b, ok := r.Agent.(boundedNodeGroups); ok {
+			return b.GetNodeGroupsWithin(ctx, rr.Spec.LatencyBound)
+		}
+	}
+	return r.Agent.GetNodeGroups(ctx)
+}
+
 // ResourceRequestReconciler turns a user-created ResourceRequest into a broker
 // reservation (create → reserve + peer) and releases it on delete (delete →
 // unpeer + free), reusing the Cluster-Autoscaler reservation path via the
@@ -164,7 +187,7 @@ func (r *ResourceRequestReconciler) Reconcile(ctx context.Context, req ctrl.Requ
 
 	// Choose a provider (broker node groups are already policy-masked, same as CA
 	// sees), size the request into whole chunks, and reserve.
-	resp, err := r.Agent.GetNodeGroups(ctx)
+	resp, err := r.nodeGroupsFor(ctx, &rr)
 	if err != nil {
 		return r.setPending(ctx, &rr, "broker node groups unavailable: "+err.Error())
 	}
@@ -369,7 +392,7 @@ func (r *ResourceRequestReconciler) maybeStartMigration(ctx context.Context, rr 
 		return ctrl.Result{}, false, nil // debounced: too soon since the last transition
 	}
 
-	resp, err := r.Agent.GetNodeGroups(ctx)
+	resp, err := r.nodeGroupsFor(ctx, rr)
 	if err != nil {
 		log.V(1).Info("re-eval: node groups unavailable; holding", "err", err.Error())
 		return ctrl.Result{}, false, nil // transient — keep holding, try next tick
@@ -422,7 +445,7 @@ func (r *ResourceRequestReconciler) maybeStartMigration(ctx context.Context, rr 
 // best provider under the request's already-assigned fresh reservation id.
 func (r *ResourceRequestReconciler) completeMigration(ctx context.Context, rr *autoscalingv1alpha1.ResourceRequest) (ctrl.Result, error) {
 	log := ctrl.LoggerFrom(ctx)
-	resp, err := r.Agent.GetNodeGroups(ctx)
+	resp, err := r.nodeGroupsFor(ctx, rr)
 	if err != nil {
 		return ctrl.Result{RequeueAfter: pendingRequeue}, nil // retry the peer
 	}
