@@ -274,3 +274,39 @@ func TestDashboardHandlersNoAuth(t *testing.T) {
 		t.Errorf("unknown path status = %d, want 404", rr.Code)
 	}
 }
+
+// TestDashboardShowsLocalDecision: a consumer deciding placement itself
+// (--brain=local) reports decidedBy "local" and its pick; the overview carries
+// both, with the measured RTT when there is one. A central consumer carries
+// neither.
+func TestDashboardShowsLocalDecision(t *testing.T) {
+	s := newDashboardTestServer(t)
+	s.consumers.Touch(consumerCluster, "liqo-ca", autoscalingv1alpha1.PlacementPolicy{}, "", "", nil, nil)
+	s.consumers.SetDecision(consumerCluster, map[string]float64{providerCluster: 2.5}, providerCluster, DecidedByLocal)
+	s.consumers.Touch("consumer-b", "liqo-cb", autoscalingv1alpha1.PlacementPolicy{}, "", "", nil, nil)
+	s.consumers.SetDecision("consumer-b", nil, "", "")
+
+	ov, err := s.buildOverview(context.Background())
+	if err != nil {
+		t.Fatalf("buildOverview: %v", err)
+	}
+	local, central := ov.Consumers[0], ov.Consumers[1]
+	if local.DecidedBy != DecidedByLocal || local.ChosenProvider != providerCluster ||
+		local.MeasuredRTT == nil || *local.MeasuredRTT != 2.5 {
+		t.Errorf("local consumer view = %+v, want decided locally → %s (2.5 ms)", local, providerCluster)
+	}
+	if central.DecidedBy != "" || central.ChosenProvider != "" {
+		t.Errorf("central consumer view = %+v, want no decision report", central)
+	}
+}
+
+func TestHeartbeatRejectsUnknownDecidedBy(t *testing.T) {
+	ok := &HeartbeatRequest{ClusterID: "c", LiqoClusterID: "liqo-c", DecidedBy: DecidedByLocal}
+	if err := validateHeartbeatRequest(ok); err != nil {
+		t.Errorf("decidedBy=local must be accepted: %v", err)
+	}
+	bad := &HeartbeatRequest{ClusterID: "c", LiqoClusterID: "liqo-c", DecidedBy: "somebody"}
+	if err := validateHeartbeatRequest(bad); err == nil {
+		t.Error("an unknown decidedBy must be rejected")
+	}
+}

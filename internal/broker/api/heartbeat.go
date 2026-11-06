@@ -66,7 +66,7 @@ func (s *Server) handleHeartbeat(w http.ResponseWriter, r *http.Request) {
 		placement = *req.Placement
 	}
 	s.consumers.Touch(req.ClusterID, req.LiqoClusterID, placement, req.Region, req.City, req.Latitude, req.Longitude)
-	s.consumers.SetMeasuredLatency(req.ClusterID, req.MeasuredLatencies, req.ChosenProvider)
+	s.consumers.SetDecision(req.ClusterID, req.MeasuredLatencies, req.ChosenProvider, req.DecidedBy)
 
 	writeJSON(w, http.StatusOK, HeartbeatResponse{AckAt: metav1.Now()})
 }
@@ -77,6 +77,8 @@ func validateHeartbeatRequest(req *HeartbeatRequest) error {
 		return errors.New("clusterId is required")
 	case req.LiqoClusterID == "":
 		return errors.New("liqoClusterId is required")
+	case req.DecidedBy != "" && req.DecidedBy != DecidedByLocal:
+		return fmt.Errorf("decidedBy must be empty or %q, got %q", DecidedByLocal, req.DecidedBy)
 	}
 	return nil
 }

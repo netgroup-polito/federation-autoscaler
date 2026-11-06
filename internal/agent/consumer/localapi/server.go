@@ -267,7 +267,7 @@ func (s *Server) handleNodeGroups(w http.ResponseWriter, r *http.Request) {
 				s.aiMutex.Unlock()
 
 				maskToFirstAvailable(resp, ranked)
-				s.writeJSON(w, http.StatusOK, resp)
+				s.serveNodeGroups(w, resp)
 				return
 			}
 
@@ -356,6 +356,17 @@ func (s *Server) handleNodeGroups(w http.ResponseWriter, r *http.Request) {
 		maskToFirstAvailable(resp, ranked) // nil ranking (no capacity) masks everything
 	}
 
+	s.serveNodeGroups(w, resp)
+}
+
+// serveNodeGroups writes the final node-group view. In local mode it first
+// records the brain's pick for the heartbeat (the dashboard's "decided
+// locally"). The temporary all-masked view served while the LLM is still
+// answering is written directly instead, so it never shows up as a choice.
+func (s *Server) serveNodeGroups(w http.ResponseWriter, resp *brokerapi.NodeGroupListResponse) {
+	if s.brain != nil {
+		s.brain.RecordChoice(resp)
+	}
 	s.writeJSON(w, http.StatusOK, resp)
 }
 

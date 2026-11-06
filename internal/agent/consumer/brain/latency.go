@@ -17,6 +17,8 @@ limitations under the License.
 package brain
 
 import (
+	"math"
+
 	autoscalingv1alpha1 "github.com/netgroup-polito/federation-autoscaler/api/autoscaling/v1alpha1"
 	brokerapi "github.com/netgroup-polito/federation-autoscaler/internal/broker/api"
 )
@@ -42,55 +44,62 @@ func EffectiveBound(policy, request *autoscalingv1alpha1.LatencyBound) *autoscal
 	return policy
 }
 
-// withinBound keeps the offers (sites) whose latency from the bound's
-// reference point is at most MaxLatencyMs, and reports which providers lost at
-// least one site. With a nil bound it returns the offers unchanged.
+// withinBound keeps the offers (sites) whose round-trip latency to this
+// consumer is at most MaxLatencyMs. With a nil bound it returns the offers
+// unchanged.
 //
-// The reference point is bound.From, or the consumer's own location when From
-// is empty. In that second case a measured round-trip time for the provider
-// (from the agent's UDP probe) replaces the distance estimate, because it is
-// the real path from this consumer.
+// A site's latency is the round-trip time measured to its probe endpoint
+// (measuredMs, keyed by endpoint) when there is a finite measurement. Otherwise
+// it falls back to the distance estimate between the consumer's location and
+// the site's, and the site is reported in estimated ("provider/site") so the
+// caller can log that the decision rests on an estimate.
 //
-// The filter is strict: a site whose latency cannot be evaluated (no
-// coordinates, or no reference location at all) does not qualify.
+// The filter is strict: a site with neither a measurement nor coordinates (or
+// a consumer with no known location) does not qualify.
 func withinBound(
 	offers []Offer, bound *autoscalingv1alpha1.LatencyBound,
 	consumer brokerapi.ConsumerEntry, measuredMs map[string]float64,
-) []Offer {
+) (kept []Offer, estimated []string) {
 	if bound == nil {
-		return offers
+		return offers, nil
 	}
 	limit := float64(bound.MaxLatencyMs)
 
-	fromConsumer := bound.From == nil
-	var refLat, refLon float64
-	hasRef := true
-	if fromConsumer {
-		refLat, refLon, hasRef = consumer.Latitude, consumer.Longitude, consumer.HasLocation
-	} else {
-		refLat, refLon = bound.From.Latitude, bound.From.Longitude
-	}
-
-	kept := make([]Offer, 0, len(offers))
+	kept = make([]Offer, 0, len(offers))
 	for _, o := range offers {
-		if fromConsumer {
-			if rtt, ok := measuredMs[o.ProviderID]; ok {
-				if rtt <= limit {
-					kept = append(kept, o)
-				}
-				continue
+		if rtt, ok := measuredMs[o.ProbeEndpoint]; ok && o.ProbeEndpoint != "" && isFinite(rtt) {
+			if rtt <= limit {
+				kept = append(kept, o)
 			}
+			continue
 		}
 		lat, lon := o.Location.Latitude, o.Location.Longitude
-		if !hasRef || lat == nil || lon == nil {
+		if !consumer.HasLocation || lat == nil || lon == nil {
 			continue // cannot evaluate → not within the bound
 		}
-		if EstimateLatencyMs(brokerapi.HaversineKm(refLat, refLon, *lat, *lon)) <= limit {
+		estimated = append(estimated, o.ProviderID+"/"+o.SiteID)
+		km := brokerapi.HaversineKm(consumer.Latitude, consumer.Longitude, *lat, *lon)
+		if EstimateLatencyMs(km) <= limit {
 			kept = append(kept, o)
 		}
 	}
-	return kept
+	return kept, estimated
 }
+
+// probeEndpoints returns the distinct, non-empty probe endpoints of offers.
+func probeEndpoints(offers []Offer) []string {
+	seen := map[string]bool{}
+	var out []string
+	for _, o := range offers {
+		if o.ProbeEndpoint != "" && !seen[o.ProbeEndpoint] {
+			seen[o.ProbeEndpoint] = true
+			out = append(out, o.ProbeEndpoint)
+		}
+	}
+	return out
+}
+
+func isFinite(v float64) bool { return !math.IsInf(v, 0) && !math.IsNaN(v) }
 
 // heldOutsideBound returns the providers this consumer holds chunks on but
 // which have no site left after the bound filter. NodeGroups keeps them listed

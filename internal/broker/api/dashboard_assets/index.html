@@ -182,7 +182,7 @@
   <section>
     <h2>Registered Consumers <span class="count" id="consCount">0</span></h2>
     <div class="table-wrap"><table>
-      <thead><tr><th>Consumer cluster</th><th>Liqo cluster ID</th><th>Policy</th><th>Location</th><th>Measured RTT</th><th>Last heartbeat</th></tr></thead>
+      <thead><tr><th>Consumer cluster</th><th>Liqo cluster ID</th><th>Policy</th><th>Location</th><th>Chosen provider</th><th>Last heartbeat</th></tr></thead>
       <tbody id="consBody"></tbody>
     </table></div>
   </section>
@@ -331,12 +331,14 @@
       return city || region || "—";
     }
 
-    // fmtMeasured renders the consumer's measured-latency result: the provider it
-    // grew after UDP-probing, plus that provider's median RTT; "—" when unset.
+    // fmtMeasured renders the choice the consumer reported: the provider it grew
+    // plus that provider's median RTT when measured; "—" when unset. A consumer
+    // that decides placement itself (--brain=local) is marked "decided locally".
     function fmtMeasured(c) {
-      if (!c.chosenProvider) return "—";
+      const local = c.decidedBy === "local" ? "decided locally " : "";
+      if (!c.chosenProvider) return local ? "decided locally, nothing to grow" : "—";
       const rtt = (c.measuredRtt != null) ? " (" + c.measuredRtt.toFixed(1) + " ms)" : "";
-      return "→ " + clusterShort(c.chosenProvider) + rtt;
+      return local + "→ " + clusterShort(c.chosenProvider) + rtt;
     }
 
     function fmtCapacityCustom(pct, fixed) {
@@ -447,8 +449,8 @@
         tr.appendChild(pill(c.placement || "Standard", "blue"));
         // Consumer's auto-discovered location (latency origin); "—" when unset.
         tr.appendChild(td(fmtLocation(c.city, c.region), { mono: true }));
-        // Measured-latency result (latency strategy): the provider the consumer
-        // grew after UDP-probing + its median RTT; "—" for non-latency consumers.
+        // The consumer's reported choice: in local mode its brain's pick, in
+        // central mode the measured-latency winner; "—" when it reports none.
         tr.appendChild(td(fmtMeasured(c), { mono: true }));
         tr.appendChild(td(fmtTime(c.lastSeen)));
         tbody.appendChild(tr);

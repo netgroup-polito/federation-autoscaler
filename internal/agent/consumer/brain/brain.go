@@ -20,8 +20,11 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"sync"
 
+	"github.com/go-logr/logr"
 	ctrlclient "sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/log"
 
 	autoscalingv1alpha1 "github.com/netgroup-polito/federation-autoscaler/api/autoscaling/v1alpha1"
 	brokerapi "github.com/netgroup-polito/federation-autoscaler/internal/broker/api"
@@ -32,6 +35,12 @@ import (
 // (GET /api/v1/reservations). Satisfied by *agentclient.Client.
 type ReservationLister interface {
 	ListReservations(ctx context.Context) (*brokerapi.ReservationListResponse, error)
+}
+
+// LatencyProber measures round-trip times to probe endpoints (+Inf for one
+// that does not answer). Satisfied by *latency.Prober.
+type LatencyProber interface {
+	Measure(ctx context.Context, endpoints []string) map[string]float64
 }
 
 // Options configures a Brain.
@@ -52,9 +61,13 @@ type Options struct {
 	// (the location the heartbeat reports). Nil means no location.
 	Location func() (lat, lon float64, ok bool)
 
-	// MeasuredLatencyMs returns the latest round-trip times this consumer
-	// measured per provider (the latency prober). Nil means none.
-	MeasuredLatencyMs func() map[string]float64
+	// Prober measures the round-trip time to each candidate site's probe
+	// endpoint whenever a latency bound applies, under any placement policy.
+	// Nil means no measurement: the bound is checked on the distance estimate.
+	Prober LatencyProber
+
+	// Logger defaults to controller-runtime's logger named "brain".
+	Logger logr.Logger
 
 	// Sizer turns capacity into chunks. Nil means the default sizer.
 	Sizer chunk.Sizer
@@ -66,6 +79,10 @@ type Options struct {
 type Brain struct {
 	opts Options
 	full *FullProviders
+	log  logr.Logger
+
+	choiceMu   sync.Mutex
+	lastChoice string
 }
 
 // New validates opts and returns a Brain.
@@ -81,7 +98,11 @@ func New(opts Options) (*Brain, error) {
 	if opts.Sizer == nil {
 		opts.Sizer = chunk.NewDefaultSizer()
 	}
-	return &Brain{opts: opts, full: NewFullProviders()}, nil
+	logger := opts.Logger
+	if logger.GetSink() == nil {
+		logger = log.Log.WithName("brain")
+	}
+	return &Brain{opts: opts, full: NewFullProviders(), log: logger}, nil
 }
 
 // NodeGroups makes one decision: it reads the offers, this consumer's own
@@ -115,21 +136,28 @@ func (b *Brain) NodeGroupsWithin(
 	if b.opts.Location != nil {
 		consumer.Latitude, consumer.Longitude, consumer.HasLocation = b.opts.Location()
 	}
+	bound := EffectiveBound(spec.LatencyBound, requestBound)
 	var measured map[string]float64
-	if b.opts.MeasuredLatencyMs != nil {
-		measured = b.opts.MeasuredLatencyMs()
+	if bound != nil && b.opts.Prober != nil {
+		// Measure every candidate site, not a shortlist: the bound is a hard
+		// filter, so each site must be checked on a real round-trip.
+		measured = b.opts.Prober.Measure(ctx, probeEndpoints(offers))
 	}
 
-	resp := NodeGroups(Input{
+	resp, estimated := nodeGroups(Input{
 		Offers:            offers,
 		OwnReserved:       own,
 		InFlight:          inFlight,
 		Consumer:          consumer,
-		LatencyBound:      EffectiveBound(spec.LatencyBound, requestBound),
+		LatencyBound:      bound,
 		MeasuredLatencyMs: measured,
 		Full:              b.full.Snapshot(),
 		Sizer:             b.opts.Sizer,
 	})
+	if len(estimated) > 0 {
+		b.log.V(1).Info("latency bound checked on the distance estimate (no measurement) for some sites",
+			"maxLatencyMs", bound.MaxLatencyMs, "estimated", estimated)
+	}
 	return &resp, nil
 }
 
@@ -139,6 +167,31 @@ func (b *Brain) NodeGroupsWithin(
 // ignored.
 func (b *Brain) ObserveReservation(provider string, err error) {
 	b.full.MarkIfNoCapacity(provider, err)
+}
+
+// RecordChoice remembers which provider the decision served to the Cluster
+// Autoscaler left growable (the first one, in list order; "" when none), so
+// the heartbeat can report it for the Broker dashboard. Call it with the final
+// view, after any latency re-mask or ConsumerChoice masking.
+func (b *Brain) RecordChoice(resp *brokerapi.NodeGroupListResponse) {
+	chosen := ""
+	for _, ng := range resp.NodeGroups {
+		if ng.MaxSize > ng.CurrentReserved {
+			chosen = ng.ProviderClusterID
+			break
+		}
+	}
+	b.choiceMu.Lock()
+	b.lastChoice = chosen
+	b.choiceMu.Unlock()
+}
+
+// LastChoice returns the provider recorded by the latest RecordChoice ("" when
+// none yet, or when nothing was growable).
+func (b *Brain) LastChoice() string {
+	b.choiceMu.Lock()
+	defer b.choiceMu.Unlock()
+	return b.lastChoice
 }
 
 // currentPolicy returns the spec of the consumer's ConsumerPolicy, or the zero

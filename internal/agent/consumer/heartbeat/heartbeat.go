@@ -98,6 +98,12 @@ type Options struct {
 	// heartbeat reports them to the Broker for the dashboard. Nil ⇒ no report.
 	Prober Prober
 
+	// LocalChoice, when set, marks this consumer as deciding placement itself
+	// (--brain=local): every heartbeat reports DecidedBy "local" and, as
+	// ChosenProvider, the provider the local brain last left growable (the
+	// value LocalChoice returns; "" when none). Nil means the Broker decides.
+	LocalChoice func() string
+
 	// Interval overrides DefaultInterval. Mainly useful in tests.
 	Interval time.Duration
 
@@ -127,6 +133,7 @@ type Heartbeater struct {
 	mockGeoURL    string
 	geoClient     *geo.Client
 	prober        Prober
+	localChoice   func() string
 	interval      time.Duration
 	log           logr.Logger
 	onResult      func(success bool)
@@ -178,6 +185,7 @@ func New(opts Options) (*Heartbeater, error) {
 		advertisedIP:  opts.AdvertisedIP,
 		mockGeoURL:    opts.MockGeoURL,
 		prober:        opts.Prober,
+		localChoice:   opts.LocalChoice,
 		geoClient:     geo.NewClient(),
 		interval:      interval,
 		log:           logger,
@@ -254,6 +262,11 @@ func (h *Heartbeater) beatOnce(ctx context.Context) {
 			req.MeasuredLatencies = finiteRTTs(m.RTTs)
 			req.ChosenProvider = m.Chosen
 		}
+	}
+	// Local mode: the choice is the local brain's, whatever the policy.
+	if h.localChoice != nil {
+		req.DecidedBy = brokerapi.DecidedByLocal
+		req.ChosenProvider = h.localChoice()
 	}
 	if _, err := h.client.PostHeartbeat(ctx, req); err != nil {
 		if ctx.Err() == nil {

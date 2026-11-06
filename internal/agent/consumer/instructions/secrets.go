@@ -34,8 +34,11 @@ import (
 // broker-side `kubeconfig` key so the two halves of the pipeline agree.
 const KubeconfigSecretDataKey = "kubeconfig"
 
-// kubeconfigSecretName returns the canonical staging-Secret name for a
-// reservation. Matches the broker side's name exactly (reservation_controller.go).
+// kubeconfigSecretName returns the consumer-side staging-Secret name for a
+// reservation: one Secret per reservation. It deliberately differs from the
+// Broker-side Secret, which is one per (consumer, provider) pair because the
+// Liqo peering user is a per-pair singleton (kubeconfigSecretName in
+// internal/controller/broker/reservation_controller.go).
 func kubeconfigSecretName(reservationID string) string {
 	return "kubeconfig-" + reservationID
 }

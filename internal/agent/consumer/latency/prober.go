@@ -119,49 +119,21 @@ func New(opts Options) *Prober {
 // score +Inf and lose. The result is stashed for LastMeasurements. On ties the
 // earlier candidate wins (callers pass them in the Broker's distance order).
 func (p *Prober) MeasureAndPick(ctx context.Context, cands []Candidate) Result {
-	rtts := make(map[string]float64, len(cands))
+	endpoints := make([]string, 0, len(cands))
+	for _, c := range cands {
+		if c.Endpoint != "" {
+			endpoints = append(endpoints, c.Endpoint)
+		}
+	}
+	measured := p.Measure(ctx, endpoints)
 
-	// Under the lock: serve fresh cache hits, collect the rest to probe.
-	type job struct{ providerID, endpoint string }
-	toProbe := make([]job, 0, len(cands))
-	p.mu.Lock()
+	rtts := make(map[string]float64, len(cands))
 	for _, c := range cands {
 		if c.Endpoint == "" {
 			rtts[c.ProviderClusterID] = math.Inf(1)
 			continue
 		}
-		if s, ok := p.cache[c.Endpoint]; ok && time.Since(s.at) < p.ttl {
-			rtts[c.ProviderClusterID] = s.rttMs
-			continue
-		}
-		toProbe = append(toProbe, job{c.ProviderClusterID, c.Endpoint})
-	}
-	p.mu.Unlock()
-
-	// Probe the stale/missing endpoints concurrently (a shortlist is tiny).
-	if len(toProbe) > 0 {
-		var wg sync.WaitGroup
-		var mu sync.Mutex
-		measured := make(map[string]float64, len(toProbe))
-		for _, j := range toProbe {
-			wg.Add(1)
-			go func(endpoint string) {
-				defer wg.Done()
-				rtt := p.probeMedian(ctx, endpoint)
-				mu.Lock()
-				measured[endpoint] = rtt
-				mu.Unlock()
-			}(j.endpoint)
-		}
-		wg.Wait()
-
-		now := time.Now()
-		p.mu.Lock()
-		for _, j := range toProbe {
-			p.cache[j.endpoint] = sample{rttMs: measured[j.endpoint], at: now}
-			rtts[j.providerID] = measured[j.endpoint]
-		}
-		p.mu.Unlock()
+		rtts[c.ProviderClusterID] = measured[c.Endpoint]
 	}
 
 	// Pick the lowest finite RTT (stable on ties: first candidate wins).
@@ -182,6 +154,58 @@ func (p *Prober) MeasureAndPick(ctx context.Context, cands []Candidate) Result {
 	p.last = res
 	p.mu.Unlock()
 	return res
+}
+
+// Measure returns the median round-trip time in milliseconds to each endpoint
+// (+Inf for one that never answers), probing concurrently those whose cached
+// sample is missing or stale. Unlike MeasureAndPick it picks nothing and leaves
+// LastMeasurements alone: the local brain uses it to check a latency bound
+// against every candidate site, under any placement policy.
+func (p *Prober) Measure(ctx context.Context, endpoints []string) map[string]float64 {
+	out := make(map[string]float64, len(endpoints))
+
+	// Under the lock: serve fresh cache hits, collect the rest to probe.
+	toProbe := make([]string, 0, len(endpoints))
+	p.mu.Lock()
+	for _, ep := range endpoints {
+		if _, done := out[ep]; done || ep == "" {
+			continue
+		}
+		if s, ok := p.cache[ep]; ok && time.Since(s.at) < p.ttl {
+			out[ep] = s.rttMs
+			continue
+		}
+		out[ep] = math.Inf(1) // placeholder, also dedupes repeated endpoints
+		toProbe = append(toProbe, ep)
+	}
+	p.mu.Unlock()
+	if len(toProbe) == 0 {
+		return out
+	}
+
+	var wg sync.WaitGroup
+	var mu sync.Mutex
+	measured := make(map[string]float64, len(toProbe))
+	for _, ep := range toProbe {
+		wg.Add(1)
+		go func(endpoint string) {
+			defer wg.Done()
+			rtt := p.probeMedian(ctx, endpoint)
+			mu.Lock()
+			measured[endpoint] = rtt
+			mu.Unlock()
+		}(ep)
+	}
+	wg.Wait()
+
+	now := time.Now()
+	p.mu.Lock()
+	for _, ep := range toProbe {
+		p.cache[ep] = sample{rttMs: measured[ep], at: now}
+		out[ep] = measured[ep]
+	}
+	p.mu.Unlock()
+	return out
 }
 
 // LastMeasurements returns a copy of the most recent MeasureAndPick result (for

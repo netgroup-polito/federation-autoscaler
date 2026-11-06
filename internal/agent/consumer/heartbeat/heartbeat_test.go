@@ -346,3 +346,53 @@ func TestHeartbeater_ContextCancellation_StopsPromptly(t *testing.T) {
 		t.Fatal("Run did not return within 1s of ctx cancel")
 	}
 }
+
+// TestHeartbeater_ReportsLocalDecision: in local mode every heartbeat says
+// "decided locally" and reports the local brain's pick as the chosen provider,
+// overriding the measured-latency winner.
+func TestHeartbeater_ReportsLocalDecision(t *testing.T) {
+	fb := newFakeBroker(t)
+	choice := "p-cheap"
+	h, err := New(Options{
+		Client:        fb.buildClient(t),
+		ClusterID:     "c",
+		LiqoClusterID: "liqo-c",
+		Interval:      time.Hour,
+		Prober: fakeLatencyProber{res: latency.Result{
+			Chosen: "p-near", RTTs: map[string]float64{"p-near": 1, "p-cheap": 2},
+		}},
+		LocalChoice: func() string { return choice },
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	h.beatOnce(context.Background())
+	choice = "" // nothing growable on the next decision
+	h.beatOnce(context.Background())
+
+	posted := fb.snapshotPosted()
+	if len(posted) != 2 {
+		t.Fatalf("want 2 heartbeats, got %d", len(posted))
+	}
+	if got := posted[0]; got.DecidedBy != brokerapi.DecidedByLocal || got.ChosenProvider != "p-cheap" ||
+		got.MeasuredLatencies["p-cheap"] != 2 {
+		t.Errorf("first heartbeat = %+v, want decided locally → p-cheap with its RTT", got)
+	}
+	if got := posted[1]; got.DecidedBy != brokerapi.DecidedByLocal || got.ChosenProvider != "" {
+		t.Errorf("second heartbeat = %+v, want decided locally with no pick", got)
+	}
+}
+
+// TestHeartbeater_CentralModeReportsNoDecider: without LocalChoice the
+// heartbeat leaves decidedBy empty (the Broker decides).
+func TestHeartbeater_CentralModeReportsNoDecider(t *testing.T) {
+	fb := newFakeBroker(t)
+	h, err := New(Options{Client: fb.buildClient(t), ClusterID: "c", LiqoClusterID: "liqo-c", Interval: time.Hour})
+	if err != nil {
+		t.Fatal(err)
+	}
+	h.beatOnce(context.Background())
+	if got := fb.snapshotPosted(); len(got) != 1 || got[0].DecidedBy != "" {
+		t.Errorf("central mode heartbeat = %+v, want empty decidedBy", got)
+	}
+}

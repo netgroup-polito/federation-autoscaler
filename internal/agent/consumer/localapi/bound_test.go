@@ -37,31 +37,18 @@ func TestLatencyBoundQueryRoundTrip(t *testing.T) {
 		t.Errorf("no query decodes to no bound, got %+v, %v", b, err)
 	}
 
-	fromConsumer := &autoscalingv1alpha1.LatencyBound{MaxLatencyMs: 5}
-	got, err := DecodeLatencyBound(EncodeLatencyBound(fromConsumer))
-	if err != nil || got.MaxLatencyMs != 5 || got.From != nil {
-		t.Errorf("bound from the consumer: got %+v, %v", got, err)
-	}
-
-	fromAsti := &autoscalingv1alpha1.LatencyBound{
-		MaxLatencyMs: 3,
-		From:         &autoscalingv1alpha1.GeoPoint{Name: "Asti", Latitude: 44.9008, Longitude: 8.2064},
-	}
-	got, err = DecodeLatencyBound(EncodeLatencyBound(fromAsti))
-	if err != nil || got.MaxLatencyMs != 3 || got.From == nil || *got.From != *fromAsti.From {
-		t.Errorf("bound from Asti: got %+v, %v", got, err)
+	got, err := DecodeLatencyBound(EncodeLatencyBound(&autoscalingv1alpha1.LatencyBound{MaxLatencyMs: 5}))
+	if err != nil || got == nil || got.MaxLatencyMs != 5 {
+		t.Errorf("bound: got %+v, %v", got, err)
 	}
 }
 
 func TestLatencyBoundQueryRejectsBadInput(t *testing.T) {
 	for name, raw := range map[string]string{
-		"zero ms":            "maxLatencyMs=0",
-		"not a number":       "maxLatencyMs=abc",
-		"too big for int32":  "maxLatencyMs=99999999999",
-		"lat without lon":    "maxLatencyMs=3&fromLat=44.9",
-		"point without ms":   "fromLat=44.9&fromLon=8.2",
-		"latitude too large": "maxLatencyMs=3&fromLat=95&fromLon=8.2",
-		"bad longitude":      "maxLatencyMs=3&fromLat=44.9&fromLon=east",
+		"zero ms":           "maxLatencyMs=0",
+		"negative":          "maxLatencyMs=-2",
+		"not a number":      "maxLatencyMs=abc",
+		"too big for int32": "maxLatencyMs=99999999999",
 	} {
 		q, _ := url.ParseQuery(raw)
 		if _, err := DecodeLatencyBound(q); err == nil {
@@ -91,7 +78,10 @@ func TestLocalBrainAppliesRequestBound(t *testing.T) {
 	}
 	client := fb.buildClient(t)
 	kube := newFakeKubeClient() // no ConsumerPolicy: Standard, no bound
-	b, err := brain.New(brain.Options{Catalog: catalog, Reservations: client, LocalClient: kube})
+	b, err := brain.New(brain.Options{
+		Catalog: catalog, Reservations: client, LocalClient: kube,
+		Location: func() (float64, float64, bool) { return astiLat, astiLon, true }, // consumer in Asti
+	})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -106,10 +96,7 @@ func TestLocalBrainAppliesRequestBound(t *testing.T) {
 		t.Fatalf("without a bound both providers are listed, got %v", hr)
 	}
 
-	q := EncodeLatencyBound(&autoscalingv1alpha1.LatencyBound{
-		MaxLatencyMs: 3,
-		From:         &autoscalingv1alpha1.GeoPoint{Name: "Asti", Latitude: astiLat, Longitude: astiLon},
-	})
+	q := EncodeLatencyBound(&autoscalingv1alpha1.LatencyBound{MaxLatencyMs: 3})
 	resp, err := ts.Client().Get(ts.URL + "/local/nodegroups?" + q.Encode())
 	if err != nil {
 		t.Fatal(err)
@@ -118,7 +105,7 @@ func TestLocalBrainAppliesRequestBound(t *testing.T) {
 	_ = json.NewDecoder(resp.Body).Decode(&bounded)
 	_ = resp.Body.Close()
 	if hr := headroom(bounded); len(hr) != 1 || hr["p-asti"] != 3 {
-		t.Errorf("3 ms from Asti: want only p-asti, got %v", hr)
+		t.Errorf("3 ms to a consumer in Asti: want only p-asti, got %v", hr)
 	}
 
 	bad, err := ts.Client().Get(ts.URL + "/local/nodegroups?maxLatencyMs=0")

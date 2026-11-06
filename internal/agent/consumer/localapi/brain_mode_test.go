@@ -112,6 +112,9 @@ func TestLocalBrainMode(t *testing.T) {
 	if hr := headroom(getNodeGroups(t, ts)); hr["p-cheap"] != 3 || hr["p-dear"] != 0 {
 		t.Fatalf("local Price decision: headroom = %v, want p-cheap growable only", hr)
 	}
+	if got := b.LastChoice(); got != "p-cheap" {
+		t.Errorf("recorded choice = %q, want p-cheap (reported on the heartbeat)", got)
+	}
 
 	body, _ := json.Marshal(brokerapi.ReservationRequest{
 		ProviderClusterID: "p-cheap", NodeGroupID: "ng-p-cheap-standard", ChunkCount: 1, ChunkType: "standard",
@@ -127,6 +130,9 @@ func TestLocalBrainMode(t *testing.T) {
 
 	if hr := headroom(getNodeGroups(t, ts)); hr["p-cheap"] != 0 || hr["p-dear"] != 3 {
 		t.Errorf("after the refusal: headroom = %v, want p-dear growable only", hr)
+	}
+	if got := b.LastChoice(); got != "p-dear" {
+		t.Errorf("recorded choice after the refusal = %q, want p-dear", got)
 	}
 
 	mu.Lock()

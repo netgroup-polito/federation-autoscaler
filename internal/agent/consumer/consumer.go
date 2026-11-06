@@ -232,7 +232,37 @@ func Run(ctx context.Context, opts Options) error {
 	// measurement for the dashboard).
 	prober := latency.New(latency.Options{Logger: logger.WithName("latency-prober")})
 
-	beater, err := heartbeat.New(heartbeat.Options{
+	// Local mode: the placement decision is made here, from the catalog.
+	// The brain is built before the heartbeat, which reports its choice; its
+	// Location closure reads beater only from the loopback API's handlers,
+	// which start after beater is set below.
+	var (
+		err         error
+		beater      *heartbeat.Heartbeater
+		localBrain  *brain.Brain
+		localChoice func() string
+	)
+	if opts.BrainMode == BrainLocal {
+		localBrain, err = brain.New(brain.Options{
+			Catalog:      opts.Catalog,
+			Reservations: opts.Client,
+			LocalClient:  opts.LocalClient,
+			Namespace:    namespace,
+			Location: func() (float64, float64, bool) {
+				lat, lon, _, ok := beater.LastLocation()
+				return lat, lon, ok
+			},
+			Prober: prober,
+			Logger: logger.WithName("brain"),
+		})
+		if err != nil {
+			return fmt.Errorf("consumer: build local brain: %w", err)
+		}
+		localChoice = localBrain.LastChoice
+		logger.Info("placement decided locally (brain=local); booking still goes through the Broker")
+	}
+
+	beater, err = heartbeat.New(heartbeat.Options{
 		Client:        opts.Client,
 		ClusterID:     opts.ClusterID,
 		LiqoClusterID: opts.LiqoClusterID,
@@ -242,6 +272,7 @@ func Run(ctx context.Context, opts Options) error {
 		AdvertisedIP:  opts.AdvertisedIP,
 		MockGeoURL:    opts.MockGeoURL,
 		Prober:        prober,
+		LocalChoice:   localChoice,
 		Interval:      opts.HeartbeatInterval,
 		Logger:        logger.WithName("heartbeat"),
 		// Same semantics as the provider's advertisement publisher:
@@ -260,26 +291,6 @@ func Run(ctx context.Context, opts Options) error {
 			ollama.Options{Timeout: opts.OllamaTimeout})
 		logger.Info("ConsumerChoice AI client configured",
 			"ollamaURL", opts.OllamaURL, "model", opts.OllamaModel, "timeout", opts.OllamaTimeout)
-	}
-
-	// Local mode: the placement decision is made here, from the catalog.
-	var localBrain *brain.Brain
-	if opts.BrainMode == BrainLocal {
-		localBrain, err = brain.New(brain.Options{
-			Catalog:      opts.Catalog,
-			Reservations: opts.Client,
-			LocalClient:  opts.LocalClient,
-			Namespace:    namespace,
-			Location: func() (float64, float64, bool) {
-				lat, lon, _, ok := beater.LastLocation()
-				return lat, lon, ok
-			},
-			MeasuredLatencyMs: func() map[string]float64 { return prober.LastMeasurements().RTTs },
-		})
-		if err != nil {
-			return fmt.Errorf("consumer: build local brain: %w", err)
-		}
-		logger.Info("placement decided locally (brain=local); booking still goes through the Broker")
 	}
 
 	localServer, err := localapi.New(localapi.Options{

@@ -143,3 +143,31 @@ func TestNoCandidates(t *testing.T) {
 		t.Errorf("empty input should yield empty result, got %+v", res)
 	}
 }
+
+// TestMeasureEveryEndpointWithoutPicking: Measure probes every endpoint once
+// (repeats collapse), reports +Inf for a dead one, serves later calls from the
+// cache, and leaves LastMeasurements untouched.
+func TestMeasureEveryEndpointWithoutPicking(t *testing.T) {
+	echo, stop := startEcho(t)
+	dead := closedAddr(t)
+	p := testProber()
+
+	got := p.Measure(context.Background(), []string{echo, dead, echo, ""})
+	if len(got) != 2 {
+		t.Fatalf("want one entry per distinct non-empty endpoint, got %v", got)
+	}
+	if math.IsInf(got[echo], 1) || got[echo] < 0 {
+		t.Errorf("reachable endpoint: want a finite RTT, got %v", got[echo])
+	}
+	if !math.IsInf(got[dead], 1) {
+		t.Errorf("dead endpoint: want +Inf, got %v", got[dead])
+	}
+	if last := p.LastMeasurements(); last.Chosen != "" || len(last.RTTs) != 0 {
+		t.Errorf("Measure must not change LastMeasurements, got %+v", last)
+	}
+
+	stop() // a second call within the TTL must come from the cache
+	if again := p.Measure(context.Background(), []string{echo}); again[echo] != got[echo] {
+		t.Errorf("cached RTT = %v, want %v", again[echo], got[echo])
+	}
+}

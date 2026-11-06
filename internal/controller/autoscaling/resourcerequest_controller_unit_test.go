@@ -700,10 +700,7 @@ func (f *boundedFakeClient) GetNodeGroupsWithin(
 }
 
 func TestNodeGroupsForPassesRequestBound(t *testing.T) {
-	bound := &autoscalingv1alpha1.LatencyBound{
-		MaxLatencyMs: 3,
-		From:         &autoscalingv1alpha1.GeoPoint{Name: "Asti", Latitude: 44.9008, Longitude: 8.2064},
-	}
+	bound := &autoscalingv1alpha1.LatencyBound{MaxLatencyMs: 3}
 	withBound := &autoscalingv1alpha1.ResourceRequest{Spec: autoscalingv1alpha1.ResourceRequestSpec{LatencyBound: bound}}
 	noBound := &autoscalingv1alpha1.ResourceRequest{}
 

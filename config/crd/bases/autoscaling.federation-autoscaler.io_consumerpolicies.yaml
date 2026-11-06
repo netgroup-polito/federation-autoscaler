@@ -56,37 +56,15 @@ spec:
               latencyBound:
                 description: |-
                   LatencyBound limits the providers the consumer-side brain may choose to
-                  those within a latency bound of a reference point, e.g. "max 3 ms from
-                  Asti". The brain filters out providers outside the bound, then ranks the
-                  rest with Placement. Used only when the brain runs on the consumer
-                  (local mode); the central Broker ignores it. A ResourceRequest may
-                  override it per request.
+                  those whose round-trip latency to this consumer cluster is within a
+                  bound, e.g. "max 3 ms". The brain filters out sites outside the bound,
+                  then ranks the rest with Placement. Used only when the brain runs on the
+                  consumer (local mode); the central Broker ignores it. A ResourceRequest
+                  may override it per request.
                 properties:
-                  from:
-                    description: |-
-                      From is the reference point the bound is measured from. Empty means the
-                      consumer cluster's own location.
-                    properties:
-                      latitude:
-                        description: Latitude in decimal degrees.
-                        maximum: 90
-                        minimum: -90
-                        type: number
-                      longitude:
-                        description: Longitude in decimal degrees.
-                        maximum: 180
-                        minimum: -180
-                        type: number
-                      name:
-                        description: Name is a human-readable label for the point
-                          (e.g. "Asti"); informational.
-                        type: string
-                    required:
-                    - latitude
-                    - longitude
-                    type: object
                   maxLatencyMs:
-                    description: MaxLatencyMs is the bound, in milliseconds.
+                    description: MaxLatencyMs is the bound, in milliseconds of round-trip
+                      time.
                     format: int32
                     minimum: 1
                     type: integer

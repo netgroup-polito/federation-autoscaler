@@ -119,7 +119,7 @@ Three kinds of cluster take part, plus an optional fourth for demo mock services
 | Freshness | A provider not heard from for **90 s** (three missed advertisements) is flagged `available: false`, its free chunks drop to zero in every view, and non-terminal reservations on it are failed with consumer-side cleanup. |
 | Garbage collection | Enforced instructions are deleted after 5 min; undelivered instructions past their expiry fail their reservation; terminal reservations are deleted 15 min after termination. |
 | Rate limiting | Per-cluster token bucket, 10 burst / 5 sustained requests per second, across the API. Overflow returns 429; agent backoff absorbs it. |
-| Dashboard | A separate plain-HTTP listener (`:9444`, NodePort 30444 in the demo) serves a read-only single-page dashboard and `GET /api/v1/overview`: capacity totals, advertisements (cost, weighted carbon, region), reservations, instructions, and registered consumers with their policy and measured RTT. Never shows credentials. |
+| Dashboard | A separate plain-HTTP listener (`:9444`, NodePort 30444 in the demo) serves a read-only single-page dashboard and `GET /api/v1/overview`: capacity totals, advertisements (cost, weighted carbon, region), reservations, instructions, and registered consumers with their policy, chosen provider and measured RTT (marked "decided locally" for a `--brain=local` consumer). Never shows credentials. |
 
 **Placement policies.** A consumer opts in by creating a `ConsumerPolicy` on its own cluster; the Consumer Agent pushes the policy to the Broker on every heartbeat. All policies share one mechanism, implemented in `internal/broker/api/nodegroups.go`: rank the candidate providers, expose the **single best one with head-room**, and mask the rest by setting `maxSize = currentReserved` (no room to grow). CA's neutral expander then has exactly one choice. When the winner fills up **and its in-flight peerings have settled**, the next call promotes the next-best provider (best-first greedy spill; the in-flight gate prevents a premature spill while a chunk is still peering).
 
@@ -176,15 +176,15 @@ One replica, `strategy: Recreate`, no leader election. The consumer cluster's **
 
 | Method | Endpoint | Description |
 |---|---|---|
-| GET | `/local/nodegroups` | Synchronous proxy of the Broker's `GET /api/v1/nodegroups` (central mode), or built by the local brain from the catalog (`--brain=local`, see below). Optional query `?maxLatencyMs=&fromLat=&fromLon=&fromName=` carries a ResourceRequest's `latencyBound`; the local brain applies it over the ConsumerPolicy bound, the central Broker ignores it, and a malformed bound is a 400. When the response is a latency shortlist, the agent UDP-probes the candidates (5 probes, 300 ms timeout, median, 15 s result cache) and re-masks to the measured winner before returning. |
+| GET | `/local/nodegroups` | Synchronous proxy of the Broker's `GET /api/v1/nodegroups` (central mode), or built by the local brain from the catalog (`--brain=local`, see below). Optional query `?maxLatencyMs=` carries a ResourceRequest's `latencyBound`; the local brain applies it over the ConsumerPolicy bound, the central Broker ignores it, and a malformed bound is a 400. When the response is a latency shortlist, the agent UDP-probes the candidates (5 probes, 300 ms timeout, median, 15 s result cache) and re-masks to the measured winner before returning. |
 | POST | `/local/reservations` | Forwards to the Broker's `POST /api/v1/reservations` synchronously; the Broker's HTTP status, error code, and message pass through (the optional error `details` object is dropped in transit). In local mode a 409 `InsufficientCapacity` also marks that provider full for 30 s, so the next decision moves on. |
 | DELETE | `/local/reservations/{id}` | Forwards to the Broker's `DELETE /api/v1/reservations/{id}` synchronously. |
 | GET | `/local/virtual-nodes` | Lists the local `VirtualNodeState` resources as views (node name falls back to the CR name while still `Creating`). |
 | GET | `/healthz` | Liveness. |
 
-**Who decides (`--brain`).** With `--brain=central` (the default) the Broker makes the placement decision, as described in §3. With `--brain=local` the agent decides itself, in `internal/agent/consumer/brain`: it reads the provider offers from the catalog, its own reservations (`GET /api/v1/reservations`), and its `ConsumerPolicy` (policy plus optional `latencyBound`), then runs the same placement core the Broker uses (`BuildNodeGroups`). Each provider's sites are pooled into one node group; free chunks are counted per site; `CurrentReserved` is this consumer's own chunks (never another consumer's). Booking still goes through the Broker in both modes. Until the catalog backend (Redis, `internal/catalog`) lands, `--brain=local` is refused at startup.
+**Who decides (`--brain`).** With `--brain=central` (the default) the Broker makes the placement decision, as described in §3. With `--brain=local` the agent decides itself, in `internal/agent/consumer/brain`: it reads the provider offers from the catalog, its own reservations (`GET /api/v1/reservations`), and its `ConsumerPolicy` (policy plus optional `latencyBound`), then runs the same placement core the Broker uses (`BuildNodeGroups`). Each provider's sites are pooled into one node group; free chunks are counted per site; `CurrentReserved` is this consumer's own chunks (never another consumer's). Booking still goes through the Broker in both modes. The provider the final view leaves growable (after any latency re-mask or ConsumerChoice masking) is remembered and reported on the heartbeat as `chosenProvider` with `decidedBy: "local"`, so the Broker dashboard shows local decisions too. Until the catalog backend (Redis, `internal/catalog`) lands, `--brain=local` is refused at startup.
 
-**Broker-facing loops:** a 1 s `GET /api/v1/instructions` poll dispatching to instruction handlers, and a 15 s `POST /api/v1/heartbeat` carrying the current `ConsumerPolicy` (re-read every beat, so a policy change takes effect within ~15 s), the auto-discovered location (node IP resolved from `NODE_NAME` or `--advertised-ip`, geolocated via mock-geo when configured), and the latest measured RTTs plus chosen provider for the dashboard.
+**Broker-facing loops:** a 1 s `GET /api/v1/instructions` poll dispatching to instruction handlers, and a 15 s `POST /api/v1/heartbeat` carrying the current `ConsumerPolicy` (re-read every beat, so a policy change takes effect within ~15 s), the auto-discovered location (node IP resolved from `NODE_NAME` or `--advertised-ip`, geolocated via mock-geo when configured), and, for the dashboard, the latest measured RTTs plus the chosen provider (in local mode the brain's pick, marked `decidedBy: "local"`).
 
 **Instruction handlers** (all idempotent by construction; re-runs tolerate already-existing or already-deleted objects):
 
@@ -254,7 +254,7 @@ One discovered location drives both policies: the region code from mock-geo keys
 
 Three browser surfaces, all plain HTTP, none on the control-plane critical path:
 
-- **Broker dashboard** (read-only, leader-served, `:9444` / NodePort 30444): live view of advertisements (cost, weighted carbon, region, renewable), reservations, the instruction machine, chunk capacity totals, and registered consumers with policy, chosen provider, and measured RTT. Never shows credentials.
+- **Broker dashboard** (read-only, leader-served, `:9444` / NodePort 30444): live view of advertisements (cost, weighted carbon, region, renewable), reservations, the instruction machine, chunk capacity totals, and registered consumers with policy, chosen provider, and measured RTT ("decided locally" for a `--brain=local` consumer). Never shows credentials.
 - **Liqo dashboard** (third-party, deployed by Ansible on the consumer): peerings, virtual nodes, offloaded pods.
 - **Agent config consoles** (read/write, **unauthenticated**, NodePort 30445, demo-grade): the consumer console sets the placement policy, toggles the demo workload, and manages a console-owned `ResourceRequest`; the provider console sets prices, capacity caps, and the renewable flag by writing the same ConfigMaps the samples do, effective on the next heartbeat/advertisement. Discovered location is shown read-only. A separate listener from the consumer's local API, which remains the gRPC server's trust boundary.
 
@@ -371,18 +371,14 @@ spec:
   placement:
     type: Price     # Standard | Price | Eco | Latency; empty or absent = Standard
   latencyBound:     # optional; consumer-side brain only (the central Broker ignores it)
-    maxLatencyMs: 3
-    from:           # optional reference point; absent = the consumer's own location
-      name: Asti
-      latitude: 44.9008
-      longitude: 8.2064
+    maxLatencyMs: 3 # round trip between this consumer and the chosen provider site
 ```
 
-`latencyBound` lets the consumer-side brain (local mode) drop every provider site whose estimated latency from the reference point exceeds `maxLatencyMs`, then rank the rest with `placement`. It is not pushed on the heartbeat. The rules:
+`latencyBound` lets the consumer-side brain (local mode) drop every provider site whose round-trip latency to this consumer exceeds `maxLatencyMs`, then rank the rest with `placement`. The latency is always between the site and this consumer; there is no third reference point (a wish like "a VM in Asti" is a location preference, left to a future provider-side orchestrator). It is not pushed on the heartbeat. The rules:
 
-- **Estimate:** round-trip ms = straight-line km ÷ 100 (fibre, there and back). Real paths are longer, so the estimate is optimistic: "max 3 ms from Asti" keeps sites within about 300 km of Asti.
-- **Measured RTT wins:** when `from` is absent (the consumer's own location), a round-trip time the agent measured to a provider replaces the estimate.
-- **Strict:** a site with no coordinates, or a bound with no usable reference point, does not qualify.
+- **Measured first:** whenever a bound applies, under any policy, the agent UDP-probes every candidate site's `probeEndpoint` (same prober as the Latency policy: 5 probes, 300 ms timeout, median, 15 s cache) and checks the bound on the measured round trip.
+- **Estimate as fallback:** for a site with no probe endpoint, or one that did not answer, round-trip ms = straight-line km ÷ 100 (fibre, there and back). Real paths are longer, so the estimate is optimistic. Sites decided on the estimate are logged (V(1)).
+- **Strict:** a site with neither a measurement nor coordinates (or a consumer with no known location) does not qualify.
 - **Per site, before pooling:** only qualifying sites count toward a provider's free chunks.
 - **Held providers stay listed:** a provider outside the bound on which the consumer already holds chunks stays listed with no free chunks, so the autoscaler keeps mapping those nodes but cannot grow them.
 
@@ -446,7 +442,7 @@ Three wire surfaces exist. There is no Broker-to-agent surface; see the [communi
 | `GET /healthz` | any agent | liveness; like every route on this listener it sits behind the mTLS handshake (the unauthenticated health endpoint lives on the dashboard listener) |
 | `POST /api/v1/advertisements` | provider, 30 s | upsert advertisement; response piggybacks pending instructions (currently unused by the agent) |
 | `GET /api/v1/advertisements/{clusterId}` | provider | read back own advertisement (403 for others) |
-| `POST /api/v1/heartbeat` | consumer, 15 s | liveness + policy + location + measured RTTs |
+| `POST /api/v1/heartbeat` | consumer, 15 s | liveness + policy + location + measured RTTs + chosen provider (`decidedBy: "local"` in local mode) |
 | `GET /api/v1/nodegroups` | consumer | the policy-masked node-group view (the placement decision point) |
 | `POST /api/v1/reservations` | consumer | synchronous reserve, one chunk; 201 (or 200 on idempotent replay) |
 | `GET /api/v1/reservations/{id}` | participant | reservation lookup (consumer or provider of that reservation) |

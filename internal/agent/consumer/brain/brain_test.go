@@ -19,6 +19,7 @@ package brain
 import (
 	"context"
 	"errors"
+	"math"
 	"testing"
 
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -85,8 +86,8 @@ func catalogWith(t *testing.T, offers ...Offer) *MemoryCatalog {
 }
 
 func TestBrainDecidesFromCatalogReservationsAndPolicy(t *testing.T) {
-	// Price, bounded to 3 ms from Asti. p-rome is the cheapest but out of the
-	// bound; p-alba is the cheapest within it; this consumer already holds one
+	// Price, bounded to 3 ms, for a consumer in Asti. p-rome is the cheapest
+	// but out of the bound; p-alba is the cheapest within it; this consumer already holds one
 	// chunk on p-asti.
 	cat := catalogWith(t,
 		withPrice(located(siteOffer("p-rome", "rome", 6, 12), romeLat, romeLon), "0.01"),
@@ -95,14 +96,14 @@ func TestBrainDecidesFromCatalogReservationsAndPolicy(t *testing.T) {
 	)
 	pol := consumerPolicy("default", autoscalingv1alpha1.ConsumerPolicySpec{
 		Placement:    autoscalingv1alpha1.PlacementPolicy{Type: autoscalingv1alpha1.PlacementStrategyPrice},
-		LatencyBound: boundFromAsti(3),
+		LatencyBound: bound(3),
 	})
 	b, err := New(Options{
 		Catalog:      cat,
 		Reservations: fakeLister{list: []brokerapi.ReservationResponse{resv("r1", "p-asti", brokerv1alpha1.ReservationPhasePeered)}},
 		LocalClient:  kubeWith(t, pol),
 		Namespace:    testNS,
-		Location:     func() (float64, float64, bool) { return turinLat, turinLon, true },
+		Location:     func() (float64, float64, bool) { return astiLat, astiLon, true },
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -139,6 +140,75 @@ func TestBrainDecidesFromCatalogReservationsAndPolicy(t *testing.T) {
 	}
 	if v := viewsByProvider(*resp)["p-asti"]; v.CurrentReserved != 1 || v.MaxSize != 4 {
 		t.Errorf("p-asti CurrentReserved/MaxSize = %d/%d, want 1/4 (own + 3 free)", v.CurrentReserved, v.MaxSize)
+	}
+}
+
+// fakeProber records which endpoints it was asked to measure and answers
+// from a fixed table (+Inf for an unknown endpoint).
+type fakeProber struct {
+	rtts  map[string]float64
+	asked [][]string
+}
+
+func (f *fakeProber) Measure(_ context.Context, endpoints []string) map[string]float64 {
+	f.asked = append(f.asked, endpoints)
+	out := make(map[string]float64, len(endpoints))
+	for _, ep := range endpoints {
+		if r, ok := f.rtts[ep]; ok {
+			out[ep] = r
+		} else {
+			out[ep] = math.Inf(1)
+		}
+	}
+	return out
+}
+
+// TestBrainMeasuresEveryCandidateUnderABound: with a bound, every site with a
+// probe endpoint is measured whatever the policy (here Price, not Latency),
+// and the measurement decides; without a bound nothing is probed.
+func TestBrainMeasuresEveryCandidateUnderABound(t *testing.T) {
+	cat := catalogWith(t,
+		// Cheapest, close on the map, but measured slow.
+		probed(withPrice(located(siteOffer("p-alba", "alba", 6, 12), albaLat, albaLon), "0.01"), "alba:7777"),
+		probed(withPrice(located(siteOffer("p-asti", "asti", 6, 12), astiLat, astiLon), "0.05"), "asti:7777"),
+		probed(withPrice(located(siteOffer("p-cuneo", "cuneo", 6, 12), cuneoLat, cuneoLon), "0.03"), "cuneo:7777"),
+	)
+	pol := consumerPolicy("default", autoscalingv1alpha1.ConsumerPolicySpec{
+		Placement:    autoscalingv1alpha1.PlacementPolicy{Type: autoscalingv1alpha1.PlacementStrategyPrice},
+		LatencyBound: bound(3),
+	})
+	prober := &fakeProber{rtts: map[string]float64{"alba:7777": 8, "asti:7777": 1, "cuneo:7777": 2}}
+	b, err := New(Options{
+		Catalog: cat, Reservations: fakeLister{}, LocalClient: kubeWith(t, pol), Namespace: testNS,
+		Location: func() (float64, float64, bool) { return astiLat, astiLon, true },
+		Prober:   prober,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp, err := b.NodeGroups(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(prober.asked) != 1 || len(prober.asked[0]) != 3 {
+		t.Fatalf("want one measurement of all 3 sites, got %v", prober.asked)
+	}
+	if got := growable(*resp); len(got) != 1 || got[0] != "p-cuneo" {
+		t.Errorf("growable = %v, want [p-cuneo] (cheapest of the sites measured within 3 ms)", got)
+	}
+
+	// The same brain with no bound anywhere probes nothing.
+	unbounded, err := New(Options{
+		Catalog: cat, Reservations: fakeLister{}, LocalClient: kubeWith(t), Namespace: testNS, Prober: prober,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := unbounded.NodeGroups(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if len(prober.asked) != 1 {
+		t.Errorf("no bound: nothing must be probed, got %d calls", len(prober.asked))
 	}
 }
 

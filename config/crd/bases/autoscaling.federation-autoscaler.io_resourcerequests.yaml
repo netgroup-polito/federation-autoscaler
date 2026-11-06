@@ -70,34 +70,12 @@ spec:
               latencyBound:
                 description: |-
                   LatencyBound overrides the ConsumerPolicy latency bound for this request
-                  only, e.g. "max 3 ms from Asti". Empty means the ConsumerPolicy bound (if
+                  only, e.g. "max 3 ms" to this consumer. Empty means the ConsumerPolicy bound (if
                   any) applies. Used only when the brain runs on the consumer (local mode).
                 properties:
-                  from:
-                    description: |-
-                      From is the reference point the bound is measured from. Empty means the
-                      consumer cluster's own location.
-                    properties:
-                      latitude:
-                        description: Latitude in decimal degrees.
-                        maximum: 90
-                        minimum: -90
-                        type: number
-                      longitude:
-                        description: Longitude in decimal degrees.
-                        maximum: 180
-                        minimum: -180
-                        type: number
-                      name:
-                        description: Name is a human-readable label for the point
-                          (e.g. "Asti"); informational.
-                        type: string
-                    required:
-                    - latitude
-                    - longitude
-                    type: object
                   maxLatencyMs:
-                    description: MaxLatencyMs is the bound, in milliseconds.
+                    description: MaxLatencyMs is the bound, in milliseconds of round-trip
+                      time.
                     format: int32
                     minimum: 1
                     type: integer

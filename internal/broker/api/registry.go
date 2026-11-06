@@ -53,6 +53,11 @@ type ConsumerEntry struct {
 	MeasuredLatencies map[string]float64
 	ChosenProvider    string
 
+	// DecidedBy is empty when the Broker decides this consumer's placement,
+	// DecidedByLocal when the consumer's own brain does (ChosenProvider is
+	// then that brain's pick). Informational, surfaced on the dashboard.
+	DecidedBy string
+
 	// Latitude/Longitude are the consumer's coordinates (decimal degrees), valid
 	// only when HasLocation is true. Used by the latency placement strategy to
 	// rank providers by great-circle distance to this consumer. Stored as values
@@ -107,12 +112,14 @@ func (r *ConsumerRegistry) Touch(clusterID, liqoClusterID string, placement auto
 	r.entries[clusterID] = entry
 }
 
-// SetMeasuredLatency records the consumer's most recent measured-latency result
-// on its existing entry (informational, for the dashboard). Called right after
-// Touch in the heartbeat handler, so the entry exists; a no-op if it doesn't. The
-// map is stored by reference but never mutated in place (each heartbeat brings a
-// fresh map), so Snapshot copies stay safe.
-func (r *ConsumerRegistry) SetMeasuredLatency(clusterID string, rtts map[string]float64, chosen string) {
+// SetDecision records the consumer's most recent decision report on its
+// existing entry (informational, for the dashboard): its measured RTTs, the
+// provider it chose, and who decided (empty = the Broker, DecidedByLocal = the
+// consumer's own brain). Called right after Touch in the heartbeat handler, so
+// the entry exists; a no-op if it doesn't. The map is stored by reference but
+// never mutated in place (each heartbeat brings a fresh map), so Snapshot
+// copies stay safe.
+func (r *ConsumerRegistry) SetDecision(clusterID string, rtts map[string]float64, chosen, decidedBy string) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	entry, ok := r.entries[clusterID]
@@ -121,6 +128,7 @@ func (r *ConsumerRegistry) SetMeasuredLatency(clusterID string, rtts map[string]
 	}
 	entry.MeasuredLatencies = rtts
 	entry.ChosenProvider = chosen
+	entry.DecidedBy = decidedBy
 	r.entries[clusterID] = entry
 }
 

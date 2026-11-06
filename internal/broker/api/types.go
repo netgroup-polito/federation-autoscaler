@@ -294,7 +294,17 @@ type HeartbeatRequest struct {
 	// dashboard so an operator can see the measured decision.
 	MeasuredLatencies map[string]float64 `json:"measuredLatencies,omitempty"`
 	ChosenProvider    string             `json:"chosenProvider,omitempty"`
+
+	// DecidedBy says who made this consumer's placement decision: empty means
+	// the Broker (central mode); DecidedByLocal means the consumer's own brain
+	// (--brain=local), in which case ChosenProvider is the provider that brain
+	// left growable. Informational, surfaced on the dashboard.
+	DecidedBy string `json:"decidedBy,omitempty"`
 }
+
+// DecidedByLocal is HeartbeatRequest.DecidedBy for a consumer that decides
+// placement itself (local mode).
+const DecidedByLocal = "local"
 
 type HeartbeatResponse struct {
 	AckAt metav1.Time `json:"ackAt"`

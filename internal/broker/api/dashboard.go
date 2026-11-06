@@ -146,12 +146,17 @@ type ConsumerView struct {
 	Region string `json:"region,omitempty"`
 	// City is the consumer's auto-discovered city (may be empty); informational.
 	City string `json:"city,omitempty"`
-	// ChosenProvider / MeasuredRTT are the measured-latency result the consumer
-	// reported: the provider it grew and that provider's median RTT (ms). Empty /
-	// nil when the consumer isn't using the latency strategy or hasn't probed yet.
-	ChosenProvider string      `json:"chosenProvider,omitempty"`
-	MeasuredRTT    *float64    `json:"measuredRtt,omitempty"`
-	LastSeen       metav1.Time `json:"lastSeen"`
+	// ChosenProvider / MeasuredRTT are the choice the consumer reported: the
+	// provider it grew and that provider's median RTT (ms) when measured. Empty /
+	// nil in central mode when the consumer isn't using the latency strategy or
+	// hasn't probed yet.
+	ChosenProvider string   `json:"chosenProvider,omitempty"`
+	MeasuredRTT    *float64 `json:"measuredRtt,omitempty"`
+	// DecidedBy is "local" when the consumer decides placement itself
+	// (--brain=local; ChosenProvider is then its brain's pick), empty when
+	// the Broker decides.
+	DecidedBy string      `json:"decidedBy,omitempty"`
+	LastSeen  metav1.Time `json:"lastSeen"`
 }
 
 // -----------------------------------------------------------------------------
@@ -256,6 +261,7 @@ func (s *Server) buildOverview(ctx context.Context) (Overview, error) {
 			Region:         e.Region,
 			City:           e.City,
 			ChosenProvider: e.ChosenProvider,
+			DecidedBy:      e.DecidedBy,
 			LastSeen:       metav1.NewTime(e.LastSeen),
 		}
 		if rtt, ok := e.MeasuredLatencies[e.ChosenProvider]; ok {

@@ -140,10 +140,7 @@ func TestGetNodeGroupsWithinSendsBound(t *testing.T) {
 		w.Header().Set("Content-Type", brokerapi.ContentTypeJSON)
 		_ = json.NewEncoder(w).Encode(brokerapi.NodeGroupListResponse{})
 	})
-	bound := &autoscalingv1alpha1.LatencyBound{
-		MaxLatencyMs: 3,
-		From:         &autoscalingv1alpha1.GeoPoint{Name: "Asti", Latitude: 44.9008, Longitude: 8.2064},
-	}
+	bound := &autoscalingv1alpha1.LatencyBound{MaxLatencyMs: 3}
 	if _, err := fb.client(t).GetNodeGroupsWithin(context.Background(), bound); err != nil {
 		t.Fatalf("GetNodeGroupsWithin: %v", err)
 	}
@@ -152,8 +149,7 @@ func TestGetNodeGroupsWithinSendsBound(t *testing.T) {
 	}
 	q, _ := url.ParseQuery(gotQuery)
 	decoded, err := localapi.DecodeLatencyBound(q)
-	if err != nil || decoded == nil || decoded.MaxLatencyMs != 3 || decoded.From == nil ||
-		decoded.From.Name != "Asti" || decoded.From.Latitude != 44.9008 {
+	if err != nil || decoded == nil || decoded.MaxLatencyMs != 3 {
 		t.Errorf("bound did not round-trip: query %q → %+v, %v", gotQuery, decoded, err)
 	}
 

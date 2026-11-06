@@ -49,14 +49,14 @@ type Input struct {
 	// Consumer carries this consumer's placement policy and location.
 	Consumer brokerapi.ConsumerEntry
 
-	// LatencyBound, when set, drops every site whose latency from the bound's
-	// reference point exceeds the bound, before the policy ranks the rest.
-	// Use EffectiveBound to pick between the policy's and a request's bound.
+	// LatencyBound, when set, drops every site whose round-trip latency to this
+	// consumer exceeds the bound, before the policy ranks the rest. Use
+	// EffectiveBound to pick between the policy's and a request's bound.
 	LatencyBound *autoscalingv1alpha1.LatencyBound
 
-	// MeasuredLatencyMs[provider] is the round-trip time this consumer measured
-	// to that provider. It replaces the distance estimate when LatencyBound is
-	// measured from the consumer's own location.
+	// MeasuredLatencyMs[endpoint] is the round-trip time this consumer measured
+	// to a site's probe endpoint (+Inf when it did not answer). A finite value
+	// replaces the distance estimate for every site behind that endpoint.
 	MeasuredLatencyMs map[string]float64
 
 	// Full[provider] is true when the Broker recently refused a reservation on
@@ -74,6 +74,13 @@ type Input struct {
 // advertisement per provider (see Advertisements) and runs the shared placement
 // core, so every policy behaves exactly as it does on the Broker.
 func NodeGroups(in Input) brokerapi.NodeGroupListResponse {
+	resp, _ := nodeGroups(in)
+	return resp
+}
+
+// nodeGroups is NodeGroups that also reports the sites whose bound check used
+// the distance estimate instead of a measurement ("provider/site").
+func nodeGroups(in Input) (brokerapi.NodeGroupListResponse, []string) {
 	sizer := in.Sizer
 	if sizer == nil {
 		sizer = chunk.NewDefaultSizer()
@@ -81,8 +88,10 @@ func NodeGroups(in Input) brokerapi.NodeGroupListResponse {
 
 	offers := in.Offers
 	var held map[string]bool
+	var estimated []string
 	if in.LatencyBound != nil {
-		kept := withinBound(in.Offers, in.LatencyBound, in.Consumer, in.MeasuredLatencyMs)
+		var kept []Offer
+		kept, estimated = withinBound(in.Offers, in.LatencyBound, in.Consumer, in.MeasuredLatencyMs)
 		held = heldOutsideBound(in.Offers, kept, in.OwnReserved)
 		for _, o := range in.Offers {
 			if held[o.ProviderID] {
@@ -107,7 +116,7 @@ func NodeGroups(in Input) brokerapi.NodeGroupListResponse {
 		Consumer:       in.Consumer,
 		InFlight:       in.InFlight,
 		Sizer:          sizer,
-	})
+	}), estimated
 }
 
 // Advertisements converts catalog offers into one in-memory
