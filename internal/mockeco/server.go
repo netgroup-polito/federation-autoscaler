@@ -48,6 +48,8 @@ var regionData = map[string][24]int{
 	"ENG": {250, 240, 230, 225, 220, 215, 220, 240, 270, 290, 285, 260, 240, 225, 215, 220, 235, 260, 280, 295, 300, 290, 275, 260},
 	// AB (Stockholm, Sweden): hydro + nuclear, among the cleanest grids — very low.
 	"AB": {20, 18, 16, 15, 14, 14, 16, 20, 26, 30, 32, 33, 34, 35, 33, 30, 28, 26, 24, 22, 21, 20, 19, 18},
+	// PIE (Piedmont, Italy): gas plus hydro, with a solar dip around midday.
+	"PIE": {290, 285, 280, 275, 272, 270, 275, 270, 240, 200, 170, 150, 140, 145, 160, 190, 230, 270, 300, 310, 305, 300, 295, 292},
 	// MH (Mumbai, India): coal-heavy grid — among the highest.
 	"MH": {680, 670, 660, 650, 645, 640, 650, 670, 700, 720, 740, 750, 745, 735, 720, 710, 715, 730, 750, 770, 780, 770, 750, 720},
 }

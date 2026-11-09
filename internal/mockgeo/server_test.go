@@ -58,6 +58,10 @@ func TestLongestPrefixMatch(t *testing.T) {
 		{"172.23.22.5", "AB", "Stockholm"},   // new region
 		{"172.23.22.100", "LOM", "Milan"},    // .64/26
 		{"172.23.22.130", "SG", "Singapore"}, // .128/26
+		{"172.23.30.10", "PIE", "Cuneo"},     // Piedmont /24
+		{"172.23.30.70", "PIE", "Alba"},
+		{"172.23.30.130", "PIE", "Turin"},
+		{"172.23.30.200", "PIE", "Asti"},
 	}
 	for _, c := range cases {
 		got := serve(t, c.ip)
@@ -104,7 +108,7 @@ func TestInvalidIP(t *testing.T) {
 func TestRegionsMatchCarbon(t *testing.T) {
 	carbonRegions := map[string]bool{
 		"QC": true, "LOM": true, "CA": true, "HE": true, "13": true, "NSW": true,
-		"IDF": true, "SP": true, "SG": true, "ENG": true, "AB": true, "MH": true,
+		"IDF": true, "SP": true, "SG": true, "ENG": true, "AB": true, "MH": true, "PIE": true,
 	}
 	for _, r := range compiledTable {
 		if r.loc.Region == "" {

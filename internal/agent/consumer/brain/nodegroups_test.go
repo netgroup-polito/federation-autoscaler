@@ -70,11 +70,11 @@ func TestNodeGroupsSingleSite(t *testing.T) {
 }
 
 func TestNodeGroupsPoolsSitesPerProvider(t *testing.T) {
-	// The FiberCop example: Asti 6, Cuneo 4, Alba 7 chunks free.
+	// An edge provider with three sites: Asti 6, Cuneo 4, Alba 7 chunks free.
 	offers := []Offer{
-		siteOffer("fibercop", "asti", 12, 24),
-		siteOffer("fibercop", "cuneo", 8, 16),
-		siteOffer("fibercop", "alba", 14, 28),
+		siteOffer("edge-telco", "asti", 12, 24),
+		siteOffer("edge-telco", "cuneo", 8, 16),
+		siteOffer("edge-telco", "alba", 14, 28),
 	}
 	resp := NodeGroups(Input{Offers: offers})
 	if len(resp.NodeGroups) != 1 {

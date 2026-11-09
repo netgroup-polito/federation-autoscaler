@@ -23,7 +23,7 @@ limitations under the License.
 // the carbon (mock-eco) lookup for the eco strategy. The Broker never calls it.
 //
 // The table is filled with the operator's private subnets carved fine enough to
-// separate co-located clusters: the demo's four /24s (172.23.{4,6,7,22}.0/24) are
+// separate co-located clusters: the demo's /24s (172.23.{4,6,7,22,30}.0/24) are
 // split into /26 blocks, each mapped to a distinct real city, so two clusters
 // sharing a /24 still land in different cities. Region codes match the carbon
 // service (mock-eco), so one discovered location drives both strategies.
@@ -89,6 +89,13 @@ var geoTable = []geoRow{
 	{[]string{"172.23.22.0/26", "172.23.22.192/26"}, GeoResponse{ContinentCode: "EU", CountryCode: "SE", Region: "AB", RegionName: "Stockholm", City: "Stockholm", Lat: 59.3293, Lon: 18.0686, ISP: "Telia Company", Org: "Telia", AS: "AS3301 Telia Company AB"}},
 	{[]string{"172.23.22.64/26"}, GeoResponse{ContinentCode: "EU", CountryCode: "IT", Region: "LOM", RegionName: "Lombardy", City: "Milan", Lat: 45.4642, Lon: 9.1900, ISP: "Telecom Italia Mobile", Org: "Telecom Italia", AS: "AS3269 Telecom Italia S.p.a."}},
 	{[]string{"172.23.22.128/26"}, GeoResponse{ContinentCode: "AS", CountryCode: "SG", Region: "SG", RegionName: "Singapore", City: "Singapore", Lat: 1.3521, Lon: 103.8198, ISP: "Singtel", Org: "Singtel", AS: "AS7473 Singapore Telecommunications Ltd"}},
+
+	// 172.23.30.0/24 — Piedmont (an edge scenario: a consumer in Cuneo, edge
+	// sites a few tens of km away). One region code, so one carbon profile.
+	{[]string{"172.23.30.0/26"}, GeoResponse{ContinentCode: "EU", CountryCode: "IT", Region: "PIE", RegionName: "Piedmont", City: "Cuneo", Lat: 44.3845, Lon: 7.5427, ISP: "Mock ISP", Org: "Mock Org", AS: "AS64512 Mock"}},
+	{[]string{"172.23.30.64/26"}, GeoResponse{ContinentCode: "EU", CountryCode: "IT", Region: "PIE", RegionName: "Piedmont", City: "Alba", Lat: 44.7004, Lon: 8.0349, ISP: "Mock ISP", Org: "Mock Org", AS: "AS64512 Mock"}},
+	{[]string{"172.23.30.128/26"}, GeoResponse{ContinentCode: "EU", CountryCode: "IT", Region: "PIE", RegionName: "Piedmont", City: "Turin", Lat: 45.0703, Lon: 7.6869, ISP: "Mock ISP", Org: "Mock Org", AS: "AS64512 Mock"}},
+	{[]string{"172.23.30.192/26"}, GeoResponse{ContinentCode: "EU", CountryCode: "IT", Region: "PIE", RegionName: "Piedmont", City: "Asti", Lat: 44.9008, Lon: 8.2064, ISP: "Mock ISP", Org: "Mock Org", AS: "AS64512 Mock"}},
 
 	// Default: any IP outside the known private subnets → no location.
 	{[]string{"0.0.0.0/0"}, GeoResponse{}},

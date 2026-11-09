@@ -56,13 +56,13 @@ func newTestCatalog() (*MemoryCatalog, *fakeClock) {
 func TestMemoryCatalogUpsertGetList(t *testing.T) {
 	ctx := context.Background()
 	m, _ := newTestCatalog()
-	for _, o := range []Offer{testOffer("fibercop", "asti"), testOffer("fibercop", "alba"), testOffer("p2", "default")} {
+	for _, o := range []Offer{testOffer("edge-telco", "asti"), testOffer("edge-telco", "alba"), testOffer("p2", "default")} {
 		if err := m.UpsertOffer(ctx, o); err != nil {
 			t.Fatalf("UpsertOffer: %v", err)
 		}
 	}
 
-	got, err := m.GetOffer(ctx, "fibercop", "alba")
+	got, err := m.GetOffer(ctx, "edge-telco", "alba")
 	if err != nil || got.SiteID != "alba" {
 		t.Fatalf("GetOffer = %+v, %v", got, err)
 	}
@@ -76,20 +76,20 @@ func TestMemoryCatalogUpsertGetList(t *testing.T) {
 		keys = append(keys, o.ProviderID+"/"+o.SiteID)
 	}
 	sort.Strings(keys)
-	if want := []string{"fibercop/alba", "fibercop/asti", "p2/default"}; len(keys) != 3 ||
+	if want := []string{"edge-telco/alba", "edge-telco/asti", "p2/default"}; len(keys) != 3 ||
 		keys[0] != want[0] || keys[1] != want[1] || keys[2] != want[2] {
 		t.Errorf("ListOffers keys = %v, want %v", keys, want)
 	}
 
 	// One offer per (provider, site): a re-upsert replaces, it never duplicates.
-	again := testOffer("fibercop", "asti")
+	again := testOffer("edge-telco", "asti")
 	again.SLA = "gold"
 	_ = m.UpsertOffer(ctx, again)
 	list, _ = m.ListOffers(ctx)
 	if len(list) != 3 {
 		t.Errorf("re-upsert must replace, got %d offers", len(list))
 	}
-	if got, _ := m.GetOffer(ctx, "fibercop", "asti"); got.SLA != "gold" {
+	if got, _ := m.GetOffer(ctx, "edge-telco", "asti"); got.SLA != "gold" {
 		t.Errorf("re-upsert not applied: %+v", got)
 	}
 }
@@ -146,14 +146,14 @@ func TestMemoryCatalogDeleteAndMissing(t *testing.T) {
 func TestOfferJSONContract(t *testing.T) {
 	raw := `{
 	  "schemaVersion": 1,
-	  "providerId": "fibercop",
-	  "liqoClusterId": "fibercop",
+	  "providerId": "edge-telco",
+	  "liqoClusterId": "edge-telco",
 	  "siteId": "asti",
 	  "location": { "region": "Piedmont", "city": "Asti", "latitude": 44.90, "longitude": 8.21 },
 	  "available": { "cpu": "12", "memory": "24Gi", "nvidia.com/gpu": "2" },
 	  "unitPrices": { "cpu": "0.03", "memory": "0.004" },
 	  "expectedLatencyMs": 2,
-	  "probeEndpoint": "asti.fibercop.example:7777",
+	  "probeEndpoint": "asti.edge-telco.example:7777",
 	  "extra": { "note": "powered by renewable energy at night" },
 	  "updatedAt": "2026-11-03T10:00:00Z",
 	  "aFieldFromTheFuture": { "anything": true }
@@ -164,7 +164,7 @@ func TestOfferJSONContract(t *testing.T) {
 	}
 	gpu := o.Available[corev1.ResourceName("nvidia.com/gpu")]
 	switch {
-	case o.ProviderID != "fibercop" || o.SiteID != "asti" || o.SchemaVersion != 1:
+	case o.ProviderID != "edge-telco" || o.SiteID != "asti" || o.SchemaVersion != 1:
 		t.Errorf("identity fields: %+v", o)
 	case o.Location.City != "Asti" || o.Location.Latitude == nil || *o.Location.Latitude != 44.90:
 		t.Errorf("location: %+v", o.Location)

@@ -63,14 +63,14 @@ func TestEstimateLatencyMs(t *testing.T) {
 	}
 }
 
-func TestLatencyBoundFiberCopStory(t *testing.T) {
+func TestLatencyBoundEdgeSites(t *testing.T) {
 	// A consumer in Asti asks for "max 3 ms": the Piedmont sites qualify on the
 	// estimate, a Rome site does not.
 	offers := []Offer{
-		located(siteOffer("fibercop", "asti", 12, 24), astiLat, astiLon),
-		located(siteOffer("fibercop", "cuneo", 8, 16), cuneoLat, cuneoLon),
-		located(siteOffer("fibercop", "alba", 14, 28), albaLat, albaLon),
-		located(siteOffer("fibercop", "rome", 10, 20), romeLat, romeLon),
+		located(siteOffer("edge-telco", "asti", 12, 24), astiLat, astiLon),
+		located(siteOffer("edge-telco", "cuneo", 8, 16), cuneoLat, cuneoLon),
+		located(siteOffer("edge-telco", "alba", 14, 28), albaLat, albaLon),
+		located(siteOffer("edge-telco", "rome", 10, 20), romeLat, romeLon),
 	}
 	v := NodeGroups(Input{Offers: offers, Consumer: inAsti(), LatencyBound: bound(3)}).NodeGroups[0]
 	if v.MaxSize != 17 {
