@@ -20,10 +20,15 @@
 # (e.g. `kubectl apply -f samples/provider-capacity.yaml` or
 # `kubectl patch configmap agent-capacity`); the fa_provider Ansible role does
 # not stamp it.
+# Labelled as an operator setting: the deploy tooling (Ansible fa_provider,
+# standalone apply_overlay) creates it only when it is missing and never
+# overwrites it, so a re-deploy keeps what the operator or the console set.
 apiVersion: v1
 kind: ConfigMap
 metadata:
   name: agent-capacity
   namespace: federation-autoscaler-system
+  labels:
+    federation-autoscaler.io/operator-settings: "true"
 data:
   capacity.yaml: ""

@@ -221,8 +221,20 @@ apply_tls_secret() {
 # retag the component image to ${REGISTRY}/federation-autoscaler-<component>:${TAG},
 # and apply. <component> is one of broker|agent|grpc-server|mock-eco|mock-geo.
 apply_overlay() {
-  local dir="$1" comp="$2"
-  kubectl kustomize "$dir" \
-    | sed "s#image: federation-autoscaler/${comp}:latest#image: ${REGISTRY}/federation-autoscaler-${comp}:${TAG}#g" \
-    | kubectl apply -f -
+  local dir="$1" comp="$2" manifest out
+  manifest=$(kubectl kustomize "$dir" \
+    | sed "s#image: federation-autoscaler/${comp}:latest#image: ${REGISTRY}/federation-autoscaler-${comp}:${TAG}#g") || return 1
+  # Operator settings (label federation-autoscaler.io/operator-settings=true:
+  # the provider's prices, capacity and renewable flag) are created only when
+  # missing, so re-running a script never wipes what the operator or the config
+  # console set. Overlays without such objects are applied exactly as before.
+  echo "$manifest" | kubectl apply -l 'federation-autoscaler.io/operator-settings!=true' -f - || return 1
+  if ! out=$(echo "$manifest" | kubectl create --save-config \
+      -l 'federation-autoscaler.io/operator-settings=true' -f - 2>&1); then
+    if echo "$out" | grep -v -e 'AlreadyExists' -e ' created$' -e 'no objects passed to create' | grep -q .; then
+      echo "$out" >&2
+      return 1
+    fi
+  fi
+  return 0
 }

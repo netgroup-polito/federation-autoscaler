@@ -12,10 +12,15 @@
 # for the provider-cluster admin to set MANUALLY (the consumer/provider config
 # console can toggle it, or `kubectl patch configmap agent-renewable`); the
 # fa_provider Ansible role does not stamp it.
+# Labelled as an operator setting: the deploy tooling (Ansible fa_provider,
+# standalone apply_overlay) creates it only when it is missing and never
+# overwrites it, so a re-deploy keeps what the operator or the console set.
 apiVersion: v1
 kind: ConfigMap
 metadata:
   name: agent-renewable
   namespace: federation-autoscaler-system
+  labels:
+    federation-autoscaler.io/operator-settings: "true"
 data:
   renewable.yaml: ""

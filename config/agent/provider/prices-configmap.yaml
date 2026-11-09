@@ -13,10 +13,15 @@
 # provider advertises no price ⇒ the Broker treats it as today. The fa_provider
 # Ansible role overwrites prices.yaml per provider; operators applying the raw
 # overlay can edit it here or `kubectl patch configmap agent-prices`.
+# Labelled as an operator setting: the deploy tooling (Ansible fa_provider,
+# standalone apply_overlay) creates it only when it is missing and never
+# overwrites it, so a re-deploy keeps what the operator or the console set.
 apiVersion: v1
 kind: ConfigMap
 metadata:
   name: agent-prices
   namespace: federation-autoscaler-system
+  labels:
+    federation-autoscaler.io/operator-settings: "true"
 data:
   prices.yaml: ""
