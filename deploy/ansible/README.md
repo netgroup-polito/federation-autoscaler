@@ -92,7 +92,15 @@ rm kustomize
 # liqoctl v1.1.2 (must match the version bundled in the agent image)
 curl -fsSL "https://github.com/liqotech/liqo/releases/download/v1.1.2/liqoctl-linux-amd64.tar.gz" | tar -xz -C /tmp
 sudo install -m0755 /tmp/liqoctl /usr/local/bin/liqoctl
+
+# helm v3 and git (02-deploy installs the Liqo dashboard chart from a git checkout)
+sudo apt-get install -y git
+curl -fsSL https://get.helm.sh/helm-v3.16.4-linux-amd64.tar.gz | tar -xz -C /tmp
+sudo install -m0755 /tmp/linux-amd64/helm /usr/local/bin/helm
 ```
+
+`demo-up.sh` installs all of these itself; this list is for running the
+playbooks by hand.
 
 > **Note**: you do **not** need Docker on the control host. The
 > federation-autoscaler images are published to Docker Hub by the project
