@@ -24,8 +24,12 @@
       https://github.com/kubernetes-sigs/metrics-server/releases/latest/download/components.yaml
   changed_when: true
 
+# One checkout on the control host serves every consumer, so clone it once
+# per run: with several consumers, parallel `git fetch` runs into the same
+# directory collide ("shallow file has changed since we read it").
 - name: Clone/update the ArubaKube liqo-dashboard chart on the control host
   delegate_to: localhost
+  run_once: true
   ansible.builtin.git:
     repo: "{{ liqo_dashboard_repo }}"
     dest: "{{ liqo_dashboard_dir }}"
