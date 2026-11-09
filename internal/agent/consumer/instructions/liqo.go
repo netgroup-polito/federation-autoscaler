@@ -167,6 +167,22 @@ func ensureResourceSlice(
 	}
 	_ = unstructured.SetNestedField(obj.Object, spec, "spec")
 
+	// A re-delivered Peer must succeed again (handlers are idempotent), so an
+	// existing slice for this reservation is reused. Check before creating:
+	// Liqo's validating webhook rejects a duplicate name with its own denial
+	// ("a resourceslice with the same name already exists") before the API
+	// server could answer AlreadyExists. Slice names derive from unique
+	// reservation IDs, so an existing one is always this reservation's.
+	existing := &unstructured.Unstructured{}
+	existing.SetGroupVersionKind(resourceSliceGVK)
+	err = c.Get(ctx, ctrlclient.ObjectKey{Namespace: namespace, Name: name}, existing)
+	if err == nil {
+		return name, nil
+	}
+	if !apierrors.IsNotFound(err) {
+		return "", fmt.Errorf("get ResourceSlice %q in %q: %w", name, namespace, err)
+	}
+
 	if err := c.Create(ctx, obj); err != nil {
 		if apierrors.IsAlreadyExists(err) {
 			return name, nil

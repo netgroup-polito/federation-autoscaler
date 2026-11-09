@@ -5,7 +5,11 @@
 # namespace, shared by every Reservation that lands here). podOffloadingStrategy
 # LocalAndRemote lets Pods fill the consumer's OWN node first and only spill onto
 # borrowed provider (virtual) nodes when local capacity is exhausted — the
-# natural autoscaler story. The selector matches any Liqo virtual node.
+# natural autoscaler story. There is deliberately NO clusterSelector: Liqo treats
+# an empty one as "every peered cluster". A non-empty selector, even one meant
+# to match every virtual node, makes Liqo v1.1.2 flip the namespace mapping off
+# and on while a new VirtualNode appears (we run one per chunk), deleting the
+# provider-side namespace and aborting pods offloaded in that window.
 #
 # Applied verbatim (no substitution). Workloads outside `default` need their own
 # NamespaceOffloading in those namespaces.
@@ -17,10 +21,3 @@ metadata:
 spec:
   namespaceMappingStrategy: DefaultName
   podOffloadingStrategy: LocalAndRemote
-  clusterSelector:
-    nodeSelectorTerms:
-    - matchExpressions:
-      - key: liqo.io/type
-        operator: In
-        values:
-        - virtual-node

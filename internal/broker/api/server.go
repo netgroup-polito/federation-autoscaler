@@ -44,6 +44,10 @@ type Server struct {
 	sizer              chunk.Sizer
 	consumers          *ConsumerRegistry
 	reservationTimeout time.Duration
+
+	// justEnforced hides the cache's stale copy of an instruction whose
+	// result was just recorded (see staleEnforced).
+	justEnforced *staleEnforced
 }
 
 // ServerOptions bundles the construction-time settings of a Server. Empty
@@ -110,6 +114,7 @@ func NewServer(opts ServerOptions) *Server {
 		sizer:              sizer,
 		consumers:          NewConsumerRegistry(),
 		reservationTimeout: resvTimeout,
+		justEnforced:       newStaleEnforced(),
 	}
 }
 

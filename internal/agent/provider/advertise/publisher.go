@@ -247,10 +247,12 @@ func (p *Publisher) publishOnce(ctx context.Context) {
 
 	scaled, pctCustom, fixedCustom := p.applyCapacityScaling(snap.Allocatable)
 
-	// Resolve the node IP once and reuse it for BOTH geo discovery and the
-	// measured-latency probe endpoint (<nodeIP>:probeUDPPort). The probe endpoint
-	// is advertised whenever the IP is known even if geolocation fails — the
-	// consumer only needs a reachable UDP address to measure RTT.
+	// The location comes from the geolocated IP: --advertised-ip when set (the
+	// demo/steering lever), otherwise the node IP. The measured-latency probe
+	// endpoint (<ip>:probeUDPPort) must be an address consumers can actually
+	// reach, so it always uses the node's own IP; only when that cannot be
+	// discovered does it fall back to the override. It is advertised whenever an
+	// IP is known, even if geolocation fails.
 	ip, err := nodeip.Resolve(ctx, p.localClient, p.nodeName, p.advertisedIP)
 	if err != nil {
 		p.log.V(1).Info("node IP discovery failed; advertising no location/probe", "err", err.Error())
@@ -258,9 +260,15 @@ func (p *Publisher) publishOnce(ctx context.Context) {
 	}
 	topology, carbon, carbonForecast := p.loadPlacementInputs(ctx, ip)
 
+	probeIP := ip
+	if p.advertisedIP != "" {
+		if nodeIP, err := nodeip.Resolve(ctx, p.localClient, p.nodeName, ""); err == nil && nodeIP != "" {
+			probeIP = nodeIP
+		}
+	}
 	probeEndpoint := ""
-	if ip != "" && p.probeUDPPort > 0 {
-		probeEndpoint = net.JoinHostPort(ip, strconv.Itoa(p.probeUDPPort))
+	if probeIP != "" && p.probeUDPPort > 0 {
+		probeEndpoint = net.JoinHostPort(probeIP, strconv.Itoa(p.probeUDPPort))
 	}
 
 	req := &brokerapi.AdvertisementRequest{
@@ -408,8 +416,8 @@ func (p *Publisher) loadUnitPrices() corev1.ResourceList {
 // best-effort: a failure logs at V(1) and the corresponding field is omitted,
 // never failing the publish cycle. The discovered region CODE (e.g. "QC") is the
 // carbon join key, so an unset region means no carbon either. The caller resolves
-// ip (nodeip.Resolve) once and reuses it for the probe endpoint too; an empty ip
-// means location discovery is off.
+// ip (nodeip.Resolve, honouring --advertised-ip); an empty ip means location
+// discovery is off.
 func (p *Publisher) loadPlacementInputs(ctx context.Context, ip string) (*brokerv1alpha1.Topology, *float64, []float64) {
 	if ip == "" {
 		return nil, nil, nil

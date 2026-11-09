@@ -568,3 +568,47 @@ func TestLoadRenewable(t *testing.T) {
 		})
 	}
 }
+
+// TestPublisher_ProbeEndpointUsesTheNodeIP: --advertised-ip only steers the
+// location. The probe endpoint must stay the node's own, reachable IP;
+// without a discoverable node IP it falls back to the override.
+func TestPublisher_ProbeEndpointUsesTheNodeIP(t *testing.T) {
+	node := readyNode("worker-1", corev1.ResourceList{
+		corev1.ResourceCPU:    resource.MustParse("8"),
+		corev1.ResourceMemory: resource.MustParse("16Gi"),
+	})
+	node.Status.Addresses = []corev1.NodeAddress{{Type: corev1.NodeInternalIP, Address: "192.168.122.12"}}
+
+	for _, tc := range []struct {
+		name, nodeName, advertisedIP, want string
+	}{
+		{"override steers location only", "worker-1", "172.23.6.70", "192.168.122.12:30100"},
+		{"no override", "worker-1", "", "192.168.122.12:30100"},
+		{"node IP unknown: fall back to the override", "", "172.23.6.70", "172.23.6.70:30100"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			fb := newFakeBroker(t)
+			p, err := New(Options{
+				Client:        fb.buildClient(t),
+				LocalClient:   newFakeKubeClient(node.DeepCopy()),
+				ClusterID:     "provider-1",
+				LiqoClusterID: "provider-1",
+				NodeName:      tc.nodeName,
+				AdvertisedIP:  tc.advertisedIP,
+				ProbeUDPPort:  30100,
+				Interval:      time.Hour,
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			p.publishOnce(context.Background())
+			posted := fb.snapshotPosted()
+			if len(posted) != 1 {
+				t.Fatalf("want 1 advertisement, got %d", len(posted))
+			}
+			if got := posted[0].ProbeEndpoint; got != tc.want {
+				t.Errorf("probe endpoint = %q, want %q", got, tc.want)
+			}
+		})
+	}
+}

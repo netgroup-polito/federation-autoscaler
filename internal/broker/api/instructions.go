@@ -92,7 +92,8 @@ func (s *Server) collectInstructionsForCaller(
 	}
 	for i := range pis.Items {
 		pi := &pis.Items[i]
-		if pi.Spec.TargetClusterID != callerID || pi.Status.Enforced {
+		if pi.Spec.TargetClusterID != callerID || pi.Status.Enforced ||
+			s.justEnforced.isStale(enforcedKey("pi", pi.Namespace, pi.Name), pi.ResourceVersion, time.Now()) {
 			continue
 		}
 		out = append(out, viewFromProviderInstruction(pi))
@@ -106,7 +107,8 @@ func (s *Server) collectInstructionsForCaller(
 	}
 	for i := range ris.Items {
 		ri := &ris.Items[i]
-		if ri.Spec.TargetClusterID != callerID || ri.Status.Enforced {
+		if ri.Spec.TargetClusterID != callerID || ri.Status.Enforced ||
+			s.justEnforced.isStale(enforcedKey("ri", ri.Namespace, ri.Name), ri.ResourceVersion, time.Now()) {
 			continue
 		}
 
@@ -526,7 +528,16 @@ func (s *Server) markProviderInstructionEnforced(
 	patched.Status.Attempts++
 	patched.Status.LastUpdateTime = &now
 	patched.Status.Message = resultMessage(req)
-	return s.client.Status().Update(ctx, patched)
+	if err := s.client.Status().Update(ctx, patched); err != nil {
+		return err
+	}
+	s.justEnforced.record(enforcedKey("pi", pi.Namespace, pi.Name), pi.ResourceVersion, now.Time)
+	return nil
+}
+
+// enforcedKey identifies an instruction in the staleEnforced set.
+func enforcedKey(kind, namespace, name string) string {
+	return kind + "/" + namespace + "/" + name
 }
 
 // -----------------------------------------------------------------------------
@@ -633,7 +644,11 @@ func (s *Server) markReservationInstructionEnforced(
 	patched.Status.Attempts++
 	patched.Status.LastUpdateTime = &now
 	patched.Status.Message = resultMessage(req)
-	return s.client.Status().Update(ctx, patched)
+	if err := s.client.Status().Update(ctx, patched); err != nil {
+		return err
+	}
+	s.justEnforced.record(enforcedKey("ri", ri.Namespace, ri.Name), ri.ResourceVersion, now.Time)
+	return nil
 }
 
 // -----------------------------------------------------------------------------

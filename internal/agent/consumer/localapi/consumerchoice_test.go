@@ -23,6 +23,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -310,4 +311,41 @@ func TestConsumerChoiceAI_IncompleteRankingIsCompleted(t *testing.T) {
 	if hr := headroom(getNodeGroups(t, ts)); hr["p2"] != 3 || hr["p3"] != 0 {
 		t.Errorf("after p1 filled, the deterministic runner-up p2 must be growable; got %+v", hr)
 	}
+}
+
+// A policy switch to ConsumerChoice reaches the Broker only with the next
+// heartbeat. Until the Broker applies it, its list is masked for the previous
+// policy (here Random, which left only p1 growable). The agent must not decide
+// on that list: it waits, with nothing growable and no LLM call, and decides
+// once the unmasked ConsumerChoice list arrives.
+func TestConsumerChoiceAI_WaitsForTheBrokerToApplyThePolicy(t *testing.T) {
+	llm := &fakeOllama{answer: func(int) string { return ranking("p3", "p2", "p1") }}
+	fb := newFakeBroker(t)
+	ts := aiTestServer(t, fb, newFakeKubeClient(consumerChoicePolicy("greenest")), llm.client(t))
+
+	var brokerApplies atomic.Value
+	brokerApplies.Store(autoscalingv1alpha1.PlacementStrategyRandom)
+	fb.setHandler(func(w http.ResponseWriter, _ *http.Request) {
+		policy := brokerApplies.Load().(autoscalingv1alpha1.PlacementStrategy)
+		resp := unmaskedResp(policy)
+		if policy != autoscalingv1alpha1.PlacementStrategyConsumerChoice {
+			resp.NodeGroups[1].MaxSize, resp.NodeGroups[2].MaxSize = 0, 0 // Random kept p1 only
+		}
+		w.Header().Set("Content-Type", brokerapi.ContentTypeJSON)
+		_ = json.NewEncoder(w).Encode(resp)
+	})
+
+	for i := 0; i < 3; i++ {
+		for p, h := range headroom(getNodeGroups(t, ts)) {
+			if h != 0 {
+				t.Fatalf("before the Broker applies ConsumerChoice nothing may be growable; %s has %d", p, h)
+			}
+		}
+	}
+	if got := llm.prompt(0); got != "" {
+		t.Fatal("the model must not be asked to choose from a list masked for another policy")
+	}
+
+	brokerApplies.Store(autoscalingv1alpha1.PlacementStrategyConsumerChoice)
+	eventually(t, ts, func(map[string]int32) {}, onlyGrowable("p3"))
 }

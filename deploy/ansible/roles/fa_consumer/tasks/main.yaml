@@ -116,9 +116,18 @@
 # (one per K8s namespace, shared by every Reservation that lands here),
 # so the agent intentionally does NOT create it per-Reservation —
 # multiple in-flight peers to the same namespace would race on the same
-# CR. The selector matches any Liqo virtual node so federation
-# offloading is enabled for `default`; the per-Reservation ResourceSlice
-# picks the specific provider. Operators with workloads outside
+# CR. It has NO clusterSelector, which Liqo treats as "every peered
+# cluster", so federation offloading is enabled for `default`; the
+# per-Reservation ResourceSlice picks the specific provider.
+#
+# Do not add a selector, even one meant to match every virtual node
+# (liqo.io/type In virtual-node). Liqo v1.1.2 evaluates a non-empty
+# selector per VirtualNode and, for each one that does not match yet,
+# removes the whole cluster's namespace mapping. We run one VirtualNode
+# per chunk, so a just-created VirtualNode briefly flips the mapping off
+# and on: the provider-side namespace is deleted and recreated, and pods
+# offloaded in that window end up OffloadingAborted. An empty selector
+# short-circuits to "match" (clusterselector.go). Operators with workloads outside
 # `default` should stamp their own NSO in those namespaces.
 #
 # podOffloadingStrategy: LocalAndRemote — Pods may run on the consumer's
@@ -141,12 +150,5 @@
       spec:
         namespaceMappingStrategy: DefaultName
         podOffloadingStrategy: LocalAndRemote
-        clusterSelector:
-          nodeSelectorTerms:
-            - matchExpressions:
-                - key: liqo.io/type
-                  operator: In
-                  values:
-                    - virtual-node
       EOF
   changed_when: true

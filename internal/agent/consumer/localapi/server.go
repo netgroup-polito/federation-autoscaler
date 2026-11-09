@@ -252,6 +252,21 @@ func (s *Server) handleNodeGroups(w http.ResponseWriter, r *http.Request) {
 	// but the chosen provider) but runs client-side so the Broker stays unaware.
 	if s.ollama != nil {
 		if policy, prompt := s.currentConsumerChoice(r.Context()); policy {
+			// The Broker learns a policy change on the next heartbeat (up to
+			// 15 s later). Until then its list is still masked for the
+			// previous policy, often down to one provider, and a choice made
+			// on it would just repeat that pick and stay cached for a minute.
+			// Wait for the unmasked ConsumerChoice list instead.
+			if resp.AppliedPlacement != autoscalingv1alpha1.PlacementStrategyConsumerChoice {
+				s.log.V(1).Info("ConsumerChoice: waiting for the Broker to apply the policy",
+					"brokerApplies", resp.AppliedPlacement)
+				for i := range resp.NodeGroups {
+					resp.NodeGroups[i].MaxSize = resp.NodeGroups[i].CurrentReserved
+				}
+				s.writeJSON(w, http.StatusOK, resp)
+				return
+			}
+
 			s.aiMutex.Lock()
 
 			// If the prompt changed, clear cache

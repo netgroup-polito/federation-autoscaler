@@ -24,13 +24,16 @@ import (
 	"testing"
 
 	corev1 "k8s.io/api/core/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/resource"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
 	ctrlclient "sigs.k8s.io/controller-runtime/pkg/client"
 	clientfake "sigs.k8s.io/controller-runtime/pkg/client/fake"
+	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 
 	autoscalingv1alpha1 "github.com/netgroup-polito/federation-autoscaler/api/autoscaling/v1alpha1"
 	brokerapi "github.com/netgroup-polito/federation-autoscaler/internal/broker/api"
@@ -319,5 +322,43 @@ func TestPeer_RejectsMissingNamespace(t *testing.T) {
 	_, err := h(context.Background(), peerInstruction())
 	if err == nil || !strings.Contains(err.Error(), "Namespace is required") {
 		t.Fatalf("want namespace-required error, got %v", err)
+	}
+}
+
+// TestPeer_RerunReusesSliceDespiteLiqoWebhook: Liqo's validating webhook
+// rejects a second ResourceSlice with the same name with its own denial, not
+// the API server's AlreadyExists. A re-delivered Peer must still succeed by
+// reusing the slice the first run created.
+func TestPeer_RerunReusesSliceDespiteLiqoWebhook(t *testing.T) {
+	scheme := runtime.NewScheme()
+	_ = clientgoscheme.AddToScheme(scheme)
+	_ = autoscalingv1alpha1.AddToScheme(scheme)
+	creates := 0
+	c := clientfake.NewClientBuilder().WithScheme(scheme).WithInterceptorFuncs(interceptor.Funcs{
+		Create: func(ctx context.Context, cl ctrlclient.WithWatch, obj ctrlclient.Object, opts ...ctrlclient.CreateOption) error {
+			if u, ok := obj.(*unstructured.Unstructured); ok && u.GetKind() == "ResourceSlice" {
+				creates++
+				probe := &unstructured.Unstructured{}
+				probe.SetGroupVersionKind(u.GroupVersionKind())
+				if cl.Get(ctx, ctrlclient.ObjectKeyFromObject(u), probe) == nil {
+					return apierrors.NewForbidden(schema.GroupResource{Group: "core.liqo.io", Resource: "resourceslices"},
+						u.GetName(), errors.New(`admission webhook "resourceslice.validate.liqo.io" denied the request: `+
+							"a resourceslice with the same name already exists in the cluster"))
+				}
+			}
+			return cl.Create(ctx, obj, opts...)
+		},
+	}).Build()
+
+	h := NewPeerHandler(PeerConfig{LocalClient: c, Namespace: testNamespace, Run: stubRun("", nil)})
+	if _, err := h(context.Background(), peerInstruction()); err != nil {
+		t.Fatal(err)
+	}
+	res, err := h(context.Background(), peerInstruction())
+	if err != nil || res.Status != brokerapi.ResultStatusSucceeded {
+		t.Fatalf("a re-delivered Peer must succeed; got %+v, %v", res, err)
+	}
+	if creates != 1 {
+		t.Errorf("ResourceSlice create attempts = %d, want 1 (the re-run must reuse the slice)", creates)
 	}
 }
