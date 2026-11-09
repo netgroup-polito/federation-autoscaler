@@ -169,7 +169,7 @@ func (c *RedisCatalog) ListOffers(ctx context.Context) ([]Offer, error) {
 		}
 		o, err := decodeOffer([]byte(s))
 		if err != nil {
-			return nil, err
+			continue // not valid JSON: skip it, so one bad writer cannot break every reader
 		}
 		if o.ProviderID != providerID || o.SiteID != siteID {
 			continue

@@ -273,6 +273,27 @@ func RunCatalogConformance(newBackend func() conformanceBackend) {
 		Expect(all[0].ProviderID).To(Equal("fibercop"))
 		Expect(all[0].SiteID).To(Equal("asti"))
 	})
+
+	It("skips an offer whose stored value is not valid JSON", func() {
+		Expect(b.w.UpsertOffer(ctx, sampleOffer("fibercop", "asti"))).To(Succeed())
+
+		// One buggy provider writes garbage straight into the catalog.
+		b.putRaw("fibercop", "cuneo", []byte("not json"))
+
+		// Reading the single broken offer reports the decode error: nobody
+		// else is affected by it.
+		_, err := b.r.GetOffer(ctx, "fibercop", "cuneo")
+		Expect(err).To(HaveOccurred())
+		Expect(err).NotTo(MatchError(ErrNotFound))
+
+		// Listing must not fail because of it: the valid offer still comes back.
+		all, err := b.r.ListOffers(ctx)
+		Expect(err).NotTo(HaveOccurred())
+		Expect(all).To(HaveLen(1))
+		Expect(all[0].ProviderID).To(Equal("fibercop"))
+		Expect(all[0].SiteID).To(Equal("asti"))
+	})
+
 	// -----------------------------------------------------------------------
 	// isolation
 	// -----------------------------------------------------------------------

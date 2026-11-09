@@ -152,7 +152,7 @@ func (m *MemoryCatalog) ListOffers(ctx context.Context) ([]Offer, error) {
 	for _, s := range raw {
 		o, err := decodeOffer(s.data)
 		if err != nil {
-			return nil, err
+			continue // not valid JSON: skip it, so one bad writer cannot break every reader
 		}
 		if (memoryKey{o.ProviderID, o.SiteID}) != s.key {
 			continue
