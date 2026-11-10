@@ -28,9 +28,9 @@ import (
 	clientfake "sigs.k8s.io/controller-runtime/pkg/client/fake"
 
 	agentclient "github.com/netgroup-polito/federation-autoscaler/internal/agent/client"
-	"github.com/netgroup-polito/federation-autoscaler/internal/agent/consumer/brain"
 	"github.com/netgroup-polito/federation-autoscaler/internal/agent/health"
 	"github.com/netgroup-polito/federation-autoscaler/internal/agent/poller"
+	"github.com/netgroup-polito/federation-autoscaler/internal/catalog"
 )
 
 // noNetTransport returns an error for every request. We use it instead
@@ -134,7 +134,7 @@ func TestRun_LocalBrainWithCatalogBootstraps(t *testing.T) {
 
 	opts := validOptions(t)
 	opts.BrainMode = BrainLocal
-	opts.Catalog = brain.NewMemoryCatalog()
+	opts.Catalog = catalog.NewMemoryCatalog()
 	if err := Run(ctx, opts); err != nil {
 		t.Fatalf("brain=local with a catalog should bootstrap; got %v", err)
 	}

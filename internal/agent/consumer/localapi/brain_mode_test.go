@@ -32,10 +32,11 @@ import (
 	autoscalingv1alpha1 "github.com/netgroup-polito/federation-autoscaler/api/autoscaling/v1alpha1"
 	"github.com/netgroup-polito/federation-autoscaler/internal/agent/consumer/brain"
 	brokerapi "github.com/netgroup-polito/federation-autoscaler/internal/broker/api"
+	"github.com/netgroup-polito/federation-autoscaler/internal/catalog"
 )
 
-func pricedOffer(provider, cpuPrice string) brain.Offer {
-	return brain.Offer{
+func pricedOffer(provider, cpuPrice string) catalog.Offer {
+	return catalog.Offer{
 		SchemaVersion: 1,
 		ProviderID:    provider,
 		LiqoClusterID: "liqo-" + provider,
@@ -77,9 +78,9 @@ func TestLocalBrainMode(t *testing.T) {
 		}
 	})
 
-	catalog := brain.NewMemoryCatalog()
-	for _, o := range []brain.Offer{pricedOffer("p-cheap", "0.01"), pricedOffer("p-dear", "0.09")} {
-		if err := catalog.UpsertOffer(context.Background(), o); err != nil {
+	cat := catalog.NewMemoryCatalog()
+	for _, o := range []catalog.Offer{pricedOffer("p-cheap", "0.01"), pricedOffer("p-dear", "0.09")} {
+		if err := cat.UpsertOffer(context.Background(), o); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -91,7 +92,7 @@ func TestLocalBrainMode(t *testing.T) {
 		},
 	})
 	b, err := brain.New(brain.Options{
-		Catalog: catalog, Reservations: client, LocalClient: kube, Namespace: "federation-autoscaler-system",
+		Catalog: cat, Reservations: client, LocalClient: kube, Namespace: "federation-autoscaler-system",
 	})
 	if err != nil {
 		t.Fatal(err)

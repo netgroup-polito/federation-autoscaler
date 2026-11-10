@@ -22,6 +22,7 @@ import (
 	autoscalingv1alpha1 "github.com/netgroup-polito/federation-autoscaler/api/autoscaling/v1alpha1"
 	brokerv1alpha1 "github.com/netgroup-polito/federation-autoscaler/api/broker/v1alpha1"
 	brokerapi "github.com/netgroup-polito/federation-autoscaler/internal/broker/api"
+	"github.com/netgroup-polito/federation-autoscaler/internal/catalog"
 )
 
 func resv(id, provider string, phase brokerv1alpha1.ReservationPhase) brokerapi.ReservationResponse {
@@ -79,7 +80,7 @@ func TestFromReservationsCountsPerProvider(t *testing.T) {
 // catalog is shared.
 func TestTwoConsumersSeeOnlyTheirOwnNodes(t *testing.T) {
 	// p1 has 4 free chunks left after both consumers reserved.
-	offers := []Offer{siteOffer("p1", "default", 8, 16)}
+	offers := []catalog.Offer{siteOffer("p1", "default", 8, 16)}
 
 	ownA, inFlightA := FromReservations([]brokerapi.ReservationResponse{
 		resv("a1", "p1", brokerv1alpha1.ReservationPhasePeered),
@@ -104,7 +105,7 @@ func TestTwoConsumersSeeOnlyTheirOwnNodes(t *testing.T) {
 // whose chunk there is still being set up must wait (nothing growable); the
 // other consumer moves on to the next-cheapest at once.
 func TestInFlightGatePerConsumer(t *testing.T) {
-	offers := []Offer{
+	offers := []catalog.Offer{
 		withPrice(siteOffer("p-cheap", "default", 0, 0), "0.01"), // no free chunk left
 		withPrice(siteOffer("p-dear", "default", 6, 12), "0.09"),
 	}

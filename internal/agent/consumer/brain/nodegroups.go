@@ -30,12 +30,13 @@ import (
 	brokerv1alpha1 "github.com/netgroup-polito/federation-autoscaler/api/broker/v1alpha1"
 	brokerapi "github.com/netgroup-polito/federation-autoscaler/internal/broker/api"
 	"github.com/netgroup-polito/federation-autoscaler/internal/broker/chunk"
+	"github.com/netgroup-polito/federation-autoscaler/internal/catalog"
 )
 
 // Input is everything one local placement decision needs.
 type Input struct {
 	// Offers are the live catalog offers (every provider, every site).
-	Offers []Offer
+	Offers []catalog.Offer
 
 	// OwnReserved[provider] is how many chunks THIS consumer currently holds on
 	// that provider. It becomes the node group's CurrentReserved, so the
@@ -90,7 +91,7 @@ func nodeGroups(in Input) (brokerapi.NodeGroupListResponse, []string) {
 	var held map[string]bool
 	var estimated []string
 	if in.LatencyBound != nil {
-		var kept []Offer
+		var kept []catalog.Offer
 		kept, estimated = withinBound(in.Offers, in.LatencyBound, in.Consumer, in.MeasuredLatencyMs)
 		held = heldOutsideBound(in.Offers, kept, in.OwnReserved)
 		for _, o := range in.Offers {
@@ -136,13 +137,13 @@ func nodeGroups(in Input) (brokerapi.NodeGroupListResponse, []string) {
 // CurrentReserved = own in the resulting view. Providers without a live offer
 // are absent, like unavailable providers on the Broker.
 func Advertisements(
-	offers []Offer, ownReserved map[string]int32, sizer chunk.Sizer,
+	offers []catalog.Offer, ownReserved map[string]int32, sizer chunk.Sizer,
 ) []*brokerv1alpha1.ClusterAdvertisement {
 	if sizer == nil {
 		sizer = chunk.NewDefaultSizer()
 	}
 
-	byProvider := map[string][]Offer{}
+	byProvider := map[string][]catalog.Offer{}
 	for _, o := range offers {
 		if o.ProviderID == "" {
 			continue
@@ -165,7 +166,7 @@ func Advertisements(
 
 // providerAdvertisement pools one provider's sites into a ClusterAdvertisement.
 func providerAdvertisement(
-	provider string, sites []Offer, own int32, sizer chunk.Sizer,
+	provider string, sites []catalog.Offer, own int32, sizer chunk.Sizer,
 ) *brokerv1alpha1.ClusterAdvertisement {
 	sort.Slice(sites, func(i, j int) bool { return sites[i].SiteID < sites[j].SiteID })
 
@@ -238,7 +239,7 @@ func addResources(sum, add corev1.ResourceList) {
 // topologyFrom maps an offer's location onto the advertisement topology the
 // latency policy reads. Missing coordinates stay 0, which the placement core
 // already treats as "no location".
-func topologyFrom(l Location) *brokerv1alpha1.Topology {
+func topologyFrom(l catalog.Location) *brokerv1alpha1.Topology {
 	t := &brokerv1alpha1.Topology{Region: l.Region, City: l.City}
 	if l.Latitude != nil {
 		t.Latitude = *l.Latitude

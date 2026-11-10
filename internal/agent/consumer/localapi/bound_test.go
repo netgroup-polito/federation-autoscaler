@@ -27,6 +27,7 @@ import (
 	autoscalingv1alpha1 "github.com/netgroup-polito/federation-autoscaler/api/autoscaling/v1alpha1"
 	"github.com/netgroup-polito/federation-autoscaler/internal/agent/consumer/brain"
 	brokerapi "github.com/netgroup-polito/federation-autoscaler/internal/broker/api"
+	"github.com/netgroup-polito/federation-autoscaler/internal/catalog"
 )
 
 func TestLatencyBoundQueryRoundTrip(t *testing.T) {
@@ -68,18 +69,18 @@ func TestLocalBrainAppliesRequestBound(t *testing.T) {
 	})
 	astiLat, astiLon, romeLat, romeLon := 44.9008, 8.2064, 41.9028, 12.4964
 	asti, rome := pricedOffer("p-asti", "0.05"), pricedOffer("p-rome", "0.01")
-	asti.Location = brain.Location{Latitude: &astiLat, Longitude: &astiLon}
-	rome.Location = brain.Location{Latitude: &romeLat, Longitude: &romeLon}
-	catalog := brain.NewMemoryCatalog()
-	for _, o := range []brain.Offer{asti, rome} {
-		if err := catalog.UpsertOffer(context.Background(), o); err != nil {
+	asti.Location = catalog.Location{Latitude: &astiLat, Longitude: &astiLon}
+	rome.Location = catalog.Location{Latitude: &romeLat, Longitude: &romeLon}
+	cat := catalog.NewMemoryCatalog()
+	for _, o := range []catalog.Offer{asti, rome} {
+		if err := cat.UpsertOffer(context.Background(), o); err != nil {
 			t.Fatal(err)
 		}
 	}
 	client := fb.buildClient(t)
 	kube := newFakeKubeClient() // no ConsumerPolicy: Standard, no bound
 	b, err := brain.New(brain.Options{
-		Catalog: catalog, Reservations: client, LocalClient: kube,
+		Catalog: cat, Reservations: client, LocalClient: kube,
 		Location: func() (float64, float64, bool) { return astiLat, astiLon, true }, // consumer in Asti
 	})
 	if err != nil {

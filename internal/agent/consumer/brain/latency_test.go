@@ -26,6 +26,7 @@ import (
 	autoscalingv1alpha1 "github.com/netgroup-polito/federation-autoscaler/api/autoscaling/v1alpha1"
 	brokerv1alpha1 "github.com/netgroup-polito/federation-autoscaler/api/broker/v1alpha1"
 	brokerapi "github.com/netgroup-polito/federation-autoscaler/internal/broker/api"
+	"github.com/netgroup-polito/federation-autoscaler/internal/catalog"
 )
 
 // Bologna is about 250 km from Asti (~2.5 ms estimated round trip).
@@ -45,7 +46,7 @@ func inTurin() brokerapi.ConsumerEntry {
 }
 
 // probed gives an offer a probe endpoint.
-func probed(o Offer, endpoint string) Offer {
+func probed(o catalog.Offer, endpoint string) catalog.Offer {
 	o.ProbeEndpoint = endpoint
 	return o
 }
@@ -66,7 +67,7 @@ func TestEstimateLatencyMs(t *testing.T) {
 func TestLatencyBoundEdgeSites(t *testing.T) {
 	// A consumer in Asti asks for "max 3 ms": the Piedmont sites qualify on the
 	// estimate, a Rome site does not.
-	offers := []Offer{
+	offers := []catalog.Offer{
 		located(siteOffer("edge-telco", "asti", 12, 24), astiLat, astiLon),
 		located(siteOffer("edge-telco", "cuneo", 8, 16), cuneoLat, cuneoLon),
 		located(siteOffer("edge-telco", "alba", 14, 28), albaLat, albaLon),
@@ -83,7 +84,7 @@ func TestLatencyBoundEdgeSites(t *testing.T) {
 }
 
 func TestLatencyBoundSizeMatters(t *testing.T) {
-	offers := []Offer{
+	offers := []catalog.Offer{
 		located(siteOffer("p-alba", "alba", 6, 12), albaLat, albaLon),
 		located(siteOffer("p-bologna", "bologna", 6, 12), bolognaLat, bolognaLon),
 	}
@@ -98,7 +99,7 @@ func TestLatencyBoundSizeMatters(t *testing.T) {
 }
 
 func TestLatencyBoundFromTurin(t *testing.T) {
-	offers := []Offer{
+	offers := []catalog.Offer{
 		located(siteOffer("p-asti", "asti", 6, 12), astiLat, astiLon),
 		located(siteOffer("p-rome", "rome", 6, 12), romeLat, romeLon),
 	}
@@ -111,7 +112,7 @@ func TestLatencyBoundFromTurin(t *testing.T) {
 func TestLatencyBoundMeasuredRTTWins(t *testing.T) {
 	// A measured RTT replaces the estimate: a congested near site is excluded,
 	// a well-connected far one qualifies.
-	offers := []Offer{
+	offers := []catalog.Offer{
 		probed(located(siteOffer("p-asti", "asti", 6, 12), astiLat, astiLon), "asti:7777"),
 		probed(located(siteOffer("p-rome", "rome", 6, 12), romeLat, romeLon), "rome:7777"),
 	}
@@ -134,7 +135,7 @@ func TestLatencyBoundMeasuredRTTWins(t *testing.T) {
 func TestLatencyBoundFallsBackToEstimate(t *testing.T) {
 	// No endpoint, or an endpoint that did not answer (+Inf): the estimate
 	// decides, and the site is reported as estimated.
-	offers := []Offer{
+	offers := []catalog.Offer{
 		located(siteOffer("p-asti", "asti", 6, 12), astiLat, astiLon),
 		probed(located(siteOffer("p-rome", "rome", 6, 12), romeLat, romeLon), "rome:7777"),
 	}
@@ -159,21 +160,21 @@ func TestLatencyBoundStrictWhenUnknown(t *testing.T) {
 
 	// No consumer location and no measurement: nothing can be shown to be
 	// within the bound.
-	resp := NodeGroups(Input{Offers: []Offer{asti}, LatencyBound: bound(3)})
+	resp := NodeGroups(Input{Offers: []catalog.Offer{asti}, LatencyBound: bound(3)})
 	if len(resp.NodeGroups) != 0 {
 		t.Errorf("no location, no measurement: want no node groups, got %+v", resp.NodeGroups)
 	}
 
 	// A site with neither coordinates nor a measurement never qualifies...
 	hr := headroom(NodeGroups(Input{
-		Offers: []Offer{asti, unlocated}, Consumer: inAsti(), LatencyBound: bound(3),
+		Offers: []catalog.Offer{asti, unlocated}, Consumer: inAsti(), LatencyBound: bound(3),
 	}))
 	if _, listed := hr["p-nowhere"]; listed {
 		t.Errorf("a site with no coordinates and no measurement must not qualify, got %v", hr)
 	}
 	// ...but a measurement alone is enough, with no coordinates anywhere...
 	hr = headroom(NodeGroups(Input{
-		Offers:            []Offer{probed(unlocated, "nowhere:7777")},
+		Offers:            []catalog.Offer{probed(unlocated, "nowhere:7777")},
 		LatencyBound:      bound(3),
 		MeasuredLatencyMs: map[string]float64{"nowhere:7777": 1.5},
 	}))
@@ -181,7 +182,7 @@ func TestLatencyBoundStrictWhenUnknown(t *testing.T) {
 		t.Errorf("a measured site needs no coordinates, got %v", hr)
 	}
 	// ...and with no bound every offer counts.
-	if hr := headroom(NodeGroups(Input{Offers: []Offer{unlocated}})); hr["p-nowhere"] != 3 {
+	if hr := headroom(NodeGroups(Input{Offers: []catalog.Offer{unlocated}})); hr["p-nowhere"] != 3 {
 		t.Errorf("without a bound every offer counts, got %v", hr)
 	}
 }
@@ -191,7 +192,7 @@ func TestLatencyBoundKeepsHeldProviderListed(t *testing.T) {
 	rome := located(siteOffer("p-rome", "rome", 8, 16), romeLat, romeLon)
 	rome.Available[corev1.ResourceName("nvidia.com/gpu")] = resource.MustParse("2")
 	resp := NodeGroups(Input{
-		Offers:       []Offer{rome, located(siteOffer("p-asti", "asti", 6, 12), astiLat, astiLon)},
+		Offers:       []catalog.Offer{rome, located(siteOffer("p-asti", "asti", 6, 12), astiLat, astiLon)},
 		OwnReserved:  map[string]int32{"p-rome": 2},
 		Consumer:     inAsti(),
 		LatencyBound: bound(3),
@@ -211,7 +212,7 @@ func TestLatencyBoundKeepsHeldProviderListed(t *testing.T) {
 func TestLatencyBoundThenPolicyRanks(t *testing.T) {
 	// The cheapest provider is outside the bound, so Price picks the cheapest
 	// of those inside it.
-	offers := []Offer{
+	offers := []catalog.Offer{
 		withPrice(located(siteOffer("p-rome", "rome", 6, 12), romeLat, romeLon), "0.01"),
 		withPrice(located(siteOffer("p-asti", "asti", 6, 12), astiLat, astiLon), "0.05"),
 		withPrice(located(siteOffer("p-alba", "alba", 6, 12), albaLat, albaLon), "0.03"),

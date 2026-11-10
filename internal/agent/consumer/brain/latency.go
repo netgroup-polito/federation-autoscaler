@@ -21,6 +21,7 @@ import (
 
 	autoscalingv1alpha1 "github.com/netgroup-polito/federation-autoscaler/api/autoscaling/v1alpha1"
 	brokerapi "github.com/netgroup-polito/federation-autoscaler/internal/broker/api"
+	"github.com/netgroup-polito/federation-autoscaler/internal/catalog"
 )
 
 // fibreKmPerMs is how many kilometres of straight-line distance add one
@@ -57,15 +58,15 @@ func EffectiveBound(policy, request *autoscalingv1alpha1.LatencyBound) *autoscal
 // The filter is strict: a site with neither a measurement nor coordinates (or
 // a consumer with no known location) does not qualify.
 func withinBound(
-	offers []Offer, bound *autoscalingv1alpha1.LatencyBound,
+	offers []catalog.Offer, bound *autoscalingv1alpha1.LatencyBound,
 	consumer brokerapi.ConsumerEntry, measuredMs map[string]float64,
-) (kept []Offer, estimated []string) {
+) (kept []catalog.Offer, estimated []string) {
 	if bound == nil {
 		return offers, nil
 	}
 	limit := float64(bound.MaxLatencyMs)
 
-	kept = make([]Offer, 0, len(offers))
+	kept = make([]catalog.Offer, 0, len(offers))
 	for _, o := range offers {
 		if rtt, ok := measuredMs[o.ProbeEndpoint]; ok && o.ProbeEndpoint != "" && isFinite(rtt) {
 			if rtt <= limit {
@@ -87,7 +88,7 @@ func withinBound(
 }
 
 // probeEndpoints returns the distinct, non-empty probe endpoints of offers.
-func probeEndpoints(offers []Offer) []string {
+func probeEndpoints(offers []catalog.Offer) []string {
 	seen := map[string]bool{}
 	var out []string
 	for _, o := range offers {
@@ -105,7 +106,7 @@ func isFinite(v float64) bool { return !math.IsInf(v, 0) && !math.IsNaN(v) }
 // which have no site left after the bound filter. NodeGroups keeps them listed
 // with no free chunks, so the Cluster Autoscaler still maps the nodes it
 // already has there while it cannot grow them.
-func heldOutsideBound(all, kept []Offer, ownReserved map[string]int32) map[string]bool {
+func heldOutsideBound(all, kept []catalog.Offer, ownReserved map[string]int32) map[string]bool {
 	stillListed := map[string]bool{}
 	for _, o := range kept {
 		stillListed[o.ProviderID] = true

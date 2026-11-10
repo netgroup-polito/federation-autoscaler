@@ -26,7 +26,13 @@ import (
 	autoscalingv1alpha1 "github.com/netgroup-polito/federation-autoscaler/api/autoscaling/v1alpha1"
 	"github.com/netgroup-polito/federation-autoscaler/internal/agent/client"
 	brokerapi "github.com/netgroup-polito/federation-autoscaler/internal/broker/api"
+	"github.com/netgroup-polito/federation-autoscaler/internal/catalog"
 )
+
+// fakeClock is a settable clock for the cooldown tests.
+type fakeClock struct{ t time.Time }
+
+func (c *fakeClock) now() time.Time { return c.t }
 
 func newTestFull() (*FullProviders, *fakeClock) {
 	clk := &fakeClock{t: time.Date(2026, 11, 5, 10, 0, 0, 0, time.UTC)}
@@ -83,7 +89,7 @@ func TestFullProvidersOnlyOnNoCapacity(t *testing.T) {
 func TestNodeGroupsSkipsFullProvider(t *testing.T) {
 	// Price picks the cheapest; once the Broker says it is full, the next
 	// decision exposes the next-cheapest instead.
-	offers := []Offer{
+	offers := []catalog.Offer{
 		withPrice(siteOffer("p-cheap", "default", 6, 12), "0.01"),
 		withPrice(siteOffer("p-mid", "default", 6, 12), "0.05"),
 	}

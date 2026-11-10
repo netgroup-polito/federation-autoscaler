@@ -30,6 +30,7 @@ import (
 	autoscalingv1alpha1 "github.com/netgroup-polito/federation-autoscaler/api/autoscaling/v1alpha1"
 	brokerv1alpha1 "github.com/netgroup-polito/federation-autoscaler/api/broker/v1alpha1"
 	brokerapi "github.com/netgroup-polito/federation-autoscaler/internal/broker/api"
+	"github.com/netgroup-polito/federation-autoscaler/internal/catalog"
 )
 
 const testNS = "federation-autoscaler-system"
@@ -50,11 +51,11 @@ func (f fakeLister) ListReservations(context.Context) (*brokerapi.ReservationLis
 // failingCatalog is a Reader that always fails.
 type failingCatalog struct{}
 
-func (failingCatalog) GetOffer(context.Context, string, string) (Offer, error) {
-	return Offer{}, errors.New("catalog down")
+func (failingCatalog) GetOffer(context.Context, string, string) (catalog.Offer, error) {
+	return catalog.Offer{}, errors.New("catalog down")
 }
 
-func (failingCatalog) ListOffers(context.Context) ([]Offer, error) {
+func (failingCatalog) ListOffers(context.Context) ([]catalog.Offer, error) {
 	return nil, errors.New("catalog down")
 }
 
@@ -74,9 +75,9 @@ func consumerPolicy(name string, spec autoscalingv1alpha1.ConsumerPolicySpec) *a
 	}
 }
 
-func catalogWith(t *testing.T, offers ...Offer) *MemoryCatalog {
+func catalogWith(t *testing.T, offers ...catalog.Offer) *catalog.MemoryCatalog {
 	t.Helper()
-	c := NewMemoryCatalog()
+	c := catalog.NewMemoryCatalog()
 	for _, o := range offers {
 		if err := c.UpsertOffer(context.Background(), o); err != nil {
 			t.Fatal(err)
@@ -262,7 +263,7 @@ func TestBrainErrors(t *testing.T) {
 	if _, err := b.NodeGroups(context.Background()); err == nil {
 		t.Error("a catalog failure must be reported")
 	}
-	b, _ = New(Options{Catalog: NewMemoryCatalog(), Reservations: fakeLister{err: errors.New("broker down")}, LocalClient: kube})
+	b, _ = New(Options{Catalog: catalog.NewMemoryCatalog(), Reservations: fakeLister{err: errors.New("broker down")}, LocalClient: kube})
 	if _, err := b.NodeGroups(context.Background()); err == nil {
 		t.Error("a reservation-list failure must be reported")
 	}
@@ -272,8 +273,8 @@ func TestNewValidates(t *testing.T) {
 	kube := kubeWith(t)
 	for name, opts := range map[string]Options{
 		"no catalog":      {Reservations: fakeLister{}, LocalClient: kube},
-		"no reservations": {Catalog: NewMemoryCatalog(), LocalClient: kube},
-		"no local client": {Catalog: NewMemoryCatalog(), Reservations: fakeLister{}},
+		"no reservations": {Catalog: catalog.NewMemoryCatalog(), LocalClient: kube},
+		"no local client": {Catalog: catalog.NewMemoryCatalog(), Reservations: fakeLister{}},
 	} {
 		if _, err := New(opts); err == nil {
 			t.Errorf("%s: New must fail", name)

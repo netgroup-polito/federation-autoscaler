@@ -195,7 +195,7 @@ One replica, `strategy: Recreate`, no leader election. The consumer cluster's **
 | `Cleanup` | Same local teardown (VirtualNodeState, ResourceSlice, Secret) **without** running `liqoctl`, for cases where the provider may be unreachable. |
 | `Reconcile` | Return a snapshot of local `VirtualNodeState`s. Defined and handled, but the Broker does not emit `Reconcile` instructions yet (§11). |
 
-> **Implemented in:** `cmd/agent/`, `internal/agent/consumer/` (+ `heartbeat/`, `localapi/`, `brain/` local placement decision (with a temporary copy of the catalog contract until `internal/catalog` lands), `latency/` UDP prober, `instructions/` Peer/Unpeer/Cleanup/Reconcile + `liqo.go` + `virtualnodestate.go` + `secrets.go`), `internal/agent/{client,poller,health,nodeip,geo}/`. Deployed via `config/agent/consumer/` (`--role=consumer`).
+> **Implemented in:** `cmd/agent/`, `internal/agent/consumer/` (+ `heartbeat/`, `localapi/`, `brain/` local placement decision (reads offers through `internal/catalog`), `latency/` UDP prober, `instructions/` Peer/Unpeer/Cleanup/Reconcile + `liqo.go` + `virtualnodestate.go` + `secrets.go`), `internal/agent/{client,poller,health,nodeip,geo}/`. Deployed via `config/agent/consumer/` (`--role=consumer`).
 
 ---
 

@@ -29,6 +29,7 @@ import (
 	autoscalingv1alpha1 "github.com/netgroup-polito/federation-autoscaler/api/autoscaling/v1alpha1"
 	brokerapi "github.com/netgroup-polito/federation-autoscaler/internal/broker/api"
 	"github.com/netgroup-polito/federation-autoscaler/internal/broker/chunk"
+	"github.com/netgroup-polito/federation-autoscaler/internal/catalog"
 )
 
 // ReservationLister lists this consumer's own reservations
@@ -46,7 +47,7 @@ type LatencyProber interface {
 // Options configures a Brain.
 type Options struct {
 	// Catalog is where the provider offers are read from. Required.
-	Catalog Reader
+	Catalog catalog.Reader
 
 	// Reservations lists this consumer's own reservations. Required.
 	Reservations ReservationLister

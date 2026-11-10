@@ -48,6 +48,7 @@ import (
 	"github.com/netgroup-polito/federation-autoscaler/internal/agent/health"
 	"github.com/netgroup-polito/federation-autoscaler/internal/agent/ollama"
 	"github.com/netgroup-polito/federation-autoscaler/internal/agent/poller"
+	"github.com/netgroup-polito/federation-autoscaler/internal/catalog"
 )
 
 // Options bundles the construction-time settings of the consumer role.
@@ -162,7 +163,7 @@ type Options struct {
 
 	// Catalog is where the local brain reads provider offers from. Required
 	// when BrainMode is BrainLocal; ignored otherwise.
-	Catalog brain.Reader
+	Catalog catalog.Reader
 }
 
 // Brain modes for Options.BrainMode (the agent's --brain flag).

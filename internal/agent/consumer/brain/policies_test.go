@@ -27,6 +27,7 @@ import (
 	autoscalingv1alpha1 "github.com/netgroup-polito/federation-autoscaler/api/autoscaling/v1alpha1"
 	brokerv1alpha1 "github.com/netgroup-polito/federation-autoscaler/api/broker/v1alpha1"
 	brokerapi "github.com/netgroup-polito/federation-autoscaler/internal/broker/api"
+	"github.com/netgroup-polito/federation-autoscaler/internal/catalog"
 )
 
 // Piedmont coordinates for the latency cases. Distances from Turin (the
@@ -63,17 +64,17 @@ func growable(resp brokerapi.NodeGroupListResponse) []string {
 	return out
 }
 
-func located(o Offer, lat, lon float64) Offer {
+func located(o catalog.Offer, lat, lon float64) catalog.Offer {
 	o.Location.Latitude, o.Location.Longitude = &lat, &lon
 	return o
 }
 
-func withCarbon(o Offer, gco2 float64) Offer {
+func withCarbon(o catalog.Offer, gco2 float64) catalog.Offer {
 	o.CarbonIntensity = &gco2
 	return o
 }
 
-func withPrice(o Offer, cpu string) Offer {
+func withPrice(o catalog.Offer, cpu string) catalog.Offer {
 	o.UnitPrices = corev1.ResourceList{
 		corev1.ResourceCPU:    resource.MustParse(cpu),
 		corev1.ResourceMemory: resource.MustParse("0.001"),
@@ -85,7 +86,7 @@ func TestPolicyStandard(t *testing.T) {
 	t.Run("equal free room: the renewable provider wins", func(t *testing.T) {
 		green := siteOffer("p-green", "default", 6, 12)
 		green.Renewable = true
-		resp := NodeGroups(Input{Offers: []Offer{siteOffer("p-a", "default", 6, 12), green}})
+		resp := NodeGroups(Input{Offers: []catalog.Offer{siteOffer("p-a", "default", 6, 12), green}})
 		if got := growable(resp); len(got) != 1 || got[0] != "p-green" {
 			t.Errorf("growable = %v, want [p-green]", got)
 		}
@@ -97,7 +98,7 @@ func TestPolicyStandard(t *testing.T) {
 		// Both have 3 free chunks; this consumer already holds 3 on p-busy, so
 		// p-busy is only half free while p-idle is fully free.
 		resp := NodeGroups(Input{
-			Offers:      []Offer{siteOffer("p-busy", "default", 6, 12), siteOffer("p-idle", "default", 6, 12)},
+			Offers:      []catalog.Offer{siteOffer("p-busy", "default", 6, 12), siteOffer("p-idle", "default", 6, 12)},
 			OwnReserved: map[string]int32{"p-busy": 3},
 		})
 		if got := growable(resp); len(got) != 1 || got[0] != "p-idle" {
@@ -108,7 +109,7 @@ func TestPolicyStandard(t *testing.T) {
 
 func TestPolicyEco(t *testing.T) {
 	resp := NodeGroups(Input{
-		Offers: []Offer{
+		Offers: []catalog.Offer{
 			withCarbon(siteOffer("p-coal", "default", 6, 12), 600),
 			withCarbon(siteOffer("p-hydro", "default", 6, 12), 30),
 			withCarbon(siteOffer("p-gas", "default", 6, 12), 350),
@@ -129,7 +130,7 @@ func TestPolicyLatency(t *testing.T) {
 	entry := policy(autoscalingv1alpha1.PlacementStrategyLatency)
 	entry.Latitude, entry.Longitude, entry.HasLocation = turinLat, turinLon, true
 	resp := NodeGroups(Input{
-		Offers: []Offer{
+		Offers: []catalog.Offer{
 			located(siteOffer("p-rome", "rome", 6, 12), romeLat, romeLon),
 			located(siteOffer("p-asti", "asti", 6, 12), astiLat, astiLon),
 			located(siteOffer("p-cuneo", "cuneo", 6, 12), cuneoLat, cuneoLon),
@@ -152,7 +153,7 @@ func TestPolicyLatency(t *testing.T) {
 }
 
 func TestPolicyRandom(t *testing.T) {
-	offers := []Offer{
+	offers := []catalog.Offer{
 		siteOffer("p1", "default", 6, 12), siteOffer("p2", "default", 6, 12), siteOffer("p3", "default", 6, 12),
 	}
 	for range 20 {
@@ -165,7 +166,7 @@ func TestPolicyRandom(t *testing.T) {
 
 func TestPolicyConsumerChoice(t *testing.T) {
 	resp := NodeGroups(Input{
-		Offers: []Offer{
+		Offers: []catalog.Offer{
 			withPrice(siteOffer("p1", "default", 6, 12), "0.01"),
 			withPrice(siteOffer("p2", "default", 6, 12), "0.09"),
 		},
@@ -199,7 +200,7 @@ func TestBrainMatchesBroker(t *testing.T) {
 		{"p-rome", "rome", romeLat, romeLon, 4, 8, 2, "0.01", 50, false, 2, 4},
 	}
 
-	offers := make([]Offer, 0, len(providers))
+	offers := make([]catalog.Offer, 0, len(providers))
 	advs := make([]*brokerv1alpha1.ClusterAdvertisement, 0, len(providers))
 	own := map[string]int32{}
 	for _, p := range providers {

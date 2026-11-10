@@ -26,16 +26,17 @@ import (
 	autoscalingv1alpha1 "github.com/netgroup-polito/federation-autoscaler/api/autoscaling/v1alpha1"
 	brokerv1alpha1 "github.com/netgroup-polito/federation-autoscaler/api/broker/v1alpha1"
 	brokerapi "github.com/netgroup-polito/federation-autoscaler/internal/broker/api"
+	"github.com/netgroup-polito/federation-autoscaler/internal/catalog"
 )
 
 // siteOffer builds an offer with cpu cores and memory GiB free at one site.
-func siteOffer(provider, site string, cpu, memGi int64) Offer {
-	return Offer{
+func siteOffer(provider, site string, cpu, memGi int64) catalog.Offer {
+	return catalog.Offer{
 		SchemaVersion: 1,
 		ProviderID:    provider,
 		LiqoClusterID: "liqo-" + provider,
 		SiteID:        site,
-		Location:      Location{City: site},
+		Location:      catalog.Location{City: site},
 		Available: corev1.ResourceList{
 			corev1.ResourceCPU:    *resource.NewQuantity(cpu, resource.DecimalSI),
 			corev1.ResourceMemory: resource.MustParse(fmt.Sprintf("%dGi", memGi)),
@@ -53,7 +54,7 @@ func viewsByProvider(resp brokerapi.NodeGroupListResponse) map[string]brokerapi.
 
 func TestNodeGroupsSingleSite(t *testing.T) {
 	// 12 cpu / 24 Gi = six standard 2 cpu / 4 Gi chunks.
-	resp := NodeGroups(Input{Offers: []Offer{siteOffer("p1", "default", 12, 24)}})
+	resp := NodeGroups(Input{Offers: []catalog.Offer{siteOffer("p1", "default", 12, 24)}})
 	if len(resp.NodeGroups) != 1 {
 		t.Fatalf("want 1 node group, got %+v", resp.NodeGroups)
 	}
@@ -71,7 +72,7 @@ func TestNodeGroupsSingleSite(t *testing.T) {
 
 func TestNodeGroupsPoolsSitesPerProvider(t *testing.T) {
 	// An edge provider with three sites: Asti 6, Cuneo 4, Alba 7 chunks free.
-	offers := []Offer{
+	offers := []catalog.Offer{
 		siteOffer("edge-telco", "asti", 12, 24),
 		siteOffer("edge-telco", "cuneo", 8, 16),
 		siteOffer("edge-telco", "alba", 14, 28),
@@ -92,7 +93,7 @@ func TestNodeGroupsPoolsSitesPerProvider(t *testing.T) {
 func TestNodeGroupsLeftoversDoNotAddUp(t *testing.T) {
 	// Each site has half a chunk free. Pooled it would look like one chunk, but
 	// no single site can host it, so the provider must not be growable.
-	offers := []Offer{siteOffer("p1", "a", 1, 2), siteOffer("p1", "b", 1, 2)}
+	offers := []catalog.Offer{siteOffer("p1", "a", 1, 2), siteOffer("p1", "b", 1, 2)}
 	v := NodeGroups(Input{Offers: offers}).NodeGroups[0]
 	if v.MaxSize != 0 {
 		t.Errorf("MaxSize = %d, want 0 (leftovers across sites are not a chunk)", v.MaxSize)
@@ -102,7 +103,7 @@ func TestNodeGroupsLeftoversDoNotAddUp(t *testing.T) {
 func TestNodeGroupsOwnReservations(t *testing.T) {
 	// 3 free chunks in the catalog, and this consumer already holds 2 there.
 	resp := NodeGroups(Input{
-		Offers:      []Offer{siteOffer("p1", "default", 6, 12)},
+		Offers:      []catalog.Offer{siteOffer("p1", "default", 6, 12)},
 		OwnReserved: map[string]int32{"p1": 2, "elsewhere": 5},
 	})
 	v := resp.NodeGroups[0]
@@ -120,7 +121,7 @@ func TestNodeGroupsCostPerChunk(t *testing.T) {
 		corev1.ResourceCPU:    resource.MustParse("0.03"),  // per core-hour
 		corev1.ResourceMemory: resource.MustParse("0.004"), // per GiB-hour
 	}
-	v := NodeGroups(Input{Offers: []Offer{o}}).NodeGroups[0]
+	v := NodeGroups(Input{Offers: []catalog.Offer{o}}).NodeGroups[0]
 	// One chunk = 2 cpu + 4 GiB → 2*0.03 + 4*0.004 = 0.076 per hour.
 	if v.Cost == nil || v.Cost.MilliValue() != 76 {
 		t.Errorf("cost per chunk = %v, want 0.076", v.Cost)
@@ -130,7 +131,7 @@ func TestNodeGroupsCostPerChunk(t *testing.T) {
 func TestNodeGroupsGPUSite(t *testing.T) {
 	o := siteOffer("p1", "default", 8, 16)
 	o.Available[corev1.ResourceName("nvidia.com/gpu")] = resource.MustParse("2")
-	v := NodeGroups(Input{Offers: []Offer{o}}).NodeGroups[0]
+	v := NodeGroups(Input{Offers: []catalog.Offer{o}}).NodeGroups[0]
 	if v.Type != brokerv1alpha1.ChunkTypeGPU || v.MaxSize != 2 {
 		t.Errorf("type/MaxSize = %s/%d, want gpu/2", v.Type, v.MaxSize)
 	}
@@ -146,7 +147,7 @@ func TestNodeGroupsPricePolicyEndToEnd(t *testing.T) {
 		corev1.ResourceCPU: resource.MustParse("0.09"), corev1.ResourceMemory: resource.MustParse("0.009"),
 	}
 	resp := NodeGroups(Input{
-		Offers:   []Offer{dear, cheap},
+		Offers:   []catalog.Offer{dear, cheap},
 		Consumer: brokerapi.ConsumerEntry{Placement: autoscalingv1alpha1.PlacementPolicy{Type: autoscalingv1alpha1.PlacementStrategyPrice}},
 	})
 	if resp.AppliedPlacement != autoscalingv1alpha1.PlacementStrategyPrice {
