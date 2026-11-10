@@ -39,3 +39,9 @@ data:
   ollamaUrl: ""
   ollamaModel: "llama3.2"
   ollamaTimeout: "120s"
+  # Who makes the placement decision (consumer-only): "central" asks the
+  # Broker, "local" decides on this consumer from the Redis catalog at
+  # catalogAddr (host:port). Booking goes through the Broker in both modes.
+  # The fa_consumer role sets these from fa_brain / fa_catalog_addr.
+  brainMode: "central"
+  catalogAddr: ""

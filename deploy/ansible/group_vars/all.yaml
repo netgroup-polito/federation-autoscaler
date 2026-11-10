@@ -49,6 +49,12 @@ fa_ollama_url: ""
 fa_ollama_model: "llama3.2"
 fa_ollama_timeout: "120s"
 
+# Who makes each consumer's placement decision: "central" (the Broker, today's
+# behaviour) or "local" (the consumer's own brain, reading the Redis catalog at
+# fa_catalog_addr; booking still goes through the Broker). Override per
+# consumer host in the inventory, e.g. `fa_brain: local` on one consumer only.
+fa_brain: "central"
+
 # -----------------------------------------------------------------------------
 # Software versions
 # -----------------------------------------------------------------------------
