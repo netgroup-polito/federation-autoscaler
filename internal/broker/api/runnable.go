@@ -29,6 +29,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/manager"
 
 	"github.com/netgroup-polito/federation-autoscaler/internal/broker/chunk"
+	"github.com/netgroup-polito/federation-autoscaler/internal/catalog"
 )
 
 // Compile-time interface checks: Runnable plugs into the controller-runtime
@@ -74,6 +75,9 @@ type RunnableOptions struct {
 	// ReservationTimeout is the deadline stamped on new Reservations'
 	// Status.ExpiresAt. Zero falls back to defaultReservationTimeout.
 	ReservationTimeout time.Duration
+
+	// Catalog is the optional offer catalog writer. Nil means the catalog is off.
+	Catalog catalog.Writer
 }
 
 // Runnable adapts the Broker's HTTP Server to the manager.Runnable interface
@@ -118,6 +122,7 @@ func NewRunnable(opts RunnableOptions) (*Runnable, error) {
 		Namespace:          opts.Namespace,
 		Sizer:              opts.Sizer,
 		ReservationTimeout: opts.ReservationTimeout,
+		Catalog:            opts.Catalog,
 	})
 
 	httpSrv := &http.Server{
