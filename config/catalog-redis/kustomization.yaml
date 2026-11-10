@@ -1,0 +1,21 @@
+# Offer catalog Redis overlay.
+#
+# PLAIN Redis for the demo only: no TLS and no accounts, reachable on the
+# private lab network. TLS and the three account types (provider, consumer,
+# broker) follow in a separate change.
+#
+# Applied by the fa_central Ansible role only when fa_catalog is true. The
+# namespace is created by ../broker/, so apply that overlay first.
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+namespace: federation-autoscaler-system
+
+resources:
+- deployment.yaml
+- service.yaml
+
+labels:
+- pairs:
+    app.kubernetes.io/component: catalog-redis
+    app.kubernetes.io/name: federation-autoscaler

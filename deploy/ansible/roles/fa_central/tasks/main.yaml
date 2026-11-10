@@ -105,3 +105,49 @@
       kubectl --kubeconfig {{ cluster_kubeconfig }} -n {{ fa_namespace }} \
         wait deploy broker --for=condition=Available --timeout=5m
   changed_when: false
+
+# Optional offer catalog (demo): a plain Redis on the central cluster, and the
+# broker pointed at it. Skipped unless fa_catalog is true, so today's deploys
+# are unchanged. The broker apply above resets its args on every run, so the
+# --catalog-addr flag is appended again here, once.
+- name: Offer catalog (plain Redis and broker writer)
+  when: fa_catalog | bool
+  delegate_to: localhost
+  block:
+
+    - name: Apply catalog-redis overlay
+      ansible.builtin.shell:
+        cmd: |
+          kubectl --kubeconfig {{ cluster_kubeconfig }} apply -k {{ fa_repo_root }}/config/catalog-redis
+      changed_when: true
+
+    - name: Wait for catalog-redis Deployment to become Available
+      ansible.builtin.shell:
+        cmd: |
+          kubectl --kubeconfig {{ cluster_kubeconfig }} -n {{ fa_namespace }} \
+            wait deploy catalog-redis --for=condition=Available --timeout=3m
+      changed_when: false
+
+    - name: Point the broker at the catalog (adds --catalog-addr once)
+      ansible.builtin.shell:
+        cmd: |
+          set -e
+          args=$(kubectl --kubeconfig {{ cluster_kubeconfig }} -n {{ fa_namespace }} \
+            get deploy broker -o jsonpath='{.spec.template.spec.containers[0].args}')
+          case "$args" in
+            *--catalog-addr=*) echo unchanged ;;
+            *)
+              kubectl --kubeconfig {{ cluster_kubeconfig }} -n {{ fa_namespace }} \
+                patch deploy broker --type=json -p \
+                '[{"op":"add","path":"/spec/template/spec/containers/0/args/-","value":"--catalog-addr=catalog-redis.{{ fa_namespace }}.svc.cluster.local:6379"}]'
+              echo patched ;;
+          esac
+      register: fa_catalog_patch
+      changed_when: "'patched' in fa_catalog_patch.stdout"
+
+    - name: Wait for the broker rollout with the catalog flag
+      ansible.builtin.shell:
+        cmd: |
+          kubectl --kubeconfig {{ cluster_kubeconfig }} -n {{ fa_namespace }} \
+            rollout status deploy/broker --timeout=3m
+      changed_when: false
