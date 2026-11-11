@@ -99,3 +99,18 @@ broker_address: "{{ hostvars[groups['central'][0]].ansible_host }}"
 # gets ~/.kube/<cluster_id>.yaml. These are what `kubectl --kubeconfig`
 # expects during the demo's scale-up / scale-down narration.
 kubeconfig_dir: "{{ lookup('env', 'HOME') }}/.kube"
+
+# -----------------------------------------------------------------------------
+# Offer catalog (optional, demo)
+# -----------------------------------------------------------------------------
+
+# When true, the central deploy also runs a plain Redis (no TLS, no accounts;
+# demo only) and points the broker at it with --catalog-addr. Off by default so
+# existing deploys are unchanged.
+fa_catalog: false
+
+# NodePort of the catalog Redis on the central host.
+fa_catalog_node_port: 30379
+
+# Address the consumer clusters use to reach the catalog Redis.
+fa_catalog_addr: "{{ broker_address }}:{{ fa_catalog_node_port }}"

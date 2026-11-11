@@ -108,6 +108,10 @@ func (s *Server) handleAdvertisementUpsert(w http.ResponseWriter, r *http.Reques
 			"err", err.Error(), "clusterId", clusterID, "requestId", requestID)
 	}
 
+	// Catalog write is best-effort, like the status update above: the
+	// ClusterAdvertisement stays the source of truth.
+	s.publishOffer(ctx, &req, cadv, chunkResult, requestID)
+
 	// Piggyback any pending instructions for this provider onto the
 	// advertisement response (docs/design.md §7.3.1) so common-case
 	// instruction latency is bounded by the 30 s advertisement cadence.

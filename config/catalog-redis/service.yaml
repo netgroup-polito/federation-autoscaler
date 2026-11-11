@@ -1,0 +1,23 @@
+# Offer catalog Redis Service (demo).
+#
+# The broker reaches it inside the cluster at
+#   catalog-redis.federation-autoscaler-system.svc.cluster.local:6379
+# and the consumer clusters reach it at <central-IP>:30379.
+#
+# Plain Redis for the demo only: no TLS, no accounts. TLS plus accounts follow.
+apiVersion: v1
+kind: Service
+metadata:
+  name: catalog-redis
+  namespace: federation-autoscaler-system
+spec:
+  type: NodePort
+  selector:
+    app.kubernetes.io/name: federation-autoscaler
+    app.kubernetes.io/component: catalog-redis
+  ports:
+  - name: redis
+    port: 6379
+    targetPort: redis
+    nodePort: 30379
+    protocol: TCP

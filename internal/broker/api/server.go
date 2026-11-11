@@ -27,6 +27,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	"github.com/netgroup-polito/federation-autoscaler/internal/broker/chunk"
+	"github.com/netgroup-polito/federation-autoscaler/internal/catalog"
 )
 
 // Server is the Broker's REST surface (docs/design.md §7.3). It wires every
@@ -48,6 +49,9 @@ type Server struct {
 	// justEnforced hides the cache's stale copy of an instruction whose
 	// result was just recorded (see staleEnforced).
 	justEnforced *staleEnforced
+	// catalog, when non-nil, receives one offer per accepted advertisement.
+	// Nil means the catalog is off.
+	catalog catalog.Writer
 }
 
 // ServerOptions bundles the construction-time settings of a Server. Empty
@@ -83,6 +87,10 @@ type ServerOptions struct {
 	// origin value force-expired active reservations and is not safe as a
 	// default.
 	ReservationTimeout time.Duration
+
+	// Catalog is the optional offer catalog writer. When nil the catalog is
+	// off and the broker behaves exactly as before.
+	Catalog catalog.Writer
 }
 
 // NewServer returns a Server ready to serve traffic via Handler(). Panics if
@@ -115,6 +123,7 @@ func NewServer(opts ServerOptions) *Server {
 		consumers:          NewConsumerRegistry(),
 		reservationTimeout: resvTimeout,
 		justEnforced:       newStaleEnforced(),
+		catalog:            opts.Catalog,
 	}
 }
 

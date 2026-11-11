@@ -33,6 +33,7 @@ import (
 
 	_ "k8s.io/client-go/plugin/pkg/client/auth"
 
+	"github.com/redis/go-redis/v9"
 	"k8s.io/apimachinery/pkg/runtime"
 	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
@@ -42,6 +43,7 @@ import (
 	autoscalingv1alpha1 "github.com/netgroup-polito/federation-autoscaler/api/autoscaling/v1alpha1"
 	brokerv1alpha1 "github.com/netgroup-polito/federation-autoscaler/api/broker/v1alpha1"
 	brokerapi "github.com/netgroup-polito/federation-autoscaler/internal/broker/api"
+	"github.com/netgroup-polito/federation-autoscaler/internal/catalog"
 	autoscalingcontroller "github.com/netgroup-polito/federation-autoscaler/internal/controller/autoscaling"
 	brokercontroller "github.com/netgroup-polito/federation-autoscaler/internal/controller/broker"
 	fedmanager "github.com/netgroup-polito/federation-autoscaler/internal/manager"
@@ -74,6 +76,7 @@ func main() {
 		reservationTimeout   time.Duration
 		gkResyncInterval     time.Duration
 		dashboardBindAddress string
+		catalogAddr          string
 	)
 	flag.StringVar(&apiBindAddress, "api-bind-address", ":8443",
 		"host:port for the Broker REST API HTTPS listener.")
@@ -99,6 +102,9 @@ func main() {
 			"terminal-reservation GC requeue.")
 	flag.StringVar(&dashboardBindAddress, "dashboard-bind-address", ":9444",
 		"host:port for the read-only, plain-HTTP broker dashboard listener (no mTLS). Empty disables it.")
+	flag.StringVar(&catalogAddr, "catalog-addr", "",
+		"host:port of the Redis offer catalog. Empty (default) disables the catalog: "+
+			"each accepted advertisement is then not written as an offer.")
 
 	flag.Parse()
 
@@ -143,6 +149,14 @@ func main() {
 		setupLog.Error(err, "unable to create controller", "controller", "ReservationInstruction")
 		os.Exit(1)
 	}
+	// The offer catalog is optional: without --catalog-addr the broker behaves
+	// exactly as before.
+	var catalogWriter catalog.Writer
+	if catalogAddr != "" {
+		rdb := redis.NewClient(&redis.Options{Addr: catalogAddr})
+		catalogWriter = catalog.NewRedisCatalog(rdb)
+		setupLog.Info("offer catalog enabled", "addr", catalogAddr)
+	}
 
 	apiRunnable, err := brokerapi.NewRunnable(brokerapi.RunnableOptions{
 		BindAddress: apiBindAddress,
@@ -155,6 +169,7 @@ func main() {
 		Client:             mgr.GetClient(),
 		Namespace:          apiNamespace,
 		ReservationTimeout: reservationTimeout,
+		Catalog:            catalogWriter,
 	})
 	if err != nil {
 		setupLog.Error(err, "unable to build broker api server")
