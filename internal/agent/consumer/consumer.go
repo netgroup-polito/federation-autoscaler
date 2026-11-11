@@ -378,8 +378,7 @@ func validate(o Options) error {
 	case o.BrainMode != "" && o.BrainMode != BrainCentral && o.BrainMode != BrainLocal:
 		return fmt.Errorf("consumer: BrainMode must be %q or %q, got %q", BrainCentral, BrainLocal, o.BrainMode)
 	case o.BrainMode == BrainLocal && o.Catalog == nil:
-		return errors.New("consumer: brain=local needs a catalog to read offers from, " +
-			"and no catalog backend is available yet (the Redis catalog, internal/catalog, is pending)")
+		return errors.New("consumer: brain=local needs a catalog to read offers from (set --catalog-addr)")
 	}
 	return nil
 }

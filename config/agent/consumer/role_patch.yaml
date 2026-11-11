@@ -62,3 +62,27 @@
 - op: add
   path: /spec/template/spec/containers/0/args/-
   value: --ollama-timeout=$(OLLAMA_TIMEOUT)
+# Placement mode, from agent-config: brainMode "central" (default) or "local";
+# catalogAddr is the Redis catalog the local brain reads offers from.
+- op: add
+  path: /spec/template/spec/containers/0/env/-
+  value:
+    name: BRAIN_MODE
+    valueFrom:
+      configMapKeyRef:
+        name: agent-config
+        key: brainMode
+- op: add
+  path: /spec/template/spec/containers/0/env/-
+  value:
+    name: CATALOG_ADDR
+    valueFrom:
+      configMapKeyRef:
+        name: agent-config
+        key: catalogAddr
+- op: add
+  path: /spec/template/spec/containers/0/args/-
+  value: --brain=$(BRAIN_MODE)
+- op: add
+  path: /spec/template/spec/containers/0/args/-
+  value: --catalog-addr=$(CATALOG_ADDR)

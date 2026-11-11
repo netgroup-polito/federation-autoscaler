@@ -32,6 +32,7 @@ import (
 
 	_ "k8s.io/client-go/plugin/pkg/client/auth"
 
+	"github.com/redis/go-redis/v9"
 	"k8s.io/apimachinery/pkg/runtime"
 	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
@@ -47,6 +48,7 @@ import (
 	"github.com/netgroup-polito/federation-autoscaler/internal/agent/poller"
 	"github.com/netgroup-polito/federation-autoscaler/internal/agent/provider"
 	"github.com/netgroup-polito/federation-autoscaler/internal/agent/provider/advertise"
+	"github.com/netgroup-polito/federation-autoscaler/internal/catalog"
 )
 
 const (
@@ -105,6 +107,7 @@ func main() {
 		ollamaModel           string
 		ollamaTimeout         time.Duration
 		brainMode             string
+		catalogAddr           string
 	)
 
 	flag.StringVar(&role, "role", "",
@@ -204,8 +207,11 @@ func main() {
 	flag.StringVar(&brainMode, "brain", consumer.BrainCentral,
 		"(consumer role only) Who makes the placement decision: \"central\" asks the "+
 			"Broker (default); \"local\" decides on this consumer from the catalog. "+
-			"Booking goes through the Broker in both modes. \"local\" needs a catalog "+
-			"backend, which is not available yet.")
+			"Booking goes through the Broker in both modes. \"local\" needs --catalog-addr.")
+	flag.StringVar(&catalogAddr, "catalog-addr", "",
+		"(consumer role only) host:port of the Redis catalog the local brain reads "+
+			"provider offers from (read-only). Required with --brain=local; ignored "+
+			"otherwise.")
 
 	opts := zap.Options{Development: true}
 	opts.BindFlags(flag.CommandLine)
@@ -337,8 +343,7 @@ func main() {
 			Logger:            ctrl.Log.WithName("consumer"),
 			Probe:             probe,
 			BrainMode:         brainMode,
-			// No catalog backend yet: brain=local is refused at startup until
-			// the Redis catalog (internal/catalog) lands.
+			Catalog:           catalogReader(brainMode, catalogAddr),
 		}); err != nil {
 			setupLog.Error(err, "failed to bootstrap consumer role")
 			os.Exit(1)
@@ -405,4 +410,21 @@ func validateFlags(role, clusterID, liqoClusterID, brokerURL,
 		return fmt.Errorf("--client-cert, --client-key and --broker-ca are all required (mTLS is mandatory)")
 	}
 	return nil
+}
+
+// catalogReader returns the Redis catalog the local brain reads offers from,
+// or nil in central mode or without an address (consumer.Run then refuses
+// --brain=local with a clear error). Short timeouts keep a slow or unreachable
+// Redis from stalling the Cluster Autoscaler's node-group reads: the brain
+// fails fast and the next read retries.
+func catalogReader(brainMode, addr string) catalog.Reader {
+	if brainMode != consumer.BrainLocal || addr == "" {
+		return nil
+	}
+	return catalog.NewRedisCatalog(redis.NewClient(&redis.Options{
+		Addr:         addr,
+		DialTimeout:  2 * time.Second,
+		ReadTimeout:  2 * time.Second,
+		WriteTimeout: 2 * time.Second,
+	}))
 }

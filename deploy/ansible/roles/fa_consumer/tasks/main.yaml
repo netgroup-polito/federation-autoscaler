@@ -59,13 +59,23 @@
         set env deployment/grpc-server FA_REEVAL_INTERVAL={{ fa_reeval_interval }}
   changed_when: true
 
-- name: Patch agent-config ConfigMap with the resolved broker URL + mock URLs + ConsumerChoice LLM
+- name: Check the placement mode (fa_brain)
+  ansible.builtin.assert:
+    that:
+      - fa_brain in ['central', 'local']
+      - fa_brain == 'central' or (fa_catalog_addr | default('')) | length > 0
+    fail_msg: >-
+      fa_brain must be "central" or "local", and "local" needs fa_catalog_addr
+      (the Redis catalog host:port); got fa_brain={{ fa_brain }},
+      fa_catalog_addr={{ fa_catalog_addr | default('') }}
+
+- name: Patch agent-config ConfigMap with the resolved broker URL + mock URLs + ConsumerChoice LLM + placement mode
   delegate_to: localhost
   ansible.builtin.shell:
     cmd: |
       kubectl --kubeconfig {{ cluster_kubeconfig }} -n {{ fa_namespace }} \
         patch configmap agent-config --type merge -p \
-        '{"data":{"brokerUrl":"https://{{ broker_address }}:{{ broker_node_port }}","clusterId":"{{ cluster_id }}","liqoClusterId":"{{ cluster_id }}","mockEcoUrl":"{{ fa_mock_eco_url }}","mockGeoUrl":"{{ fa_mock_geo_url }}","ollamaUrl":"{{ fa_ollama_url }}","ollamaModel":"{{ fa_ollama_model }}","ollamaTimeout":"{{ fa_ollama_timeout }}"}}'
+        '{"data":{"brokerUrl":"https://{{ broker_address }}:{{ broker_node_port }}","clusterId":"{{ cluster_id }}","liqoClusterId":"{{ cluster_id }}","mockEcoUrl":"{{ fa_mock_eco_url }}","mockGeoUrl":"{{ fa_mock_geo_url }}","ollamaUrl":"{{ fa_ollama_url }}","ollamaModel":"{{ fa_ollama_model }}","ollamaTimeout":"{{ fa_ollama_timeout }}","brainMode":"{{ fa_brain }}","catalogAddr":"{{ (fa_catalog_addr | default('')) if fa_brain == 'local' else '' }}"}}'
   changed_when: true
 
 # The consumer's location (the origin point the Broker measures provider
