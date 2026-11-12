@@ -58,6 +58,12 @@ type ConsumerEntry struct {
 	// then that brain's pick). Informational, surfaced on the dashboard.
 	DecidedBy string
 
+	// ConsumerChoice is the consumer's latest ConsumerChoice decision (the
+	// request and the ranking made from it), nil when it reports none.
+	// Informational, surfaced on the dashboard. Replaced, never mutated in
+	// place, so Snapshot copies stay safe.
+	ConsumerChoice *ConsumerChoiceReport
+
 	// Latitude/Longitude are the consumer's coordinates (decimal degrees), valid
 	// only when HasLocation is true. Used by the latency placement strategy to
 	// rank providers by great-circle distance to this consumer. Stored as values
@@ -129,6 +135,26 @@ func (r *ConsumerRegistry) SetDecision(clusterID string, rtts map[string]float64
 	entry.MeasuredLatencies = rtts
 	entry.ChosenProvider = chosen
 	entry.DecidedBy = decidedBy
+	r.entries[clusterID] = entry
+}
+
+// SetConsumerChoice records the consumer's latest ConsumerChoice report on its
+// existing entry (nil clears it), like SetDecision. It stores a copy, so the
+// caller's report can be reused.
+func (r *ConsumerRegistry) SetConsumerChoice(clusterID string, c *ConsumerChoiceReport) {
+	var stored *ConsumerChoiceReport
+	if c != nil {
+		cp := *c
+		cp.Ranked = append([]string(nil), c.Ranked...)
+		stored = &cp
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	entry, ok := r.entries[clusterID]
+	if !ok {
+		return
+	}
+	entry.ConsumerChoice = stored
 	r.entries[clusterID] = entry
 }
 

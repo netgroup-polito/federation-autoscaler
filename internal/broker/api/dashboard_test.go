@@ -310,3 +310,66 @@ func TestHeartbeatRejectsUnknownDecidedBy(t *testing.T) {
 		t.Error("an unknown decidedBy must be rejected")
 	}
 }
+
+// TestDashboardShowsConsumerChoice: the consumer's latest ConsumerChoice
+// decision (request and ranking) reaches the overview; a later heartbeat
+// without one clears it.
+func TestDashboardShowsConsumerChoice(t *testing.T) {
+	s := newDashboardTestServer(t)
+	s.consumers.Touch(consumerCluster, "liqo-ca", autoscalingv1alpha1.PlacementPolicy{}, "", "", nil, nil)
+	report := &ConsumerChoiceReport{
+		Prompt: "I want the clusters closest to me.",
+		Ranked: []string{providerCluster, "provider-b"},
+		Source: ChoiceSourceAI,
+	}
+	s.consumers.SetConsumerChoice(consumerCluster, report)
+	report.Ranked[0] = "mutated by the caller"
+
+	ov, err := s.buildOverview(context.Background())
+	if err != nil {
+		t.Fatalf("buildOverview: %v", err)
+	}
+	got := ov.Consumers[0].ConsumerChoice
+	if got == nil || got.Prompt != "I want the clusters closest to me." || got.Source != ChoiceSourceAI ||
+		len(got.Ranked) != 2 || got.Ranked[0] != providerCluster {
+		t.Errorf("overview consumerChoice = %+v, want the stored request and ranking", got)
+	}
+
+	s.consumers.SetConsumerChoice(consumerCluster, nil)
+	ov, err = s.buildOverview(context.Background())
+	if err != nil {
+		t.Fatalf("buildOverview: %v", err)
+	}
+	if got := ov.Consumers[0].ConsumerChoice; got != nil {
+		t.Errorf("after a heartbeat without a decision consumerChoice = %+v, want nil", got)
+	}
+}
+
+func TestHeartbeatValidatesConsumerChoice(t *testing.T) {
+	base := func(c *ConsumerChoiceReport) *HeartbeatRequest {
+		return &HeartbeatRequest{ClusterID: "c", LiqoClusterID: "liqo-c", ConsumerChoice: c}
+	}
+	many := make([]string, maxChoiceRanked+1)
+	for i := range many {
+		many[i] = "p"
+	}
+	for _, tc := range []struct {
+		name string
+		c    *ConsumerChoiceReport
+		ok   bool
+	}{
+		{"none", nil, true},
+		{"ai", &ConsumerChoiceReport{Prompt: "close", Ranked: []string{"p1"}, Source: ChoiceSourceAI}, true},
+		{"fallback", &ConsumerChoiceReport{Ranked: []string{"p1"}, Source: ChoiceSourceFallback}, true},
+		{"unknown source", &ConsumerChoiceReport{Ranked: []string{"p1"}, Source: "oracle"}, false},
+		{"empty id", &ConsumerChoiceReport{Ranked: []string{""}, Source: ChoiceSourceAI}, false},
+		{"too many", &ConsumerChoiceReport{Ranked: many, Source: ChoiceSourceAI}, false},
+		{"long prompt", &ConsumerChoiceReport{Prompt: strings.Repeat("x", maxChoicePromptLen+1),
+			Ranked: []string{"p1"}, Source: ChoiceSourceAI}, false},
+	} {
+		err := validateHeartbeatRequest(base(tc.c))
+		if (err == nil) != tc.ok {
+			t.Errorf("%s: err = %v, want ok=%v", tc.name, err, tc.ok)
+		}
+	}
+}

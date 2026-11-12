@@ -1,0 +1,114 @@
+# RedisInsight for the offer catalog: a web view of the providers' offers in
+# Redis, each with its JSON and its TTL counting down. Demo only, apply it on
+# the central cluster after the catalog Redis (fa_catalog=true):
+#
+#   kubectl --kubeconfig ~/.kube/central.yaml apply  -f catalog-insight.yaml
+#   kubectl --kubeconfig ~/.kube/central.yaml delete -f catalog-insight.yaml
+#
+# Open http://<central-IP>:30540 (or tunnel it, e.g.
+# ssh -L 30540:<central-IP>:30540 <host>, then http://localhost:30540), pick
+# the "offer-catalog" database and filter keys by catalog:offer:*.
+#
+# The "setup" sidecar registers the catalog Redis in RedisInsight and accepts
+# its terms with analytics and notifications off, through RedisInsight's own
+# API, so the page opens straight on the database list. It re-runs on every
+# pod start (RedisInsight keeps its settings in an emptyDir).
+#
+# Like the catalog Redis itself (no TLS, no accounts), this is plain HTTP with
+# no login and can edit keys: keep it on a trusted lab network.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: catalog-insight
+  namespace: federation-autoscaler-system
+  labels:
+    app.kubernetes.io/name: federation-autoscaler
+    app.kubernetes.io/component: catalog-insight
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: federation-autoscaler
+      app.kubernetes.io/component: catalog-insight
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: federation-autoscaler
+        app.kubernetes.io/component: catalog-insight
+    spec:
+      containers:
+      - name: redisinsight
+        image: redis/redisinsight:2.70.0
+        ports:
+        - name: http
+          containerPort: 5540
+        env:
+        - name: RI_ACCEPT_TERMS_AND_CONDITIONS
+          value: "true"
+        readinessProbe:
+          httpGet:
+            path: /api/health
+            port: http
+          periodSeconds: 5
+        resources:
+          requests:
+            cpu: 50m
+            memory: 128Mi
+          limits:
+            memory: 512Mi
+        volumeMounts:
+        - name: data
+          mountPath: /data
+      - name: setup
+        image: curlimages/curl:8.11.1
+        env:
+        - name: CATALOG_HOST
+          value: catalog-redis.federation-autoscaler-system.svc.cluster.local
+        - name: CATALOG_PORT
+          value: "6379"
+        command:
+        - sh
+        - -c
+        - |
+          RI=http://127.0.0.1:5540/api
+          until curl -sf $RI/health >/dev/null; do sleep 2; done
+          v=$(curl -sf $RI/settings/agreements/spec | sed -n 's/.*"version":"\([^"]*\)".*/\1/p')
+          curl -sf -X PATCH $RI/settings -H 'Content-Type: application/json' \
+            -d "{\"agreements\":{\"version\":\"$v\",\"eula\":true,\"analytics\":false,\"notifications\":false,\"encryption\":false}}" >/dev/null \
+            && echo "terms accepted (analytics off)"
+          if curl -sf $RI/databases | grep -q '"name":"offer-catalog"'; then
+            echo "offer-catalog already registered"
+          else
+            curl -sf -X POST $RI/databases -H 'Content-Type: application/json' \
+              -d "{\"host\":\"$CATALOG_HOST\",\"port\":$CATALOG_PORT,\"name\":\"offer-catalog\"}" >/dev/null \
+              && echo "offer-catalog registered" || echo "offer-catalog registration failed"
+          fi
+          while true; do sleep 3600; done
+        resources:
+          requests:
+            cpu: 5m
+            memory: 8Mi
+      volumes:
+      - name: data
+        emptyDir: {}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: catalog-insight
+  namespace: federation-autoscaler-system
+  labels:
+    app.kubernetes.io/name: federation-autoscaler
+    app.kubernetes.io/component: catalog-insight
+spec:
+  type: NodePort
+  selector:
+    app.kubernetes.io/name: federation-autoscaler
+    app.kubernetes.io/component: catalog-insight
+  ports:
+  - name: http
+    port: 5540
+    targetPort: http
+    nodePort: 30540

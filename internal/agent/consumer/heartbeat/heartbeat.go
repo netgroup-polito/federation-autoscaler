@@ -104,6 +104,12 @@ type Options struct {
 	// value LocalChoice returns; "" when none). Nil means the Broker decides.
 	LocalChoice func() string
 
+	// ConsumerChoice, when set, returns the latest ConsumerChoice decision (the
+	// request and the ranking made from it), or nil when there is none. It is
+	// reported only while the consumer's policy is ConsumerChoice, so a stale
+	// ranking disappears from the dashboard as soon as the policy changes.
+	ConsumerChoice func() *brokerapi.ConsumerChoiceReport
+
 	// Interval overrides DefaultInterval. Mainly useful in tests.
 	Interval time.Duration
 
@@ -134,6 +140,7 @@ type Heartbeater struct {
 	geoClient     *geo.Client
 	prober        Prober
 	localChoice   func() string
+	choice        func() *brokerapi.ConsumerChoiceReport
 	interval      time.Duration
 	log           logr.Logger
 	onResult      func(success bool)
@@ -186,6 +193,7 @@ func New(opts Options) (*Heartbeater, error) {
 		mockGeoURL:    opts.MockGeoURL,
 		prober:        opts.Prober,
 		localChoice:   opts.LocalChoice,
+		choice:        opts.ConsumerChoice,
 		geoClient:     geo.NewClient(),
 		interval:      interval,
 		log:           logger,
@@ -267,6 +275,10 @@ func (h *Heartbeater) beatOnce(ctx context.Context) {
 	if h.localChoice != nil {
 		req.DecidedBy = brokerapi.DecidedByLocal
 		req.ChosenProvider = h.localChoice()
+	}
+	if h.choice != nil && req.Placement != nil &&
+		req.Placement.Type == autoscalingv1alpha1.PlacementStrategyConsumerChoice {
+		req.ConsumerChoice = h.choice()
 	}
 	if _, err := h.client.PostHeartbeat(ctx, req); err != nil {
 		if ctx.Err() == nil {

@@ -263,28 +263,6 @@ func Run(ctx context.Context, opts Options) error {
 		logger.Info("placement decided locally (brain=local); booking still goes through the Broker")
 	}
 
-	beater, err = heartbeat.New(heartbeat.Options{
-		Client:        opts.Client,
-		ClusterID:     opts.ClusterID,
-		LiqoClusterID: opts.LiqoClusterID,
-		LocalClient:   opts.LocalClient,
-		Namespace:     namespace,
-		NodeName:      opts.NodeName,
-		AdvertisedIP:  opts.AdvertisedIP,
-		MockGeoURL:    opts.MockGeoURL,
-		Prober:        prober,
-		LocalChoice:   localChoice,
-		Interval:      opts.HeartbeatInterval,
-		Logger:        logger.WithName("heartbeat"),
-		// Same semantics as the provider's advertisement publisher:
-		// any successful broker contact refreshes the readiness gate.
-		OnHeartbeatResult: opts.Probe.RecordPoll,
-	})
-	if err != nil {
-		return fmt.Errorf("consumer: build heartbeat poster: %w", err)
-	}
-	go beater.Run(ctx)
-
 	// Build the optional Ollama client for the ConsumerChoice strategy.
 	var ollamaClient *ollama.Client
 	if opts.OllamaURL != "" {
@@ -294,6 +272,9 @@ func Run(ctx context.Context, opts Options) error {
 			"ollamaURL", opts.OllamaURL, "model", opts.OllamaModel, "timeout", opts.OllamaTimeout)
 	}
 
+	// The loopback API is built before the heartbeat, which reports its latest
+	// ConsumerChoice decision; its ConsumerLocation closure reads beater only
+	// from request handlers, which start (Run below) after beater is set.
 	localServer, err := localapi.New(localapi.Options{
 		Brain:        localBrain,
 		Prober:       prober,
@@ -317,6 +298,30 @@ func Run(ctx context.Context, opts Options) error {
 	if err != nil {
 		return fmt.Errorf("consumer: build loopback REST server: %w", err)
 	}
+
+	beater, err = heartbeat.New(heartbeat.Options{
+		Client:        opts.Client,
+		ClusterID:     opts.ClusterID,
+		LiqoClusterID: opts.LiqoClusterID,
+		LocalClient:   opts.LocalClient,
+		Namespace:     namespace,
+		NodeName:      opts.NodeName,
+		AdvertisedIP:  opts.AdvertisedIP,
+		MockGeoURL:    opts.MockGeoURL,
+		Prober:        prober,
+		LocalChoice:   localChoice,
+		// The latest ConsumerChoice request and ranking, for the dashboard.
+		ConsumerChoice: localServer.LastSelection,
+		Interval:       opts.HeartbeatInterval,
+		Logger:         logger.WithName("heartbeat"),
+		// Same semantics as the provider's advertisement publisher:
+		// any successful broker contact refreshes the readiness gate.
+		OnHeartbeatResult: opts.Probe.RecordPoll,
+	})
+	if err != nil {
+		return fmt.Errorf("consumer: build heartbeat poster: %w", err)
+	}
+	go beater.Run(ctx)
 	go func() {
 		if err := localServer.Run(ctx); err != nil {
 			logger.Error(err, "loopback REST server stopped with error")

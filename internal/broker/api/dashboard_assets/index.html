@@ -182,7 +182,7 @@
   <section>
     <h2>Registered Consumers <span class="count" id="consCount">0</span></h2>
     <div class="table-wrap"><table>
-      <thead><tr><th>Consumer cluster</th><th>Liqo cluster ID</th><th>Policy</th><th>Location</th><th>Chosen provider</th><th>Last heartbeat</th></tr></thead>
+      <thead><tr><th>Consumer cluster</th><th>Liqo cluster ID</th><th>Policy</th><th>Location</th><th>Chosen provider</th><th>AI request → ranking</th><th>Last heartbeat</th></tr></thead>
       <tbody id="consBody"></tbody>
     </table></div>
   </section>
@@ -341,6 +341,28 @@
       return local + "→ " + clusterShort(c.chosenProvider) + rtt;
     }
 
+    // choiceCell renders a ConsumerChoice decision: the request in quotes, then
+    // the ranking best first ("1. provider-1  2. provider-2 …") and who ranked
+    // ("AI" or "fallback" when the model could not be used). textContent only:
+    // the prompt is consumer-supplied text.
+    function choiceCell(cc) {
+      if (!cc || !cc.ranked || !cc.ranked.length) return td("—");
+      const cell = document.createElement("td");
+      const req = document.createElement("div");
+      req.textContent = "\u201C" + (cc.prompt || "") + "\u201D";
+      const rank = document.createElement("div");
+      rank.className = "mono";
+      rank.textContent = cc.ranked.map((id, i) => (i + 1) + ". " + clusterShort(id)).join("  ");
+      const by = document.createElement("span");
+      by.className = "pill " + (cc.source === "ai" ? "green" : "amber");
+      by.style.marginLeft = "8px";
+      by.textContent = cc.source === "ai" ? "AI" : "fallback";
+      rank.appendChild(by);
+      cell.append(req, rank);
+      cell.title = "decided at " + fmtTime(cc.decidedAt);
+      return cell;
+    }
+
     function fmtCapacityCustom(pct, fixed) {
       const parts = [];
       for (const k of Object.keys(pct || {}).sort()) {
@@ -438,7 +460,7 @@
     function renderConsumers(list) {
       const tbody = $("consBody"); tbody.replaceChildren();
       $("consCount").textContent = list.length;
-      if (!list.length) { setEmpty(tbody, 5, "No consumers have heartbeated yet."); return; }
+      if (!list.length) { setEmpty(tbody, 7, "No consumers have heartbeated yet."); return; }
       for (const c of list) {
         const tr = document.createElement("tr");
         tr.appendChild(td(clusterShort(c.clusterId), { mono: true }));
@@ -452,6 +474,8 @@
         // The consumer's reported choice: in local mode its brain's pick, in
         // central mode the measured-latency winner; "—" when it reports none.
         tr.appendChild(td(fmtMeasured(c), { mono: true }));
+        // ConsumerChoice: the user's request and the ranking made from it.
+        tr.appendChild(choiceCell(c.consumerChoice));
         tr.appendChild(td(fmtTime(c.lastSeen)));
         tbody.appendChild(tr);
       }

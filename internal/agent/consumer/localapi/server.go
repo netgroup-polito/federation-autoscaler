@@ -48,6 +48,7 @@ import (
 
 	"github.com/go-logr/logr"
 	"github.com/google/uuid"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	ctrlclient "sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
@@ -137,6 +138,7 @@ type Server struct {
 	aiResult    []string
 	aiTimestamp time.Time
 	aiPrompt    string
+	aiSource    string // SelectionSourceAI or SelectionSourceFallback, for aiResult
 	ollama      *ollama.Client
 	location    func() *ollama.Location
 
@@ -274,6 +276,7 @@ func (s *Server) handleNodeGroups(w http.ResponseWriter, r *http.Request) {
 				s.aiResult = nil
 				s.aiPrompt = prompt
 				s.aiTimestamp = time.Time{}
+				s.aiSource = ""
 			}
 
 			// If cache is fresh (< 60s), use it
@@ -328,6 +331,7 @@ func (s *Server) handleNodeGroups(w http.ResponseWriter, r *http.Request) {
 					}
 					s.aiResult = completeRanking(ranked, groups)
 					s.aiTimestamp = time.Now()
+					s.aiSource = source
 
 					// One Info line per decision: what the model was asked, what it
 					// answered and what the agent will act on. It is the operator's
@@ -372,6 +376,25 @@ func (s *Server) handleNodeGroups(w http.ResponseWriter, r *http.Request) {
 	}
 
 	s.serveNodeGroups(w, resp)
+}
+
+// LastSelection returns the latest ConsumerChoice decision for the heartbeat
+// (the dashboard's "AI request → ranking"): the prompt, the ranking the agent
+// acts on, and whether the model or the fallback made it. Nil before the first
+// decision and right after the prompt changes. The ranking stays reported after
+// its 60 s cache expires: it is still the last decision made.
+func (s *Server) LastSelection() *brokerapi.ConsumerChoiceReport {
+	s.aiMutex.Lock()
+	defer s.aiMutex.Unlock()
+	if len(s.aiResult) == 0 {
+		return nil
+	}
+	return &brokerapi.ConsumerChoiceReport{
+		Prompt:    s.aiPrompt,
+		Ranked:    append([]string(nil), s.aiResult...),
+		Source:    s.aiSource,
+		DecidedAt: metav1.NewTime(s.aiTimestamp),
+	}
 }
 
 // serveNodeGroups writes the final node-group view. In local mode it first
@@ -447,8 +470,8 @@ const (
 	// SelectionSourceAI: the ranking is the model's. SelectionSourceFallback:
 	// the model could not be used (unreachable, timeout, invalid answer) and the
 	// deterministic ranking was used instead.
-	SelectionSourceAI       = "ai"
-	SelectionSourceFallback = "fallback"
+	SelectionSourceAI       = brokerapi.ChoiceSourceAI
+	SelectionSourceFallback = brokerapi.ChoiceSourceFallback
 )
 
 // completeRanking appends, in DeterministicFallback order, every provider with

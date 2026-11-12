@@ -105,6 +105,14 @@ func aiTestServer(t *testing.T, fb *fakeBroker, kube ctrlclient.Client, llm *oll
 func aiTestServerWithLogger(t *testing.T, fb *fakeBroker, kube ctrlclient.Client, llm *ollama.Client,
 	logger logr.Logger) *httptest.Server {
 	t.Helper()
+	_, ts := newAITestAPI(t, fb, kube, llm, logger)
+	return ts
+}
+
+// newAITestAPI is aiTestServerWithLogger that also returns the Server itself.
+func newAITestAPI(t *testing.T, fb *fakeBroker, kube ctrlclient.Client, llm *ollama.Client,
+	logger logr.Logger) (*Server, *httptest.Server) {
+	t.Helper()
 	fb.setHandler(func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", brokerapi.ContentTypeJSON)
 		_ = json.NewEncoder(w).Encode(unmaskedResp(autoscalingv1alpha1.PlacementStrategyConsumerChoice))
@@ -125,7 +133,7 @@ func aiTestServerWithLogger(t *testing.T, fb *fakeBroker, kube ctrlclient.Client
 	}
 	ts := httptest.NewServer(s.Handler())
 	t.Cleanup(ts.Close)
-	return ts
+	return s, ts
 }
 
 // eventually polls GET /local/nodegroups until done reports true, failing the
@@ -348,4 +356,43 @@ func TestConsumerChoiceAI_WaitsForTheBrokerToApplyThePolicy(t *testing.T) {
 
 	brokerApplies.Store(autoscalingv1alpha1.PlacementStrategyConsumerChoice)
 	eventually(t, ts, func(map[string]int32) {}, onlyGrowable("p3"))
+}
+
+// The latest decision is reported for the heartbeat (the dashboard's "AI
+// request -> ranking"): the request, the ranking the agent acts on, and
+// whether the model made it.
+func TestConsumerChoiceAI_LastSelectionReportsTheDecision(t *testing.T) {
+	llm := &fakeOllama{answer: func(int) string { return ranking("p3", "p1", "p2") }}
+	s, ts := newAITestAPI(t, newFakeBroker(t), newFakeKubeClient(consumerChoicePolicy("close to me")),
+		llm.client(t), logr.Logger{})
+
+	if got := s.LastSelection(); got != nil {
+		t.Fatalf("before any decision LastSelection = %+v, want nil", got)
+	}
+	eventually(t, ts, func(map[string]int32) {}, onlyGrowable("p3"))
+
+	got := s.LastSelection()
+	if got == nil {
+		t.Fatal("after a decision LastSelection = nil")
+	}
+	if got.Prompt != "close to me" || got.Source != brokerapi.ChoiceSourceAI ||
+		strings.Join(got.Ranked, ",") != "p3,p1,p2" || got.DecidedAt.IsZero() {
+		t.Errorf("LastSelection = %+v, want the request, AI, ranking p3,p1,p2 and a time", got)
+	}
+	got.Ranked[0] = "mutated"
+	if again := s.LastSelection(); again.Ranked[0] != "p3" {
+		t.Error("LastSelection must return a copy of the ranking")
+	}
+}
+
+// A model that cannot be used is reported as the fallback ranking.
+func TestConsumerChoiceAI_LastSelectionReportsTheFallback(t *testing.T) {
+	llm := &fakeOllama{answer: func(int) string { return "not json at all" }}
+	s, ts := newAITestAPI(t, newFakeBroker(t), newFakeKubeClient(consumerChoicePolicy("anything")),
+		llm.client(t), logr.Logger{})
+
+	eventually(t, ts, func(map[string]int32) {}, func(map[string]int32) bool { return s.LastSelection() != nil })
+	if got := s.LastSelection(); got.Source != brokerapi.ChoiceSourceFallback || len(got.Ranked) == 0 {
+		t.Errorf("LastSelection = %+v, want a fallback ranking", got)
+	}
 }

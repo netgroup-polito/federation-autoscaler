@@ -155,8 +155,12 @@ type ConsumerView struct {
 	// DecidedBy is "local" when the consumer decides placement itself
 	// (--brain=local; ChosenProvider is then its brain's pick), empty when
 	// the Broker decides.
-	DecidedBy string      `json:"decidedBy,omitempty"`
-	LastSeen  metav1.Time `json:"lastSeen"`
+	DecidedBy string `json:"decidedBy,omitempty"`
+	// ConsumerChoice is the consumer's latest ConsumerChoice decision: the
+	// user's request and the ranking made from it. Nil unless the consumer
+	// uses ConsumerChoice and has decided at least once.
+	ConsumerChoice *ConsumerChoiceReport `json:"consumerChoice,omitempty"`
+	LastSeen       metav1.Time           `json:"lastSeen"`
 }
 
 // -----------------------------------------------------------------------------
@@ -262,6 +266,7 @@ func (s *Server) buildOverview(ctx context.Context) (Overview, error) {
 			City:           e.City,
 			ChosenProvider: e.ChosenProvider,
 			DecidedBy:      e.DecidedBy,
+			ConsumerChoice: e.ConsumerChoice,
 			LastSeen:       metav1.NewTime(e.LastSeen),
 		}
 		if rtt, ok := e.MeasuredLatencies[e.ChosenProvider]; ok {

@@ -300,11 +300,49 @@ type HeartbeatRequest struct {
 	// (--brain=local), in which case ChosenProvider is the provider that brain
 	// left growable. Informational, surfaced on the dashboard.
 	DecidedBy string `json:"decidedBy,omitempty"`
+
+	// ConsumerChoice is the consumer's latest ConsumerChoice decision: the
+	// user's request and the ranking its local LLM (or the deterministic
+	// fallback) made from it. Sent only while the consumer's policy is
+	// ConsumerChoice and a decision exists; nil otherwise. Informational,
+	// surfaced on the dashboard.
+	ConsumerChoice *ConsumerChoiceReport `json:"consumerChoice,omitempty"`
 }
 
 // DecidedByLocal is HeartbeatRequest.DecidedBy for a consumer that decides
 // placement itself (local mode).
 const DecidedByLocal = "local"
+
+// ConsumerChoiceReport is one ConsumerChoice decision as the consumer reports
+// it on its heartbeat.
+type ConsumerChoiceReport struct {
+	// Prompt is the natural-language request the ranking answers
+	// (ConsumerPolicySpec.UserPrompt).
+	Prompt string `json:"prompt"`
+	// Ranked is the provider cluster IDs, best first. The consumer grows the
+	// first one that still has room.
+	Ranked []string `json:"ranked"`
+	// Source is ChoiceSourceAI when the ranking is the model's, or
+	// ChoiceSourceFallback when the model could not be used and the
+	// deterministic ranking was used instead.
+	Source string `json:"source"`
+	// DecidedAt is when the ranking was made.
+	DecidedAt metav1.Time `json:"decidedAt"`
+}
+
+// ConsumerChoiceReport.Source values.
+const (
+	ChoiceSourceAI       = "ai"
+	ChoiceSourceFallback = "fallback"
+)
+
+// Limits on a heartbeat's ConsumerChoiceReport, so a misbehaving consumer
+// cannot grow the Broker's in-memory registry without bound.
+const (
+	maxChoiceRanked    = 64
+	maxChoicePromptLen = 2048
+	maxClusterIDLen    = 253
+)
 
 type HeartbeatResponse struct {
 	AckAt metav1.Time `json:"ackAt"`

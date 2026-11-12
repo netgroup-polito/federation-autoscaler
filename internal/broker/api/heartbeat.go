@@ -67,6 +67,7 @@ func (s *Server) handleHeartbeat(w http.ResponseWriter, r *http.Request) {
 	}
 	s.consumers.Touch(req.ClusterID, req.LiqoClusterID, placement, req.Region, req.City, req.Latitude, req.Longitude)
 	s.consumers.SetDecision(req.ClusterID, req.MeasuredLatencies, req.ChosenProvider, req.DecidedBy)
+	s.consumers.SetConsumerChoice(req.ClusterID, req.ConsumerChoice)
 
 	writeJSON(w, http.StatusOK, HeartbeatResponse{AckAt: metav1.Now()})
 }
@@ -79,6 +80,29 @@ func validateHeartbeatRequest(req *HeartbeatRequest) error {
 		return errors.New("liqoClusterId is required")
 	case req.DecidedBy != "" && req.DecidedBy != DecidedByLocal:
 		return fmt.Errorf("decidedBy must be empty or %q, got %q", DecidedByLocal, req.DecidedBy)
+	}
+	return validateConsumerChoice(req.ConsumerChoice)
+}
+
+// validateConsumerChoice checks the optional ConsumerChoice report: a known
+// source and bounded sizes.
+func validateConsumerChoice(c *ConsumerChoiceReport) error {
+	if c == nil {
+		return nil
+	}
+	switch {
+	case c.Source != ChoiceSourceAI && c.Source != ChoiceSourceFallback:
+		return fmt.Errorf("consumerChoice.source must be %q or %q, got %q",
+			ChoiceSourceAI, ChoiceSourceFallback, c.Source)
+	case len(c.Prompt) > maxChoicePromptLen:
+		return fmt.Errorf("consumerChoice.prompt longer than %d bytes", maxChoicePromptLen)
+	case len(c.Ranked) > maxChoiceRanked:
+		return fmt.Errorf("consumerChoice.ranked has more than %d entries", maxChoiceRanked)
+	}
+	for _, id := range c.Ranked {
+		if id == "" || len(id) > maxClusterIDLen {
+			return fmt.Errorf("consumerChoice.ranked has an empty or over-long cluster ID")
+		}
 	}
 	return nil
 }

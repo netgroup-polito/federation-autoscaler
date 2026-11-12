@@ -28,6 +28,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 
 	autoscalingv1alpha1 "github.com/netgroup-polito/federation-autoscaler/api/autoscaling/v1alpha1"
+	brokerapi "github.com/netgroup-polito/federation-autoscaler/internal/broker/api"
 )
 
 const policyTestNS = "federation-autoscaler-system"
@@ -123,5 +124,54 @@ func TestHeartbeater_PostsPlacementPolicy(t *testing.T) {
 	}
 	if posted[0].Placement == nil || posted[0].Placement.Type != autoscalingv1alpha1.PlacementStrategyPrice {
 		t.Errorf("heartbeat must carry the Price placement; got %+v", posted[0].Placement)
+	}
+}
+
+// TestHeartbeater_ReportsConsumerChoiceOnlyUnderThatPolicy: the latest
+// ConsumerChoice decision travels on the heartbeat while the policy is
+// ConsumerChoice, and is left out under any other policy, so a stale ranking
+// leaves the dashboard as soon as the policy changes.
+func TestHeartbeater_ReportsConsumerChoiceOnlyUnderThatPolicy(t *testing.T) {
+	report := &brokerapi.ConsumerChoiceReport{
+		Prompt: "close to me", Ranked: []string{"p1", "p2"}, Source: brokerapi.ChoiceSourceAI,
+	}
+	ccPolicy := pricePolicyObj("default")
+	ccPolicy.Spec.Placement.Type = autoscalingv1alpha1.PlacementStrategyConsumerChoice
+
+	for _, tc := range []struct {
+		name   string
+		policy *autoscalingv1alpha1.ConsumerPolicy
+		want   bool
+	}{
+		{"ConsumerChoice policy", ccPolicy, true},
+		{"Price policy", pricePolicyObj("default"), false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			fb := newFakeBroker(t)
+			h, err := New(Options{
+				Client:         fb.buildClient(t),
+				ClusterID:      "c",
+				LiqoClusterID:  "l",
+				LocalClient:    policyFakeClient(t, tc.policy),
+				Namespace:      policyTestNS,
+				Interval:       time.Hour,
+				ConsumerChoice: func() *brokerapi.ConsumerChoiceReport { return report },
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			h.beatOnce(context.Background())
+			posted := fb.snapshotPosted()
+			if len(posted) != 1 {
+				t.Fatalf("want 1 heartbeat, got %d", len(posted))
+			}
+			got := posted[0].ConsumerChoice
+			if tc.want && (got == nil || got.Prompt != "close to me" || len(got.Ranked) != 2) {
+				t.Errorf("heartbeat must carry the decision; got %+v", got)
+			}
+			if !tc.want && got != nil {
+				t.Errorf("heartbeat must not carry a decision under %s; got %+v", tc.policy.Spec.Placement.Type, got)
+			}
+		})
 	}
 }
