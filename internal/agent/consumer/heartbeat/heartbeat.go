@@ -105,8 +105,9 @@ type Options struct {
 	LocalChoice func() string
 
 	// ConsumerChoice, when set, returns the latest ConsumerChoice decision (the
-	// request and the ranking made from it), or nil when there is none. It is
-	// reported only while the consumer's policy is ConsumerChoice, so a stale
+	// request and the ranking made from it), or nil when there is none. A
+	// decision for a ResourceRequest's own text is always reported; one for the
+	// ConsumerPolicy's text only while that policy is ConsumerChoice, so a stale
 	// ranking disappears from the dashboard as soon as the policy changes.
 	ConsumerChoice func() *brokerapi.ConsumerChoiceReport
 
@@ -276,9 +277,15 @@ func (h *Heartbeater) beatOnce(ctx context.Context) {
 		req.DecidedBy = brokerapi.DecidedByLocal
 		req.ChosenProvider = h.localChoice()
 	}
-	if h.choice != nil && req.Placement != nil &&
-		req.Placement.Type == autoscalingv1alpha1.PlacementStrategyConsumerChoice {
-		req.ConsumerChoice = h.choice()
+	if h.choice != nil {
+		// A decision for a ResourceRequest's own text is shown whatever the
+		// policy; one for the ConsumerPolicy's text only while that policy is
+		// ConsumerChoice, so a stale ranking leaves the dashboard as soon as
+		// the policy changes.
+		policyCC := req.Placement != nil && req.Placement.Type == autoscalingv1alpha1.PlacementStrategyConsumerChoice
+		if c := h.choice(); c != nil && (c.PerRequest || policyCC) {
+			req.ConsumerChoice = c
+		}
 	}
 	if _, err := h.client.PostHeartbeat(ctx, req); err != nil {
 		if ctx.Err() == nil {

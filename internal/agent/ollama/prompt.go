@@ -68,6 +68,7 @@ Provider fields (a field is omitted when the provider does not advertise it):
 - costPerChunk: price of one chunk for one hour. Lower is cheaper. The cheapest provider is the one with the LOWEST costPerChunk.
 - availableChunks: free capacity in chunks; availableCpuMillicores and availableMemoryMiB are the same capacity in CPU millicores and MiB.
 - latitude, longitude: where the provider is, in decimal degrees; region: its region code. The closer a provider is to the consumer location, the better for proximity: the farther away, the worse. Coordinates within a few degrees of the consumer's are near; tens of degrees apart are far.
+- measuredLatencyMs: the round-trip time from the consumer to the provider, measured just now, in milliseconds. Lower is better: 2 is much better than 10. Only the nearest providers are measured; a provider without measuredLatencyMs is farther away and slower than every measured one.
 
 The consumer location, when present, gives the latitude and longitude (decimal degrees) and region code
 of the consumer making the request, in the same form as the providers' location fields.
@@ -75,7 +76,8 @@ of the consumer making the request, in the same form as the providers' location 
 How words in the request map to fields:
 - green, greenest, eco, clean, sustainable, low emissions, low carbon: carbonIntensity, lowest is best.
 - cheap, cheapest, low cost, budget: costPerChunk, lowest is best.
-- close, near, nearby, proximity, low latency: distance between the consumer location and the provider's latitude/longitude, shortest is best, farthest is worst.
+- close, near, nearby, proximity: distance between the consumer location and the provider's latitude/longitude, shortest is best, farthest is worst.
+- latency, low latency, lowest latency, fast, responsive, round-trip: measuredLatencyMs, lowest is best; providers without it come after all measured ones, ordered by distance.
 - resources, capacity: availableChunks, highest is best.
 
 When the request is about proximity, do not judge it by eye:
@@ -120,6 +122,9 @@ type ProviderInfo struct {
 	Region                 string   `json:"region,omitempty"`
 	Latitude               float64  `json:"latitude,omitempty"`
 	Longitude              float64  `json:"longitude,omitempty"`
+	// MeasuredLatencyMs is the round-trip time the consumer just measured to
+	// this provider, when it was among the nearest few (nil otherwise).
+	MeasuredLatencyMs *float64 `json:"measuredLatencyMs,omitempty"`
 }
 
 // Location is where the requesting consumer is: coordinates in decimal degrees

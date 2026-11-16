@@ -34,6 +34,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math"
 	"net"
 	"net/http"
 	"sort"
@@ -64,6 +65,11 @@ type Options struct {
 	// judge proximity from the raw coordinates itself. Nothing is derived from
 	// it on the model's behalf.
 	ConsumerLocation *Location
+	// MeasuredLatencyMs, keyed by provider ID, is the round-trip time the
+	// consumer measured to each of the nearest providers. Each value is given
+	// to the model on that provider's entry; an absent or non-finite value is
+	// left out.
+	MeasuredLatencyMs map[string]float64
 }
 
 // Client calls a local Ollama instance to select a provider. Safe for
@@ -109,6 +115,14 @@ func (c *Client) Timeout() time.Duration { return c.timeout }
 func (c *Client) WithConsumerLocation(loc *Location) *Client {
 	cp := *c
 	cp.opts.ConsumerLocation = loc
+	return &cp
+}
+
+// WithMeasuredLatencies returns a copy of the client that gives the model the
+// measured round-trip time per provider ID. The receiver is not modified.
+func (c *Client) WithMeasuredLatencies(rtts map[string]float64) *Client {
+	cp := *c
+	cp.opts.MeasuredLatencyMs = rtts
 	return &cp
 }
 
@@ -227,7 +241,12 @@ func (c *Client) SelectDetailed(ctx context.Context, userPrompt string, nodeGrou
 	validIDs := make(map[string]struct{})
 	for _, ng := range nodeGroups {
 		if ng.MaxSize > ng.CurrentReserved {
-			trace.Providers = append(trace.Providers, NodeGroupViewToProviderInfo(ng))
+			info := NodeGroupViewToProviderInfo(ng)
+			if v, ok := c.opts.MeasuredLatencyMs[ng.ProviderClusterID]; ok && !math.IsInf(v, 0) && !math.IsNaN(v) {
+				ms := math.Round(v*10) / 10
+				info.MeasuredLatencyMs = &ms
+			}
+			trace.Providers = append(trace.Providers, info)
 			validIDs[ng.ProviderClusterID] = struct{}{}
 		}
 	}

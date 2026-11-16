@@ -31,8 +31,8 @@ import (
 type ResourceRequestSpec struct {
 	// Resources is the total capacity to reserve (cpu / memory / nvidia.com/gpu).
 	// The controller rounds each resource UP to whole node-sized chunks, because
-	// capacity is only ever borrowed a node at a time. At least one resource must
-	// be set.
+	// capacity is only ever borrowed a node at a time, and reserves that many
+	// nodes (at most 4) on one provider. At least one resource must be set.
 	// +required
 	Resources corev1.ResourceList `json:"resources"`
 
@@ -54,6 +54,18 @@ type ResourceRequestSpec struct {
 	// any) applies. Used only when the brain runs on the consumer (local mode).
 	// +optional
 	LatencyBound *LatencyBound `json:"latencyBound,omitempty"`
+
+	// UserPrompt is this request's own plain-language request, e.g. "I want
+	// the clusters closest to me". When set, the consumer's local AI ranks the
+	// providers for this request alone (ConsumerChoice), whatever the
+	// ConsumerPolicy says, and the request is reserved on the first-ranked
+	// provider that can hold it. Empty means the ConsumerPolicy decides, as
+	// before. In central mode it takes effect only while the ConsumerPolicy is
+	// ConsumerChoice (the Broker masks other policies' lists); in local mode
+	// always.
+	// +optional
+	// +kubebuilder:validation:MaxLength=2048
+	UserPrompt string `json:"userPrompt,omitempty"`
 }
 
 // ResourceRequestPhase is the coarse lifecycle state of a manual request.
@@ -98,6 +110,14 @@ type ResourceRequestStatus struct {
 	// Used to release the current reservation on delete.
 	// +optional
 	ReservationID string `json:"reservationId,omitempty"`
+
+	// ReservationIDs lists every reservation this request holds, one per
+	// node-sized block, when it needs more than one (at most 4): ReservationID
+	// first, then "<ReservationID>-c1", "-c2", ... All are on the same
+	// provider, reserved and released together. Empty for a one-block request,
+	// which holds only ReservationID.
+	// +optional
+	ReservationIDs []string `json:"reservationIds,omitempty"`
 
 	// ProviderClusterID is the provider the broker chose for this request.
 	// +optional

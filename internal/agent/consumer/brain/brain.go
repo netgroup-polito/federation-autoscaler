@@ -119,6 +119,18 @@ func (b *Brain) NodeGroups(ctx context.Context) (*brokerapi.NodeGroupListRespons
 func (b *Brain) NodeGroupsWithin(
 	ctx context.Context, requestBound *autoscalingv1alpha1.LatencyBound,
 ) (*brokerapi.NodeGroupListResponse, error) {
+	return b.NodeGroupsFor(ctx, requestBound, nil)
+}
+
+// NodeGroupsFor is NodeGroupsWithin with an optional placement override for
+// this one decision. A ResourceRequest with its own plain-language request
+// passes ConsumerChoice here, so the brain returns every provider unmasked for
+// the local AI to rank, whatever the ConsumerPolicy says. A nil placement uses
+// the ConsumerPolicy's.
+func (b *Brain) NodeGroupsFor(
+	ctx context.Context, requestBound *autoscalingv1alpha1.LatencyBound,
+	placement *autoscalingv1alpha1.PlacementPolicy,
+) (*brokerapi.NodeGroupListResponse, error) {
 	offers, err := b.opts.Catalog.ListOffers(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("brain: list offers: %w", err)
@@ -134,6 +146,9 @@ func (b *Brain) NodeGroupsWithin(
 
 	own, inFlight := FromReservations(resvs.Reservations)
 	consumer := brokerapi.ConsumerEntry{Placement: spec.Placement}
+	if placement != nil {
+		consumer.Placement = *placement
+	}
 	if b.opts.Location != nil {
 		consumer.Latitude, consumer.Longitude, consumer.HasLocation = b.opts.Location()
 	}

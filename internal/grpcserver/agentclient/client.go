@@ -132,9 +132,19 @@ func (c *Client) GetNodeGroups(ctx context.Context) (*brokerapi.NodeGroupListRes
 func (c *Client) GetNodeGroupsWithin(
 	ctx context.Context, bound *autoscalingv1alpha1.LatencyBound,
 ) (*brokerapi.NodeGroupListResponse, error) {
+	return c.GetNodeGroupsFor(ctx, localapi.NodeGroupQuery{Bound: bound})
+}
+
+// GetNodeGroupsFor is GetNodeGroups for one ResourceRequest: its latency bound,
+// its own plain-language request and its size travel as query parameters, so
+// the agent ranks the providers for that text and keeps growable only one that
+// can hold the request. The zero query is the plain GetNodeGroups.
+func (c *Client) GetNodeGroupsFor(
+	ctx context.Context, q localapi.NodeGroupQuery,
+) (*brokerapi.NodeGroupListResponse, error) {
 	path := "/local/nodegroups"
-	if q := localapi.EncodeLatencyBound(bound); q != nil {
-		path += "?" + q.Encode()
+	if v := localapi.EncodeNodeGroupQuery(q); v != nil {
+		path += "?" + v.Encode()
 	}
 	out := &brokerapi.NodeGroupListResponse{}
 	if err := c.do(ctx, http.MethodGet, path, nil, out, ""); err != nil {

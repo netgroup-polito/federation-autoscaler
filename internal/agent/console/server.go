@@ -69,6 +69,7 @@ import (
 	autoscalingv1alpha1 "github.com/netgroup-polito/federation-autoscaler/api/autoscaling/v1alpha1"
 	"github.com/netgroup-polito/federation-autoscaler/internal/agent/consumer/latency"
 	"github.com/netgroup-polito/federation-autoscaler/internal/agent/geo"
+	"github.com/netgroup-polito/federation-autoscaler/internal/agent/ollama"
 )
 
 // Role discriminates which UI and which write endpoints the console exposes.
@@ -152,6 +153,11 @@ type Options struct {
 	AdvertisedIP string
 	MockGeoURL   string
 
+	// Ollama is the local AI client (consumer role only, optional). The
+	// plain-language request panel uses it to read the amount a request asks
+	// for; without it the amount is read from the text with fixed patterns.
+	Ollama *ollama.Client
+
 	// Prober is the shared latency prober (consumer role only, optional). When
 	// set, the console exposes POST /api/probe so test harnesses can trigger
 	// UDP RTT measurements from the agent's network namespace.
@@ -179,8 +185,11 @@ type Server struct {
 	mockGeoURL    string
 	geoClient     *geo.Client
 	prober        *latency.Prober
+	ollama        *ollama.Client
 	log           logr.Logger
 	shutdown      time.Duration
+
+	request requestMemo
 
 	srv *http.Server
 }
@@ -221,6 +230,7 @@ func New(opts Options) (*Server, error) {
 		mockGeoURL:    opts.MockGeoURL,
 		geoClient:     geo.NewClient(),
 		prober:        opts.Prober,
+		ollama:        opts.Ollama,
 		log:           logger,
 		shutdown:      shutdown,
 	}
@@ -251,6 +261,8 @@ func (s *Server) handler() http.Handler {
 		mux.HandleFunc("POST /api/policy", s.handlePolicy)
 		mux.HandleFunc("POST /api/workload", s.handleWorkload)
 		mux.HandleFunc("POST /api/reservation", s.handleReservation)
+		mux.HandleFunc("POST /api/request", s.handleRequest)
+		mux.HandleFunc("GET /api/request", s.handleRequestState)
 		if s.prober != nil {
 			mux.HandleFunc("POST /api/probe", s.handleProbe)
 		}

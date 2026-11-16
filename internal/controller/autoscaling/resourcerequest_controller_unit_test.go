@@ -35,6 +35,7 @@ import (
 
 	autoscalingv1alpha1 "github.com/netgroup-polito/federation-autoscaler/api/autoscaling/v1alpha1"
 	brokerv1alpha1 "github.com/netgroup-polito/federation-autoscaler/api/broker/v1alpha1"
+	"github.com/netgroup-polito/federation-autoscaler/internal/agent/consumer/localapi"
 	brokerapi "github.com/netgroup-polito/federation-autoscaler/internal/broker/api"
 	"github.com/netgroup-polito/federation-autoscaler/internal/grpcserver/agentclient"
 )
@@ -44,6 +45,7 @@ import (
 type fakeReservationClient struct {
 	nodeGroups       []brokerapi.NodeGroupView
 	appliedPlacement autoscalingv1alpha1.PlacementStrategy
+	waiting          string
 	getErr           error
 	postErr          error
 	deleteErr        error
@@ -51,21 +53,28 @@ type fakeReservationClient struct {
 	postCalls   int
 	lastPostID  string
 	lastPostReq *brokerapi.ReservationRequest
+	postIDs     []string
+	failOnPost  int // when > 0, the failOnPost-th post fails (1-based)
 
 	deleteCalls  int
 	lastDeleteID string
+	deleteIDs    []string
 }
 
 func (f *fakeReservationClient) GetNodeGroups(context.Context) (*brokerapi.NodeGroupListResponse, error) {
 	if f.getErr != nil {
 		return nil, f.getErr
 	}
-	return &brokerapi.NodeGroupListResponse{NodeGroups: f.nodeGroups, AppliedPlacement: f.appliedPlacement}, nil
+	return &brokerapi.NodeGroupListResponse{NodeGroups: f.nodeGroups, AppliedPlacement: f.appliedPlacement, Waiting: f.waiting}, nil
 }
 
 func (f *fakeReservationClient) PostReservation(_ context.Context, id string, req *brokerapi.ReservationRequest) (*brokerapi.ReservationResponse, error) {
 	f.postCalls++
 	f.lastPostID, f.lastPostReq = id, req
+	f.postIDs = append(f.postIDs, id)
+	if f.failOnPost > 0 && f.postCalls == f.failOnPost {
+		return nil, errors.New("no free chunk")
+	}
 	if f.postErr != nil {
 		return nil, f.postErr
 	}
@@ -75,6 +84,7 @@ func (f *fakeReservationClient) PostReservation(_ context.Context, id string, re
 func (f *fakeReservationClient) DeleteReservation(_ context.Context, id string) (*brokerapi.ReleaseResponse, error) {
 	f.deleteCalls++
 	f.lastDeleteID = id
+	f.deleteIDs = append(f.deleteIDs, id)
 	if f.deleteErr != nil {
 		return nil, f.deleteErr
 	}
@@ -275,41 +285,159 @@ func TestResourceRequestPendingWhenNoCapacity(t *testing.T) {
 	}
 }
 
-// A Reservation is exactly one chunk (one ResourceSlice, one node). A manual
-// request that needs more must say so plainly instead of silently reserving —
-// and being billed for — capacity it will not receive.
-func TestResourceRequestPendingWhenMultiChunk(t *testing.T) {
-	ctx := context.Background()
-	rr := &autoscalingv1alpha1.ResourceRequest{
-		ObjectMeta: metav1.ObjectMeta{Name: "too-big", Namespace: "default", UID: "big1"},
-		Spec: autoscalingv1alpha1.ResourceRequestSpec{
-			// 6 CPU against 2-CPU chunks ⇒ 3 chunks.
-			Resources: corev1.ResourceList{corev1.ResourceCPU: resource.MustParse("6")},
-		},
-	}
-	agent := &fakeReservationClient{nodeGroups: []brokerapi.NodeGroupView{{
+// sixCPUGroups is one provider with 2-CPU chunks and room for 10.
+func sixCPUGroups() []brokerapi.NodeGroupView {
+	return []brokerapi.NodeGroupView{{
 		ID: "ng-p1", ProviderClusterID: "provider-1", Type: brokerv1alpha1.ChunkTypeStandard,
 		MaxSize: 10, CurrentReserved: 0,
 		ChunkResources: corev1.ResourceList{corev1.ResourceCPU: resource.MustParse("2")},
-	}}}
+	}}
+}
+
+func cpuRequest(name, uid, cpu string) *autoscalingv1alpha1.ResourceRequest {
+	return &autoscalingv1alpha1.ResourceRequest{
+		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: "default", UID: types.UID(uid)},
+		Spec: autoscalingv1alpha1.ResourceRequestSpec{
+			Resources: corev1.ResourceList{corev1.ResourceCPU: resource.MustParse(cpu)},
+		},
+	}
+}
+
+// A request bigger than one node becomes one single-node reservation per node,
+// all on the chosen provider, held and released together.
+func TestResourceRequestReservesSeveralNodes(t *testing.T) {
+	ctx := context.Background()
+	rr := cpuRequest("big", "big1", "6") // 6 CPU against 2-CPU chunks ⇒ 3 nodes
+	agent := &fakeReservationClient{nodeGroups: sixCPUGroups()}
 	r, cl := newReconcileFixture(t, agent, rr)
-	key := types.NamespacedName{Namespace: "default", Name: "too-big"}
+	key := types.NamespacedName{Namespace: "default", Name: "big"}
 
 	_, _ = r.Reconcile(ctx, ctrl.Request{NamespacedName: key}) // finalize
 	if _, err := r.Reconcile(ctx, ctrl.Request{NamespacedName: key}); err != nil {
 		t.Fatalf("reconcile: %v", err)
 	}
-	if agent.postCalls != 0 {
-		t.Errorf("must not reserve a multi-chunk request; postCalls = %d", agent.postCalls)
+	want := []string{"mr-big1", "mr-big1-c1", "mr-big1-c2"}
+	if strings.Join(agent.postIDs, ",") != strings.Join(want, ",") {
+		t.Fatalf("posted ids = %v, want %v", agent.postIDs, want)
+	}
+	if agent.lastPostReq.ChunkCount != 1 || agent.lastPostReq.ProviderClusterID != "provider-1" {
+		t.Errorf("each reservation must be one node on provider-1, got %+v", agent.lastPostReq)
 	}
 	if err := cl.Get(ctx, key, rr); err != nil {
 		t.Fatal(err)
 	}
-	if rr.Status.Phase != autoscalingv1alpha1.ResourceRequestPending {
-		t.Errorf("phase = %q, want Pending", rr.Status.Phase)
+	if rr.Status.Phase != autoscalingv1alpha1.ResourceRequestReserved || rr.Status.ChunkCount != 3 ||
+		rr.Status.ReservationID != "mr-big1" || strings.Join(rr.Status.ReservationIDs, ",") != strings.Join(want, ",") {
+		t.Errorf("status = %+v, want Reserved with the 3 ids", rr.Status)
 	}
-	if !strings.Contains(rr.Status.Message, "3 chunks") {
-		t.Errorf("message should say how many chunks were needed; got %q", rr.Status.Message)
+
+	if err := cl.Delete(ctx, rr); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := r.Reconcile(ctx, ctrl.Request{NamespacedName: key}); err != nil {
+		t.Fatalf("release: %v", err)
+	}
+	if strings.Join(agent.deleteIDs, ",") != strings.Join(want, ",") {
+		t.Errorf("released ids = %v, want all of %v", agent.deleteIDs, want)
+	}
+}
+
+// Over the per-request limit the request stays Pending and says why.
+func TestResourceRequestPendingOverNodeLimit(t *testing.T) {
+	ctx := context.Background()
+	rr := cpuRequest("huge", "huge1", "10") // 5 nodes > 4
+	agent := &fakeReservationClient{nodeGroups: sixCPUGroups()}
+	r, cl := newReconcileFixture(t, agent, rr)
+	key := types.NamespacedName{Namespace: "default", Name: "huge"}
+
+	_, _ = r.Reconcile(ctx, ctrl.Request{NamespacedName: key})
+	if _, err := r.Reconcile(ctx, ctrl.Request{NamespacedName: key}); err != nil {
+		t.Fatalf("reconcile: %v", err)
+	}
+	if agent.postCalls != 0 {
+		t.Errorf("must not reserve over the limit; postCalls = %d", agent.postCalls)
+	}
+	if err := cl.Get(ctx, key, rr); err != nil {
+		t.Fatal(err)
+	}
+	if rr.Status.Phase != autoscalingv1alpha1.ResourceRequestPending || !strings.Contains(rr.Status.Message, "5 nodes") {
+		t.Errorf("status = %q %q, want Pending saying 5 nodes", rr.Status.Phase, rr.Status.Message)
+	}
+}
+
+// All or nothing: when a later node cannot be reserved, the earlier ones are
+// released and the request fails (and is retried).
+func TestResourceRequestPartialFailureRollsBack(t *testing.T) {
+	ctx := context.Background()
+	rr := cpuRequest("half", "half1", "6")
+	agent := &fakeReservationClient{nodeGroups: sixCPUGroups(), failOnPost: 2}
+	r, cl := newReconcileFixture(t, agent, rr)
+	key := types.NamespacedName{Namespace: "default", Name: "half"}
+
+	_, _ = r.Reconcile(ctx, ctrl.Request{NamespacedName: key})
+	if _, err := r.Reconcile(ctx, ctrl.Request{NamespacedName: key}); err != nil {
+		t.Fatalf("reconcile: %v", err)
+	}
+	if strings.Join(agent.deleteIDs, ",") != "mr-half1" {
+		t.Errorf("released = %v, want the first node rolled back", agent.deleteIDs)
+	}
+	if err := cl.Get(ctx, key, rr); err != nil {
+		t.Fatal(err)
+	}
+	if rr.Status.Phase != autoscalingv1alpha1.ResourceRequestFailed || rr.Status.ReservationID != "" {
+		t.Errorf("status = %+v, want Failed with nothing held", rr.Status)
+	}
+}
+
+// A multi-node request is Active only when every node is up.
+func TestResourceRequestHoldWaitsForEveryNode(t *testing.T) {
+	ctx := context.Background()
+	rr := cpuRequest("pair", "two1", "4") // 2 nodes
+	vns := func(id, node string) *autoscalingv1alpha1.VirtualNodeState {
+		return &autoscalingv1alpha1.VirtualNodeState{
+			ObjectMeta: metav1.ObjectMeta{
+				Name: "vns-" + id, Namespace: "federation-autoscaler-system",
+				Labels: map[string]string{virtualNodeReservationLabel: id},
+			},
+			Spec: autoscalingv1alpha1.VirtualNodeStateSpec{
+				ProviderClusterID: "provider-1", ProviderLiqoClusterID: "liqo-p1",
+				NodeGroupID: "ng-p1", ReservationID: id,
+				Resources: corev1.ResourceList{corev1.ResourceCPU: resource.MustParse("2")},
+			},
+			Status: autoscalingv1alpha1.VirtualNodeStateStatus{VirtualNodeName: node},
+		}
+	}
+	first := vns("mr-two1", "node-a")
+	nodeA := &corev1.Node{ObjectMeta: metav1.ObjectMeta{Name: "node-a"}}
+	agent := &fakeReservationClient{nodeGroups: sixCPUGroups()}
+	r, cl := newReconcileFixture(t, agent, rr, first, nodeA)
+	key := types.NamespacedName{Namespace: "default", Name: "pair"}
+	for i := range 3 { // finalize, reserve, hold
+		if _, err := r.Reconcile(ctx, ctrl.Request{NamespacedName: key}); err != nil {
+			t.Fatalf("reconcile %d: %v", i, err)
+		}
+	}
+	if err := cl.Get(ctx, key, rr); err != nil {
+		t.Fatal(err)
+	}
+	if rr.Status.Phase != autoscalingv1alpha1.ResourceRequestReserved || !strings.Contains(rr.Status.Message, "1 of 2") {
+		t.Fatalf("with one node up: status = %q %q, want Reserved, 1 of 2", rr.Status.Phase, rr.Status.Message)
+	}
+
+	if err := cl.Create(ctx, vns("mr-two1-c1", "node-b")); err != nil {
+		t.Fatal(err)
+	}
+	if err := cl.Create(ctx, &corev1.Node{ObjectMeta: metav1.ObjectMeta{Name: "node-b"}}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := r.Reconcile(ctx, ctrl.Request{NamespacedName: key}); err != nil {
+		t.Fatal(err)
+	}
+	if err := cl.Get(ctx, key, rr); err != nil {
+		t.Fatal(err)
+	}
+	if rr.Status.Phase != autoscalingv1alpha1.ResourceRequestActive {
+		t.Errorf("with both nodes up: phase = %q, want Active", rr.Status.Phase)
 	}
 }
 
@@ -723,5 +851,115 @@ func TestNodeGroupsForPassesRequestBound(t *testing.T) {
 	plain := &ResourceRequestReconciler{Agent: &fakeReservationClient{}}
 	if _, err := plain.nodeGroupsFor(context.Background(), withBound); err != nil {
 		t.Errorf("a plain client must fall back to GetNodeGroups: %v", err)
+	}
+}
+
+// --- per-request plain-language text -----------------------------------------
+
+// queryFakeClient also accepts the whole per-request query, like the real agent
+// client, and records the last one.
+type queryFakeClient struct {
+	fakeReservationClient
+	queryCalls int
+	lastQuery  localapi.NodeGroupQuery
+}
+
+func (f *queryFakeClient) GetNodeGroupsFor(
+	ctx context.Context, q localapi.NodeGroupQuery,
+) (*brokerapi.NodeGroupListResponse, error) {
+	f.queryCalls++
+	f.lastQuery = q
+	return f.GetNodeGroups(ctx)
+}
+
+func TestNodeGroupsForPassesPromptSizeAndBound(t *testing.T) {
+	bound := &autoscalingv1alpha1.LatencyBound{MaxLatencyMs: 3}
+	rr := &autoscalingv1alpha1.ResourceRequest{Spec: autoscalingv1alpha1.ResourceRequestSpec{
+		Resources:    corev1.ResourceList{corev1.ResourceCPU: resource.MustParse("2")},
+		LatencyBound: bound,
+		UserPrompt:   "I want the clusters closest to me.",
+	}}
+	agent := &queryFakeClient{}
+	r := &ResourceRequestReconciler{Agent: agent}
+	if _, err := r.nodeGroupsFor(context.Background(), rr); err != nil {
+		t.Fatal(err)
+	}
+	q := agent.lastQuery
+	if agent.queryCalls != 1 || q.Prompt != rr.Spec.UserPrompt || q.Bound != bound {
+		t.Fatalf("query = %+v (calls %d), want the request's text and bound", q, agent.queryCalls)
+	}
+	if cpu := q.Need[corev1.ResourceCPU]; cpu.Cmp(resource.MustParse("2")) != 0 {
+		t.Errorf("query need = %v, want the request's resources", q.Need)
+	}
+}
+
+func TestReEvalSkippedForRequestWithOwnText(t *testing.T) {
+	ctx := context.Background()
+	rr := reservedRR(2 * time.Hour)
+	rr.Spec.UserPrompt = "closest to me"
+	agent := &fakeReservationClient{
+		nodeGroups:       []brokerapi.NodeGroupView{growable("provider-2")},
+		appliedPlacement: autoscalingv1alpha1.PlacementStrategyLatency,
+	}
+	r, _ := newReconcileFixture(t, agent, rr)
+	r.ReEvalInterval = time.Hour
+	key := types.NamespacedName{Namespace: "default", Name: "job"}
+
+	if _, err := r.Reconcile(ctx, ctrl.Request{NamespacedName: key}); err != nil {
+		t.Fatal(err)
+	}
+	if agent.deleteCalls != 0 {
+		t.Fatalf("a request placed by the AI for its own text must not migrate; delete=%d", agent.deleteCalls)
+	}
+}
+
+// While the agent's AI is still choosing, the request says so (not "no
+// capacity") and retries within seconds.
+func TestResourceRequestWaitingWhileTheAIChooses(t *testing.T) {
+	ctx := context.Background()
+	rr := &autoscalingv1alpha1.ResourceRequest{
+		ObjectMeta: metav1.ObjectMeta{Name: "asking", Namespace: "default", UID: "u1"},
+		Spec: autoscalingv1alpha1.ResourceRequestSpec{
+			Resources:  corev1.ResourceList{corev1.ResourceCPU: resource.MustParse("2")},
+			UserPrompt: "closest to me",
+		},
+	}
+	agent := &fakeReservationClient{waiting: brokerapi.WaitingAIChoosing} // everything masked meanwhile
+	r, cl := newReconcileFixture(t, agent, rr)
+	key := types.NamespacedName{Namespace: "default", Name: "asking"}
+
+	_, _ = r.Reconcile(ctx, ctrl.Request{NamespacedName: key}) // finalizer
+	res, err := r.Reconcile(ctx, ctrl.Request{NamespacedName: key})
+	if err != nil {
+		t.Fatalf("reconcile: %v", err)
+	}
+	if res.RequeueAfter != waitingRequeue {
+		t.Errorf("requeue = %v, want the quick %v", res.RequeueAfter, waitingRequeue)
+	}
+	if err := cl.Get(ctx, key, rr); err != nil {
+		t.Fatalf("get: %v", err)
+	}
+	if rr.Status.Phase != autoscalingv1alpha1.ResourceRequestPending || rr.Status.Message != brokerapi.WaitingAIChoosing {
+		t.Errorf("status = %q %q, want Pending with %q", rr.Status.Phase, rr.Status.Message, brokerapi.WaitingAIChoosing)
+	}
+}
+
+// With a latency limit and no provider within it, the message says so.
+func TestResourceRequestPendingMentionsTheLatencyLimit(t *testing.T) {
+	ctx := context.Background()
+	rr := cpuRequest("near", "near1", "2")
+	rr.Spec.LatencyBound = &autoscalingv1alpha1.LatencyBound{MaxLatencyMs: 1}
+	agent := &fakeReservationClient{nodeGroups: nil}
+	r, cl := newReconcileFixture(t, agent, rr)
+	key := types.NamespacedName{Namespace: "default", Name: "near"}
+	_, _ = r.Reconcile(ctx, ctrl.Request{NamespacedName: key})
+	if _, err := r.Reconcile(ctx, ctrl.Request{NamespacedName: key}); err != nil {
+		t.Fatal(err)
+	}
+	if err := cl.Get(ctx, key, rr); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(rr.Status.Message, "within 1 ms") {
+		t.Errorf("message = %q, want it to mention the 1 ms limit", rr.Status.Message)
 	}
 }

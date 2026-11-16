@@ -366,6 +366,10 @@ func TestHeartbeatValidatesConsumerChoice(t *testing.T) {
 		{"too many", &ConsumerChoiceReport{Ranked: many, Source: ChoiceSourceAI}, false},
 		{"long prompt", &ConsumerChoiceReport{Prompt: strings.Repeat("x", maxChoicePromptLen+1),
 			Ranked: []string{"p1"}, Source: ChoiceSourceAI}, false},
+		{"long size", &ConsumerChoiceReport{Requested: strings.Repeat("x", maxChoiceSizeLen+1),
+			Ranked: []string{"p1"}, Source: ChoiceSourceAI}, false},
+		{"with size", &ConsumerChoiceReport{Requested: "4 CPU, 8Gi memory", PerRequest: true,
+			Ranked: []string{"p1"}, Source: ChoiceSourceAI}, true},
 	} {
 		err := validateHeartbeatRequest(base(tc.c))
 		if (err == nil) != tc.ok {
