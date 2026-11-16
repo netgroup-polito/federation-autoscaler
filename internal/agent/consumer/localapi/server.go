@@ -41,23 +41,28 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"math"
 	"net/http"
+	"sort"
 	"strings"
 	"sync"
 	"time"
 
 	"github.com/go-logr/logr"
 	"github.com/google/uuid"
+	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	ctrlclient "sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
 	autoscalingv1alpha1 "github.com/netgroup-polito/federation-autoscaler/api/autoscaling/v1alpha1"
+	brokerv1alpha1 "github.com/netgroup-polito/federation-autoscaler/api/broker/v1alpha1"
 	agentclient "github.com/netgroup-polito/federation-autoscaler/internal/agent/client"
 	"github.com/netgroup-polito/federation-autoscaler/internal/agent/consumer/brain"
 	"github.com/netgroup-polito/federation-autoscaler/internal/agent/consumer/latency"
 	"github.com/netgroup-polito/federation-autoscaler/internal/agent/ollama"
 	brokerapi "github.com/netgroup-polito/federation-autoscaler/internal/broker/api"
+	"github.com/netgroup-polito/federation-autoscaler/internal/broker/chunk"
 )
 
 // Prober measures round-trip time to provider UDP echo endpoints for the
@@ -66,6 +71,18 @@ import (
 type Prober interface {
 	MeasureAndPick(ctx context.Context, cands []latency.Candidate) latency.Result
 }
+
+// measurer is the optional part of a Prober that measures without picking
+// (*latency.Prober has it). ConsumerChoice uses it to give the local AI the
+// measured latency of the nearest providers.
+type measurer interface {
+	Measure(ctx context.Context, endpoints []string) map[string]float64
+}
+
+// aiMeasuredProviders is how many of the nearest providers are measured for
+// the local AI, like the Latency policy's shortlist: latency mostly follows
+// distance, so the farther ones are left unmeasured.
+const aiMeasuredProviders = 3
 
 // Options bundles the construction-time settings of the loopback REST
 // server.
@@ -133,14 +150,14 @@ type Server struct {
 	shutdown time.Duration
 	srv      *http.Server
 
-	aiMutex     sync.Mutex
-	aiRunning   bool
-	aiResult    []string
-	aiTimestamp time.Time
-	aiPrompt    string
-	aiSource    string // SelectionSourceAI or SelectionSourceFallback, for aiResult
-	ollama      *ollama.Client
-	location    func() *ollama.Location
+	// aiMutex guards aiCache and lastSel. aiCache holds one ranking per
+	// plain-language request text (the ConsumerPolicy's, or a ResourceRequest's
+	// own), so requests with different texts never share a decision.
+	aiMutex  sync.Mutex
+	aiCache  map[string]*aiDecision
+	lastSel  *brokerapi.ConsumerChoiceReport
+	ollama   *ollama.Client
+	location func() *ollama.Location
 
 	brain *brain.Brain // nil in central mode
 }
@@ -229,13 +246,14 @@ func (s *Server) Run(ctx context.Context) error {
 // -----------------------------------------------------------------------------
 
 func (s *Server) handleNodeGroups(w http.ResponseWriter, r *http.Request) {
-	// A ResourceRequest may carry its own latency bound for this one call.
-	bound, err := DecodeLatencyBound(r.URL.Query())
+	// A ResourceRequest may carry its own latency bound, plain-language request
+	// and size for this one call.
+	q, err := DecodeNodeGroupQuery(r.URL.Query())
 	if err != nil {
 		s.writeRawError(w, http.StatusBadRequest, brokerapi.ErrCodeInvalidRequest, err.Error())
 		return
 	}
-	resp, err := s.nodeGroups(r.Context(), bound)
+	resp, err := s.nodeGroups(r.Context(), q)
 	if err != nil {
 		s.writeError(w, err)
 		return
@@ -248,116 +266,19 @@ func (s *Server) handleNodeGroups(w http.ResponseWriter, r *http.Request) {
 		s.maskToMeasuredWinner(r.Context(), resp)
 	}
 
-	// ConsumerChoice interception: when the active policy is ConsumerChoice and
-	// an Ollama client is configured, delegate provider selection to the local
-	// LLM. This mirrors the Broker's masking (MaxSize = CurrentReserved for all
-	// but the chosen provider) but runs client-side so the Broker stays unaware.
+	// ConsumerChoice: the local AI ranks the providers for a plain-language
+	// request (a ResourceRequest's own text, else the ConsumerPolicy's) and
+	// only the first-ranked provider that can hold the request stays growable.
+	// It mirrors the Broker's masking but runs client-side, so the Broker stays
+	// unaware.
 	if s.ollama != nil {
-		if policy, prompt := s.currentConsumerChoice(r.Context()); policy {
-			// The Broker learns a policy change on the next heartbeat (up to
-			// 15 s later). Until then its list is still masked for the
-			// previous policy, often down to one provider, and a choice made
-			// on it would just repeat that pick and stay cached for a minute.
-			// Wait for the unmasked ConsumerChoice list instead.
-			if resp.AppliedPlacement != autoscalingv1alpha1.PlacementStrategyConsumerChoice {
-				s.log.V(1).Info("ConsumerChoice: waiting for the Broker to apply the policy",
-					"brokerApplies", resp.AppliedPlacement)
-				for i := range resp.NodeGroups {
-					resp.NodeGroups[i].MaxSize = resp.NodeGroups[i].CurrentReserved
-				}
-				s.writeJSON(w, http.StatusOK, resp)
-				return
-			}
-
-			s.aiMutex.Lock()
-
-			// If the prompt changed, clear cache
-			if s.aiPrompt != prompt {
-				s.aiResult = nil
-				s.aiPrompt = prompt
-				s.aiTimestamp = time.Time{}
-				s.aiSource = ""
-			}
-
-			// If cache is fresh (< 60s), use it
-			if len(s.aiResult) > 0 && time.Since(s.aiTimestamp) < 60*time.Second {
-				ranked := s.aiResult
-				s.aiMutex.Unlock()
-
-				maskToFirstAvailable(resp, ranked)
-				s.serveNodeGroups(w, resp)
-				return
-			}
-
-			// If not running, start it
-			if !s.aiRunning {
-				s.aiRunning = true
-
-				nodeGroupsCopy := make([]brokerapi.NodeGroupView, len(resp.NodeGroups))
-				copy(nodeGroupsCopy, resp.NodeGroups)
-
-				client := s.ollama
-				if s.location != nil {
-					if loc := s.location(); loc != nil {
-						client = client.WithConsumerLocation(loc)
-					}
-				}
-
-				go func(prompt string, groups []brokerapi.NodeGroupView) {
-					// Longer than the client's own timeout, so the configured
-					// --ollama-timeout is what bounds the call, never this context.
-					ctx, cancel := context.WithTimeout(context.Background(), client.Timeout()+30*time.Second)
-					defer cancel()
-
-					s.log.V(1).Info("AI selection background task started", "prompt", prompt)
-					trace, aiErr := client.SelectDetailed(ctx, prompt, groups)
-
-					s.aiMutex.Lock()
-					defer s.aiMutex.Unlock()
-					s.aiRunning = false
-
-					// The prompt changed while the model was answering the old one:
-					// that ranking answers a request nobody is making any more. Drop
-					// it; the next poll starts a selection for the current prompt.
-					if s.aiPrompt != prompt {
-						s.log.Info(SelectionDiscardedMessage, "prompt", prompt)
-						return
-					}
-
-					source, ranked := SelectionSourceAI, trace.Ranked
-					if aiErr != nil || len(ranked) == 0 {
-						source = SelectionSourceFallback
-						ranked, _ = ollama.DeterministicFallback(groups)
-					}
-					s.aiResult = completeRanking(ranked, groups)
-					s.aiTimestamp = time.Now()
-					s.aiSource = source
-
-					// One Info line per decision: what the model was asked, what it
-					// answered and what the agent will act on. It is the operator's
-					// record of every ConsumerChoice decision.
-					errMsg := ""
-					if aiErr != nil {
-						errMsg = aiErr.Error()
-					}
-					s.log.Info(SelectionFinishedMessage,
-						"source", source,
-						"prompt", prompt,
-						"ranked", s.aiResult,
-						"rawResponse", trace.RawResponse,
-						"errorKind", string(trace.ErrorKind),
-						"error", errMsg,
-						"durationMs", trace.Duration().Milliseconds())
-				}(prompt, nodeGroupsCopy)
-			}
-			s.aiMutex.Unlock()
-
-			// While AI is running, we return no available capacity
-			// so the Autoscaler waits for the next poll.
-			for i := range resp.NodeGroups {
-				resp.NodeGroups[i].MaxSize = resp.NodeGroups[i].CurrentReserved
-			}
-			s.writeJSON(w, http.StatusOK, resp)
+		prompt, perRequest := q.Prompt, q.Prompt != ""
+		policyCC := false
+		if !perRequest {
+			policyCC, prompt = s.currentConsumerChoice(r.Context())
+		}
+		if perRequest || policyCC {
+			s.serveConsumerChoice(w, resp, prompt, perRequest, q.Need, q.Bound)
 			return
 		}
 	}
@@ -372,29 +293,300 @@ func (s *Server) handleNodeGroups(w http.ResponseWriter, r *http.Request) {
 	// Broker's own response, so this costs no extra ConsumerPolicy read.
 	if resp.AppliedPlacement == autoscalingv1alpha1.PlacementStrategyConsumerChoice {
 		ranked, _ := ollama.DeterministicFallback(resp.NodeGroups)
-		maskToFirstAvailable(resp, ranked) // nil ranking (no capacity) masks everything
+		maskToFirstFitting(resp, ranked, q.Need) // nil ranking (no capacity) masks everything
 	}
 
 	s.serveNodeGroups(w, resp)
 }
 
+// aiCacheTTL is how long a ranking is reused before the model is asked again.
+const aiCacheTTL = 60 * time.Second
+
+// maxAICacheEntries bounds aiCache: past it, the oldest finished entries go.
+const maxAICacheEntries = 32
+
+// aiDecision is one cached ranking for one request text.
+type aiDecision struct {
+	ranked  []string
+	at      time.Time
+	source  string
+	running bool
+}
+
+// serveConsumerChoice serves the view masked to the AI's choice for prompt.
+// The ranking is cached per prompt for aiCacheTTL. While the model is still
+// answering, every provider is masked, so the caller waits and asks again.
+func (s *Server) serveConsumerChoice(
+	w http.ResponseWriter, resp *brokerapi.NodeGroupListResponse,
+	prompt string, perRequest bool, need corev1.ResourceList, bound *autoscalingv1alpha1.LatencyBound,
+) {
+	if resp.AppliedPlacement != autoscalingv1alpha1.PlacementStrategyConsumerChoice {
+		if perRequest && s.brain == nil {
+			// Central mode under another policy: the Broker already masked
+			// the list for that policy, so there is nothing left to rank.
+			// The ConsumerPolicy decides, as it would without the text.
+			s.log.V(1).Info("per-request prompt not applied: in central mode it needs the ConsumerChoice policy",
+				"brokerApplies", resp.AppliedPlacement)
+			s.serveNodeGroups(w, resp)
+			return
+		}
+		// The Broker learns a policy change on the next heartbeat (up to 15 s
+		// later). Until then its list is still masked for the previous policy,
+		// often down to one provider, and a choice made on it would just
+		// repeat that pick and stay cached for a minute. Wait for the unmasked
+		// ConsumerChoice list instead.
+		s.log.V(1).Info("ConsumerChoice: waiting for the Broker to apply the policy",
+			"brokerApplies", resp.AppliedPlacement)
+		maskAll(resp)
+		resp.Waiting = brokerapi.WaitingPolicyApplying
+		s.writeJSON(w, http.StatusOK, resp)
+		return
+	}
+
+	// Nothing can be grown at all (every provider full, or excluded by a
+	// latency limit): there is nothing for the AI to rank, so do not ask it
+	// (asking would only repeat on every poll) and do not say it is choosing.
+	// The caller sees an honest "no capacity".
+	if !anyGrowable(resp) {
+		s.serveNodeGroups(w, resp)
+		return
+	}
+
+	s.aiMutex.Lock()
+	if s.aiCache == nil {
+		s.aiCache = map[string]*aiDecision{}
+	}
+	d := s.aiCache[prompt]
+	// A finished decision is reused for aiCacheTTL, even an empty one (no
+	// provider could be ranked): re-asking every poll would loop.
+	if d != nil && !d.running && !d.at.IsZero() && time.Since(d.at) < aiCacheTTL {
+		ranked := d.ranked
+		if perRequest && s.lastSel != nil && s.lastSel.Prompt == prompt {
+			s.lastSel.Requested = requestedSize(need, bound)
+		}
+		s.aiMutex.Unlock()
+		maskToFirstFitting(resp, ranked, need)
+		s.serveNodeGroups(w, resp)
+		return
+	}
+	if d == nil {
+		d = &aiDecision{}
+		s.aiCache[prompt] = d
+		s.pruneAICacheLocked()
+		// A new ConsumerPolicy text: the dashboard must not keep showing the
+		// previous text's ranking while the new one is being made.
+		if !perRequest && s.lastSel != nil && !s.lastSel.PerRequest {
+			s.lastSel = nil
+		}
+	}
+	if !d.running {
+		d.running = true
+		groups := make([]brokerapi.NodeGroupView, len(resp.NodeGroups))
+		copy(groups, resp.NodeGroups)
+		client := s.ollama
+		if s.location != nil {
+			if loc := s.location(); loc != nil {
+				client = client.WithConsumerLocation(loc)
+			}
+		}
+		go s.runSelection(client, prompt, perRequest, need, bound, groups)
+	}
+	s.aiMutex.Unlock()
+
+	// While the model is answering, nothing is growable, so the caller (the
+	// Cluster Autoscaler, or a ResourceRequest) waits for the next poll. The
+	// Waiting note tells a ResourceRequest why, so it does not report "no
+	// capacity".
+	maskAll(resp)
+	resp.Waiting = brokerapi.WaitingAIChoosing
+	s.writeJSON(w, http.StatusOK, resp)
+}
+
+// runSelection asks the model to rank groups for prompt and caches the result
+// (or the deterministic fallback when the model cannot be used).
+func (s *Server) runSelection(
+	client *ollama.Client, prompt string, perRequest bool, need corev1.ResourceList,
+	bound *autoscalingv1alpha1.LatencyBound, groups []brokerapi.NodeGroupView,
+) {
+	// Longer than the client's own timeout, so the configured --ollama-timeout
+	// is what bounds the call, never this context.
+	ctx, cancel := context.WithTimeout(context.Background(), client.Timeout()+30*time.Second)
+	defer cancel()
+
+	s.log.V(1).Info("AI selection background task started", "prompt", prompt, "perRequest", perRequest)
+	if rtts := s.measureNearest(ctx, groups); len(rtts) > 0 {
+		client = client.WithMeasuredLatencies(rtts)
+	}
+	trace, aiErr := client.SelectDetailed(ctx, prompt, groups)
+
+	source, ranked := SelectionSourceAI, trace.Ranked
+	if aiErr != nil || len(ranked) == 0 {
+		source = SelectionSourceFallback
+		ranked, _ = ollama.DeterministicFallback(groups)
+	}
+	ranked = completeRanking(ranked, groups)
+	now := time.Now()
+
+	s.aiMutex.Lock()
+	d := s.aiCache[prompt]
+	if d == nil { // pruned while the model was answering
+		d = &aiDecision{}
+		s.aiCache[prompt] = d
+	}
+	d.ranked, d.at, d.source, d.running = ranked, now, source, false
+	s.lastSel = &brokerapi.ConsumerChoiceReport{
+		Prompt:     prompt,
+		Ranked:     append([]string(nil), ranked...),
+		Source:     source,
+		DecidedAt:  metav1.NewTime(now),
+		PerRequest: perRequest,
+	}
+	if perRequest {
+		s.lastSel.Requested = requestedSize(need, bound)
+	}
+	s.aiMutex.Unlock()
+
+	// One Info line per decision: what the model was asked, what it answered
+	// and what the agent will act on. It is the operator's record of every
+	// ConsumerChoice decision.
+	errMsg := ""
+	if aiErr != nil {
+		errMsg = aiErr.Error()
+	}
+	s.log.Info(SelectionFinishedMessage,
+		"source", source,
+		"prompt", prompt,
+		"perRequest", perRequest,
+		"ranked", ranked,
+		"rawResponse", trace.RawResponse,
+		"errorKind", string(trace.ErrorKind),
+		"error", errMsg,
+		"durationMs", trace.Duration().Milliseconds())
+}
+
+// requestedSize renders a request's size and latency limit for the
+// dashboard, e.g. "4 CPU, 8Gi memory, max 3 ms"; empty when neither is given.
+func requestedSize(need corev1.ResourceList, bound *autoscalingv1alpha1.LatencyBound) string {
+	a := ollama.Amount{CPU: need[corev1.ResourceCPU], Memory: need[corev1.ResourceMemory]}
+	if g, ok := need[chunk.GPUResourceName]; ok {
+		a.GPU = g.Value()
+	}
+	if bound != nil {
+		a.MaxLatencyMs = bound.MaxLatencyMs
+	}
+	if a.IsZero() {
+		return ""
+	}
+	return a.String()
+}
+
+// measureNearest measures the round-trip time to the aiMeasuredProviders
+// providers nearest to this consumer (by distance; in list order when the
+// location is unknown) that have a probe endpoint, keyed by provider ID.
+// Nil when there is no prober that can measure.
+func (s *Server) measureNearest(ctx context.Context, groups []brokerapi.NodeGroupView) map[string]float64 {
+	m, ok := s.prober.(measurer)
+	if !ok || m == nil {
+		return nil
+	}
+	type cand struct {
+		id, endpoint string
+		km           float64
+	}
+	var loc *ollama.Location
+	if s.location != nil {
+		loc = s.location()
+	}
+	seen := map[string]bool{}
+	cands := make([]cand, 0, len(groups))
+	for _, ng := range groups {
+		if ng.ProbeEndpoint == "" || seen[ng.ProviderClusterID] || ng.MaxSize <= ng.CurrentReserved {
+			continue
+		}
+		seen[ng.ProviderClusterID] = true
+		c := cand{id: ng.ProviderClusterID, endpoint: ng.ProbeEndpoint}
+		if loc != nil && ng.Topology != nil {
+			c.km = brokerapi.HaversineKm(loc.Latitude, loc.Longitude, ng.Topology.Latitude, ng.Topology.Longitude)
+		}
+		cands = append(cands, c)
+	}
+	if loc != nil {
+		sort.SliceStable(cands, func(i, j int) bool { return cands[i].km < cands[j].km })
+	}
+	if len(cands) > aiMeasuredProviders {
+		cands = cands[:aiMeasuredProviders]
+	}
+	if len(cands) == 0 {
+		return nil
+	}
+	endpoints := make([]string, len(cands))
+	for i, c := range cands {
+		endpoints[i] = c.endpoint
+	}
+	byEndpoint := m.Measure(ctx, endpoints)
+	out := map[string]float64{}
+	for _, c := range cands {
+		if v, ok := byEndpoint[c.endpoint]; ok && !math.IsInf(v, 0) && !math.IsNaN(v) {
+			out[c.id] = v
+		}
+	}
+	s.log.V(1).Info("measured the nearest providers for the AI", "rttsMs", out)
+	return out
+}
+
+// pruneAICacheLocked drops the oldest finished entries once aiCache is over
+// maxAICacheEntries. The caller holds aiMutex.
+func (s *Server) pruneAICacheLocked() {
+	for len(s.aiCache) > maxAICacheEntries {
+		oldest := ""
+		var oldestAt time.Time
+		for k, d := range s.aiCache {
+			if d.running {
+				continue
+			}
+			if oldest == "" || d.at.Before(oldestAt) {
+				oldest, oldestAt = k, d.at
+			}
+		}
+		if oldest == "" {
+			return // everything is running; let it finish
+		}
+		delete(s.aiCache, oldest)
+	}
+}
+
+// anyGrowable reports whether any node group still has room.
+func anyGrowable(resp *brokerapi.NodeGroupListResponse) bool {
+	for _, ng := range resp.NodeGroups {
+		if ng.MaxSize > ng.CurrentReserved {
+			return true
+		}
+	}
+	return false
+}
+
+// maskAll leaves no provider growable.
+func maskAll(resp *brokerapi.NodeGroupListResponse) {
+	for i := range resp.NodeGroups {
+		resp.NodeGroups[i].MaxSize = resp.NodeGroups[i].CurrentReserved
+	}
+}
+
 // LastSelection returns the latest ConsumerChoice decision for the heartbeat
 // (the dashboard's "AI request → ranking"): the prompt, the ranking the agent
-// acts on, and whether the model or the fallback made it. Nil before the first
-// decision and right after the prompt changes. The ranking stays reported after
-// its 60 s cache expires: it is still the last decision made.
+// acts on, whether the model or the fallback made it, and whether it was for a
+// ResourceRequest's own text. Nil before the first decision, and while a new
+// ConsumerPolicy text is being decided. It stays reported after its cache
+// expires: it is still the last decision made.
 func (s *Server) LastSelection() *brokerapi.ConsumerChoiceReport {
 	s.aiMutex.Lock()
 	defer s.aiMutex.Unlock()
-	if len(s.aiResult) == 0 {
+	if s.lastSel == nil {
 		return nil
 	}
-	return &brokerapi.ConsumerChoiceReport{
-		Prompt:    s.aiPrompt,
-		Ranked:    append([]string(nil), s.aiResult...),
-		Source:    s.aiSource,
-		DecidedAt: metav1.NewTime(s.aiTimestamp),
-	}
+	cp := *s.lastSel
+	cp.Ranked = append([]string(nil), s.lastSel.Ranked...)
+	return &cp
 }
 
 // serveNodeGroups writes the final node-group view. In local mode it first
@@ -410,18 +602,21 @@ func (s *Server) serveNodeGroups(w http.ResponseWriter, resp *brokerapi.NodeGrou
 
 // nodeGroups returns the node-group view to serve: built by the local brain in
 // local mode, fetched from the Broker in central mode. Everything after it
-// (latency re-mask, ConsumerChoice) is the same in both modes. bound is a
-// per-request latency bound (nil for none); only the local brain applies it,
-// the central Broker does not support bounds.
-func (s *Server) nodeGroups(
-	ctx context.Context, bound *autoscalingv1alpha1.LatencyBound,
-) (*brokerapi.NodeGroupListResponse, error) {
+// (latency re-mask, ConsumerChoice) is the same in both modes. q carries a
+// ResourceRequest's own latency bound and text; only the local brain applies
+// them here (the central Broker supports neither). A per-request text makes the
+// brain return every provider unmasked, for the AI to rank.
+func (s *Server) nodeGroups(ctx context.Context, q NodeGroupQuery) (*brokerapi.NodeGroupListResponse, error) {
 	if s.brain != nil {
-		return s.brain.NodeGroupsWithin(ctx, bound)
+		var placement *autoscalingv1alpha1.PlacementPolicy
+		if q.Prompt != "" && s.ollama != nil {
+			placement = &autoscalingv1alpha1.PlacementPolicy{Type: autoscalingv1alpha1.PlacementStrategyConsumerChoice}
+		}
+		return s.brain.NodeGroupsFor(ctx, q.Bound, placement)
 	}
-	if bound != nil {
+	if q.Bound != nil {
 		s.log.V(1).Info("latency bound ignored: the central Broker does not apply bounds (use --brain=local)",
-			"maxLatencyMs", bound.MaxLatencyMs)
+			"maxLatencyMs", q.Bound.MaxLatencyMs)
 	}
 	return s.client.GetNodeGroups(ctx)
 }
@@ -465,8 +660,7 @@ func (s *Server) maskToMeasuredWinner(ctx context.Context, resp *brokerapi.NodeG
 // for them, and the ConsumerChoice end-to-end suite reads them to learn what the
 // agent's own LLM call decided.
 const (
-	SelectionFinishedMessage  = "ConsumerChoice selection finished"
-	SelectionDiscardedMessage = "ConsumerChoice selection discarded: prompt changed"
+	SelectionFinishedMessage = "ConsumerChoice selection finished"
 	// SelectionSourceAI: the ranking is the model's. SelectionSourceFallback:
 	// the model could not be used (unreachable, timeout, invalid answer) and the
 	// deterministic ranking was used instead.
@@ -494,21 +688,34 @@ func completeRanking(ranked []string, groups []brokerapi.NodeGroupView) []string
 	return out
 }
 
-// maskToFirstAvailable iterates the ranked provider list in order and picks the
-// first provider that has available capacity (MaxSize > CurrentReserved),
-// masking all others. If no provider in the list has capacity, everything is
-// masked (CA waits).
-func maskToFirstAvailable(resp *brokerapi.NodeGroupListResponse, ranked []string) {
-	chosen := ""
-	capacity := map[string]bool{}
+// maskToFirstFitting keeps growable only the first provider in ranked order
+// that can hold need, masking every other provider. A provider fits when one of
+// its node groups has the right chunk type (GPU or not) and enough free chunks
+// for need; an empty need fits any free capacity. When nobody fits, everything
+// is masked (the caller waits).
+func maskToFirstFitting(resp *brokerapi.NodeGroupListResponse, ranked []string, need corev1.ResourceList) {
+	fits := map[string]bool{}
+	wantGPU := chunk.WantsGPU(need)
 	for i := range resp.NodeGroups {
 		ng := &resp.NodeGroups[i]
-		if ng.MaxSize-ng.CurrentReserved > 0 {
-			capacity[ng.ProviderClusterID] = true
+		free := ng.MaxSize - ng.CurrentReserved
+		if free <= 0 {
+			continue
+		}
+		if len(need) == 0 {
+			fits[ng.ProviderClusterID] = true
+			continue
+		}
+		if wantGPU != (ng.Type == brokerv1alpha1.ChunkTypeGPU) {
+			continue
+		}
+		if n := chunk.CountFor(need, ng.ChunkResources); n > 0 && n <= free {
+			fits[ng.ProviderClusterID] = true
 		}
 	}
+	chosen := ""
 	for _, id := range ranked {
-		if capacity[id] {
+		if fits[id] {
 			chosen = id
 			break
 		}

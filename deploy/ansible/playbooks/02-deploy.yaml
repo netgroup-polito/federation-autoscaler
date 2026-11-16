@@ -27,6 +27,17 @@
         name: k3s_install
         tasks_from: fetch_kubeconfig
 
+# Re-apply the CRDs on every redeploy, not only at bootstrap: a release that
+# adds a field to a CRD would otherwise run against the old schema, and the API
+# server silently drops the new field (e.g. ResourceRequest.spec.userPrompt).
+# `kubectl apply` is idempotent, so an unchanged CRD is a no-op.
+- name: Apply federation-autoscaler CRDs on every cluster
+  hosts: central:consumers:providers
+  gather_facts: false
+  become: false
+  roles:
+    - fa_crds
+
 - name: Deploy broker on central
   hosts: central
   gather_facts: false

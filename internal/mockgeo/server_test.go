@@ -62,6 +62,7 @@ func TestLongestPrefixMatch(t *testing.T) {
 		{"172.23.30.70", "PIE", "Alba"},
 		{"172.23.30.130", "PIE", "Turin"},
 		{"172.23.30.200", "PIE", "Asti"},
+		{"172.23.31.10", "PIE", "Mondovì"},
 	}
 	for _, c := range cases {
 		got := serve(t, c.ip)

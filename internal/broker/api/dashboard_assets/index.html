@@ -15,7 +15,7 @@
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <title>Broker Dashboard — Federation Autoscaler</title>
+  <title>Federation Dashboard — Federation Autoscaler</title>
   <style>
     :root {
       --bg: #0f1419;
@@ -100,6 +100,7 @@
     tbody tr:last-child td { border-bottom: none; }
     tbody tr:hover { background: rgba(255,255,255,.025); }
     td.mono, .mono { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
+    .muted-line { color: var(--muted); font-size: 12px; margin-top: 2px; }
     .empty { padding: 14px 12px; color: var(--muted); font-style: italic; }
 
     .pill {
@@ -118,7 +119,7 @@
 </head>
 <body>
   <header>
-    <h1>Broker Dashboard</h1>
+    <h1>Federation Dashboard</h1>
     <span class="ns" id="namespace"></span>
     <span class="badge ro">read-only</span>
     <span class="spacer"></span>
@@ -358,7 +359,12 @@
       by.style.marginLeft = "8px";
       by.textContent = cc.source === "ai" ? "AI" : "fallback";
       rank.appendChild(by);
-      cell.append(req, rank);
+      const how = document.createElement("div");
+      how.className = "muted-line";
+      how.textContent = cc.perRequest
+        ? "reserve now" + (cc.requested ? ": " + cc.requested : "")
+        : "on demand (autoscaler)";
+      cell.append(req, rank, how);
       cell.title = "decided at " + fmtTime(cc.decidedAt);
       return cell;
     }

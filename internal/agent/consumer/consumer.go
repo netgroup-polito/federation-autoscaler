@@ -341,6 +341,7 @@ func Run(ctx context.Context, opts Options) error {
 			AdvertisedIP:  opts.AdvertisedIP,
 			MockGeoURL:    opts.MockGeoURL,
 			Prober:        prober,
+			Ollama:        ollamaClient,
 			Logger:        logger.WithName("console"),
 		})
 		if err != nil {

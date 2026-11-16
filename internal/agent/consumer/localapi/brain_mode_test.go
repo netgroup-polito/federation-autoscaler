@@ -145,3 +145,53 @@ func TestLocalBrainMode(t *testing.T) {
 		t.Error("local mode must read this consumer's own reservations")
 	}
 }
+
+// TestLocalBrainMode_PerRequestPrompt: in local mode a ResourceRequest's own
+// text makes the brain return every provider unmasked, even under a Price
+// policy, and the AI's pick (here the dearer provider) is what stays growable.
+// The plain Cluster Autoscaler read keeps the Price decision.
+func TestLocalBrainMode_PerRequestPrompt(t *testing.T) {
+	fb := newFakeBroker(t)
+	fb.setHandler(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", brokerapi.ContentTypeJSON)
+		_ = json.NewEncoder(w).Encode(brokerapi.ReservationListResponse{Reservations: []brokerapi.ReservationResponse{}})
+	})
+	cat := catalog.NewMemoryCatalog()
+	for _, o := range []catalog.Offer{pricedOffer("p-cheap", "0.01"), pricedOffer("p-dear", "0.09")} {
+		if err := cat.UpsertOffer(context.Background(), o); err != nil {
+			t.Fatal(err)
+		}
+	}
+	client := fb.buildClient(t)
+	kube := newFakeKubeClient(&autoscalingv1alpha1.ConsumerPolicy{
+		ObjectMeta: metav1.ObjectMeta{Name: "default", Namespace: "federation-autoscaler-system"},
+		Spec: autoscalingv1alpha1.ConsumerPolicySpec{
+			Placement: autoscalingv1alpha1.PlacementPolicy{Type: autoscalingv1alpha1.PlacementStrategyPrice},
+		},
+	})
+	b, err := brain.New(brain.Options{
+		Catalog: cat, Reservations: client, LocalClient: kube, Namespace: "federation-autoscaler-system",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	llm := &fakeOllama{answer: func(int) string { return ranking("p-dear", "p-cheap") }}
+	s, err := New(Options{
+		BindAddress:  "127.0.0.1:0",
+		Client:       client,
+		LocalClient:  kube,
+		Namespace:    "federation-autoscaler-system",
+		Brain:        b,
+		OllamaClient: llm.client(t),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ts := httptest.NewServer(s.Handler())
+	t.Cleanup(ts.Close)
+
+	eventuallyQ(t, ts, NodeGroupQuery{Prompt: "the most reliable one"}, onlyGrowable("p-dear"))
+	if hr := headroom(getNodeGroups(t, ts)); hr["p-cheap"] != 3 || hr["p-dear"] != 0 {
+		t.Errorf("the plain read must keep the Price decision, head-room %v", hr)
+	}
+}

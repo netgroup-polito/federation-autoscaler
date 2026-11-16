@@ -97,6 +97,10 @@ var geoTable = []geoRow{
 	{[]string{"172.23.30.128/26"}, GeoResponse{ContinentCode: "EU", CountryCode: "IT", Region: "PIE", RegionName: "Piedmont", City: "Turin", Lat: 45.0703, Lon: 7.6869, ISP: "Mock ISP", Org: "Mock Org", AS: "AS64512 Mock"}},
 	{[]string{"172.23.30.192/26"}, GeoResponse{ContinentCode: "EU", CountryCode: "IT", Region: "PIE", RegionName: "Piedmont", City: "Asti", Lat: 44.9008, Lon: 8.2064, ISP: "Mock ISP", Org: "Mock Org", AS: "AS64512 Mock"}},
 
+	// 172.23.31.0/24 — more of Piedmont: a consumer site that is not also a
+	// provider site (Mondovì: ~22 km from Cuneo, ~76 km from Turin).
+	{[]string{"172.23.31.0/26"}, GeoResponse{ContinentCode: "EU", CountryCode: "IT", Region: "PIE", RegionName: "Piedmont", City: "Mondovì", Lat: 44.3912, Lon: 7.8197, ISP: "Mock ISP", Org: "Mock Org", AS: "AS64512 Mock"}},
+
 	// Default: any IP outside the known private subnets → no location.
 	{[]string{"0.0.0.0/0"}, GeoResponse{}},
 }

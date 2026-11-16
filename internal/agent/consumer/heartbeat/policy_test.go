@@ -175,3 +175,29 @@ func TestHeartbeater_ReportsConsumerChoiceOnlyUnderThatPolicy(t *testing.T) {
 		})
 	}
 }
+
+// A decision made for a ResourceRequest's own text is reported whatever the
+// policy: the reservation is real even when the consumer runs Price.
+func TestHeartbeater_ReportsPerRequestChoiceUnderAnyPolicy(t *testing.T) {
+	report := &brokerapi.ConsumerChoiceReport{
+		Prompt: "closest to me", Ranked: []string{"p1"}, Source: brokerapi.ChoiceSourceAI, PerRequest: true,
+	}
+	fb := newFakeBroker(t)
+	h, err := New(Options{
+		Client:         fb.buildClient(t),
+		ClusterID:      "c",
+		LiqoClusterID:  "l",
+		LocalClient:    policyFakeClient(t, pricePolicyObj("default")),
+		Namespace:      policyTestNS,
+		Interval:       time.Hour,
+		ConsumerChoice: func() *brokerapi.ConsumerChoiceReport { return report },
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	h.beatOnce(context.Background())
+	posted := fb.snapshotPosted()
+	if len(posted) != 1 || posted[0].ConsumerChoice == nil || !posted[0].ConsumerChoice.PerRequest {
+		t.Fatalf("heartbeat = %+v, want the per-request decision under the Price policy", posted)
+	}
+}

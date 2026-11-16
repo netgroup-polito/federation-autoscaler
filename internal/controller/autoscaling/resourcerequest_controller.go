@@ -32,7 +32,9 @@ import (
 
 	autoscalingv1alpha1 "github.com/netgroup-polito/federation-autoscaler/api/autoscaling/v1alpha1"
 	brokerv1alpha1 "github.com/netgroup-polito/federation-autoscaler/api/broker/v1alpha1"
+	"github.com/netgroup-polito/federation-autoscaler/internal/agent/consumer/localapi"
 	brokerapi "github.com/netgroup-polito/federation-autoscaler/internal/broker/api"
+	"github.com/netgroup-polito/federation-autoscaler/internal/broker/chunk"
 	"github.com/netgroup-polito/federation-autoscaler/internal/grpcserver/agentclient"
 )
 
@@ -43,7 +45,7 @@ const resourceRequestFinalizer = "autoscaling.federation-autoscaler.io/release-r
 
 // gpuResourceName is the resource key that classifies a request (and a chunk)
 // as GPU-typed.
-const gpuResourceName corev1.ResourceName = "nvidia.com/gpu"
+const gpuResourceName = chunk.GPUResourceName
 
 // pendingRequeue / failedRequeue / holdRequeue bound how often the controller
 // retries a request that could not (yet) be reserved, and how often it re-asserts
@@ -52,6 +54,10 @@ const (
 	pendingRequeue = 15 * time.Second
 	failedRequeue  = 30 * time.Second
 	holdRequeue    = 60 * time.Second
+	// waitingRequeue is the quick retry while the agent's AI is still choosing
+	// (or the ConsumerChoice policy is still taking effect): the answer usually
+	// comes within seconds.
+	waitingRequeue = 3 * time.Second
 )
 
 // scaleDownDisabledAnnotation is the well-known Cluster Autoscaler node
@@ -89,11 +95,28 @@ type boundedNodeGroups interface {
 	) (*brokerapi.NodeGroupListResponse, error)
 }
 
+// queryNodeGroups is implemented by agent clients that can pass a whole
+// per-request query (*agentclient.Client does): the latency bound, the
+// request's own plain-language text and its size. Optional, like
+// boundedNodeGroups.
+type queryNodeGroups interface {
+	GetNodeGroupsFor(ctx context.Context, q localapi.NodeGroupQuery) (*brokerapi.NodeGroupListResponse, error)
+}
+
 // nodeGroupsFor fetches the node groups for one ResourceRequest, applying its
-// spec.latencyBound (which overrides the ConsumerPolicy bound in local mode).
+// spec.latencyBound (which overrides the ConsumerPolicy bound in local mode),
+// its spec.userPrompt (the local AI ranks the providers for that text) and its
+// size (the choice skips providers that cannot hold it).
 func (r *ResourceRequestReconciler) nodeGroupsFor(
 	ctx context.Context, rr *autoscalingv1alpha1.ResourceRequest,
 ) (*brokerapi.NodeGroupListResponse, error) {
+	if q, ok := r.Agent.(queryNodeGroups); ok {
+		return q.GetNodeGroupsFor(ctx, localapi.NodeGroupQuery{
+			Bound:  rr.Spec.LatencyBound,
+			Prompt: rr.Spec.UserPrompt,
+			Need:   rr.Spec.Resources,
+		})
+	}
 	if rr.Spec.LatencyBound != nil {
 		if b, ok := r.Agent.(boundedNodeGroups); ok {
 			return b.GetNodeGroupsWithin(ctx, rr.Spec.LatencyBound)
@@ -143,16 +166,15 @@ func (r *ResourceRequestReconciler) Reconcile(ctx context.Context, req ctrl.Requ
 	// Deletion: release the reservation, then drop the finalizer.
 	if !rr.DeletionTimestamp.IsZero() {
 		if controllerutil.ContainsFinalizer(&rr, resourceRequestFinalizer) {
-			if rr.Status.ReservationID != "" {
+			for _, id := range heldReservationIDs(&rr) {
 				// A NotFound means the reservation is already gone (e.g. it was
 				// released before this fix, or a race) — treat it as released so the
 				// finalizer can be dropped instead of getting stuck retrying.
-				if _, err := r.Agent.DeleteReservation(ctx, rr.Status.ReservationID); err != nil && !agentclient.IsNotFound(err) {
-					log.Error(err, "releasing manual reservation failed; will retry",
-						"reservationId", rr.Status.ReservationID)
+				if _, err := r.Agent.DeleteReservation(ctx, id); err != nil && !agentclient.IsNotFound(err) {
+					log.Error(err, "releasing manual reservation failed; will retry", "reservationId", id)
 					return ctrl.Result{}, err
 				}
-				log.V(1).Info("released manual reservation", "reservationId", rr.Status.ReservationID)
+				log.V(1).Info("released manual reservation", "reservationId", id)
 			}
 			controllerutil.RemoveFinalizer(&rr, resourceRequestFinalizer)
 			if err := r.Update(ctx, &rr); err != nil {
@@ -193,43 +215,90 @@ func (r *ResourceRequestReconciler) Reconcile(ctx context.Context, req ctrl.Requ
 	}
 	group, count, ok := pickProviderAndSize(resp.NodeGroups, rr.Spec.Resources)
 	if !ok {
+		if resp.Waiting != "" {
+			// Not "no capacity": the agent's AI is still deciding.
+			return r.setWaiting(ctx, &rr, resp.Waiting)
+		}
+		if b := rr.Spec.LatencyBound; b != nil {
+			return r.setPending(ctx, &rr, fmt.Sprintf("no provider with enough free capacity within %d ms yet", b.MaxLatencyMs))
+		}
 		return r.setPending(ctx, &rr, "no provider with enough free capacity yet")
 	}
-	if msg, tooBig := multiChunkUnsupported(count); tooBig {
+	if msg, tooBig := blocksOverLimit(count); tooBig {
 		return r.setPending(ctx, &rr, msg)
 	}
 
-	resReq := &brokerapi.ReservationRequest{
-		ProviderClusterID: group.ProviderClusterID,
-		NodeGroupID:       group.ID,
-		ChunkCount:        count,
-		ChunkType:         group.Type,
-	}
-	if _, err := r.Agent.PostReservation(ctx, reservationID, resReq); err != nil {
+	ids := blockReservationIDs(reservationID, count)
+	if err := r.reserveBlocks(ctx, ids, group); err != nil {
 		return r.setFailed(ctx, &rr, "reservation failed: "+err.Error())
 	}
 	log.V(1).Info("created manual reservation",
-		"reservationId", reservationID, "provider", group.ProviderClusterID, "chunks", count)
-	return r.setReserved(ctx, &rr, reservationID, group.ProviderClusterID, count)
+		"reservationIds", ids, "provider", group.ProviderClusterID, "nodes", count)
+	return r.setReserved(ctx, &rr, ids, group.ProviderClusterID, count)
 }
 
-// multiChunkUnsupported reports whether a request sized to `count` chunks
-// exceeds what a manual reservation can currently hold, with the message to
-// surface when it does.
-//
-// A Reservation is exactly one chunk (one ResourceSlice, one node). The
-// Cluster-Autoscaler path covers a delta of N by making N reservations, but a
-// ResourceRequest tracks a SINGLE Status.ReservationID — which the re-eval /
-// migration machinery is built on — so fanning it out is a follow-up. Until
-// then, say so plainly rather than silently reserving less than asked.
-func multiChunkUnsupported(count int32) (string, bool) {
-	if count <= 1 {
+// reserveBlocks makes one single-block reservation per id on group's provider,
+// all or nothing: when one fails, the ones already made are released and the
+// error is returned. The ids are deterministic, so a retry re-posts the same
+// ones and the broker deduplicates them.
+func (r *ResourceRequestReconciler) reserveBlocks(
+	ctx context.Context, ids []string, group *brokerapi.NodeGroupView,
+) error {
+	for i, id := range ids {
+		req := &brokerapi.ReservationRequest{
+			ProviderClusterID: group.ProviderClusterID,
+			NodeGroupID:       group.ID,
+			ChunkCount:        1, // one reservation = one block = one node
+			ChunkType:         group.Type,
+		}
+		if _, err := r.Agent.PostReservation(ctx, id, req); err != nil {
+			for _, done := range ids[:i] {
+				if _, derr := r.Agent.DeleteReservation(ctx, done); derr != nil && !agentclient.IsNotFound(derr) {
+					ctrl.LoggerFrom(ctx).Error(derr, "rolling back a partial request failed; a retry reuses it",
+						"reservationId", done)
+				}
+			}
+			return fmt.Errorf("node %d of %d: %w", i+1, len(ids), err)
+		}
+	}
+	return nil
+}
+
+// blockReservationIDs returns the reservation ids for a request of count
+// blocks: first, then first-c1, first-c2, ...
+func blockReservationIDs(first string, count int32) []string {
+	ids := []string{first}
+	for i := int32(1); i < count; i++ {
+		ids = append(ids, fmt.Sprintf("%s-c%d", first, i))
+	}
+	return ids
+}
+
+// heldReservationIDs returns every reservation the request holds: the
+// multi-block list when there is one, else the single ReservationID (or none).
+func heldReservationIDs(rr *autoscalingv1alpha1.ResourceRequest) []string {
+	if len(rr.Status.ReservationIDs) > 0 {
+		return rr.Status.ReservationIDs
+	}
+	if rr.Status.ReservationID != "" {
+		return []string{rr.Status.ReservationID}
+	}
+	return nil
+}
+
+// maxBlocksPerRequest caps how many node-sized blocks one request may hold,
+// so a single request cannot take a large share of the federation.
+const maxBlocksPerRequest = 4
+
+// blocksOverLimit reports whether a request sized to count blocks exceeds
+// maxBlocksPerRequest, with the message to surface when it does.
+func blocksOverLimit(count int32) (string, bool) {
+	if count <= maxBlocksPerRequest {
 		return "", false
 	}
 	return fmt.Sprintf(
-		"request needs %d chunks; a manual reservation currently covers exactly one chunk — "+
-			"lower spec.resources to fit one chunk, or create %d separate ResourceRequests",
-		count, count), true
+		"request needs %d nodes; at most %d per request — lower spec.resources or split it into several requests",
+		count, maxBlocksPerRequest), true
 }
 
 // pickProviderAndSize chooses the growable node group with the most free
@@ -262,35 +331,14 @@ func pickProviderAndSize(groups []brokerapi.NodeGroupView, req corev1.ResourceLi
 	return best, bestCount, true
 }
 
-// chunksFor rounds a request UP to whole chunks: for each requested resource,
-// ceil(requested / per-chunk), taking the max across resources. Returns 0 when a
-// requested resource is absent from the chunk (that group cannot satisfy it).
-func chunksFor(req, chunk corev1.ResourceList) int32 {
-	var n int64
-	for name, q := range req {
-		rv := q.MilliValue()
-		if rv <= 0 {
-			continue
-		}
-		cq, ok := chunk[name]
-		cv := cq.MilliValue()
-		if !ok || cv <= 0 {
-			return 0
-		}
-		if need := (rv + cv - 1) / cv; need > n {
-			n = need
-		}
-	}
-	if n < 1 {
-		return 0
-	}
-	return int32(n)
+// chunksFor rounds a request UP to whole chunks (see chunk.CountFor).
+func chunksFor(req, perChunk corev1.ResourceList) int32 {
+	return chunk.CountFor(req, perChunk)
 }
 
 // gpuRequested reports whether the request asks for at least one GPU.
 func gpuRequested(req corev1.ResourceList) bool {
-	q, ok := req[gpuResourceName]
-	return ok && q.MilliValue() > 0
+	return chunk.WantsGPU(req)
 }
 
 // -----------------------------------------------------------------------------
@@ -304,6 +352,15 @@ func (r *ResourceRequestReconciler) setPending(ctx context.Context, rr *autoscal
 	return ctrl.Result{RequeueAfter: pendingRequeue}, nil
 }
 
+// setWaiting keeps the request Pending with the agent's reason (the AI is
+// choosing, or the ConsumerChoice policy is taking effect) and retries soon.
+func (r *ResourceRequestReconciler) setWaiting(ctx context.Context, rr *autoscalingv1alpha1.ResourceRequest, reason string) (ctrl.Result, error) {
+	if err := r.writePhase(ctx, rr, autoscalingv1alpha1.ResourceRequestPending, reason, "", "", 0); err != nil {
+		return ctrl.Result{}, err
+	}
+	return ctrl.Result{RequeueAfter: waitingRequeue}, nil
+}
+
 func (r *ResourceRequestReconciler) setFailed(ctx context.Context, rr *autoscalingv1alpha1.ResourceRequest, msg string) (ctrl.Result, error) {
 	if err := r.writePhase(ctx, rr, autoscalingv1alpha1.ResourceRequestFailed, msg, "", "", 0); err != nil {
 		return ctrl.Result{}, err
@@ -311,9 +368,14 @@ func (r *ResourceRequestReconciler) setFailed(ctx context.Context, rr *autoscali
 	return ctrl.Result{RequeueAfter: failedRequeue}, nil
 }
 
-func (r *ResourceRequestReconciler) setReserved(ctx context.Context, rr *autoscalingv1alpha1.ResourceRequest, resID, provider string, count int32) (ctrl.Result, error) {
-	msg := fmt.Sprintf("reserved %d chunk(s) on %s", count, provider)
-	if err := r.writePhase(ctx, rr, autoscalingv1alpha1.ResourceRequestReserved, msg, resID, provider, count); err != nil {
+func (r *ResourceRequestReconciler) setReserved(ctx context.Context, rr *autoscalingv1alpha1.ResourceRequest, ids []string, provider string, count int32) (ctrl.Result, error) {
+	msg := fmt.Sprintf("reserved %d node(s) on %s", count, provider)
+	if len(ids) > 1 {
+		rr.Status.ReservationIDs = ids
+	} else {
+		rr.Status.ReservationIDs = nil
+	}
+	if err := r.writePhase(ctx, rr, autoscalingv1alpha1.ResourceRequestReserved, msg, ids[0], provider, count); err != nil {
 		return ctrl.Result{}, err
 	}
 	// Requeue so we can protect the node(s) once Liqo materialises them.
@@ -388,6 +450,14 @@ func (r *ResourceRequestReconciler) maybeStartMigration(ctx context.Context, rr 
 	if r.ReEvalInterval <= 0 {
 		return ctrl.Result{}, false, nil // re-eval disabled
 	}
+	if rr.Spec.UserPrompt != "" {
+		// Placed by the AI for its own text: there is no stable metric to
+		// compare, and asking again would only re-run the model.
+		return ctrl.Result{}, false, nil
+	}
+	if len(rr.Status.ReservationIDs) > 1 {
+		return ctrl.Result{}, false, nil // multi-node requests stay where they are
+	}
 	if rr.Status.LastTransitionTime != nil && time.Since(rr.Status.LastTransitionTime.Time) < r.ReEvalInterval {
 		return ctrl.Result{}, false, nil // debounced: too soon since the last transition
 	}
@@ -458,11 +528,11 @@ func (r *ResourceRequestReconciler) completeMigration(ctx context.Context, rr *a
 		}
 		return ctrl.Result{RequeueAfter: pendingRequeue}, nil
 	}
-	if msg, tooBig := multiChunkUnsupported(count); tooBig {
+	if count != 1 {
 		// Only reachable if the winning provider's chunk shape shrank mid-flight.
 		// The old reservation is already released, so stay Migrating and retry.
 		if err := r.writePhase(ctx, rr, autoscalingv1alpha1.ResourceRequestMigrating,
-			"migrating — "+msg, "", "", 0); err != nil {
+			"migrating — the request no longer fits one node there", "", "", 0); err != nil {
 			return ctrl.Result{}, err
 		}
 		return ctrl.Result{RequeueAfter: pendingRequeue}, nil
@@ -478,7 +548,7 @@ func (r *ResourceRequestReconciler) completeMigration(ctx context.Context, rr *a
 	}
 	log.Info("re-eval: migration complete",
 		"provider", group.ProviderClusterID, "reservationId", rr.Status.ReservationID, "chunks", count)
-	return r.setReserved(ctx, rr, rr.Status.ReservationID, group.ProviderClusterID, count)
+	return r.setReserved(ctx, rr, []string{rr.Status.ReservationID}, group.ProviderClusterID, count)
 }
 
 // setMigrating records the start of a migration: the fresh reservation id, the
@@ -505,14 +575,22 @@ func (r *ResourceRequestReconciler) setMigrating(ctx context.Context, rr *autosc
 // reflects the result in the phase. It never releases anything — release is
 // delete-driven.
 func (r *ResourceRequestReconciler) holdReservation(ctx context.Context, rr *autoscalingv1alpha1.ResourceRequest) (ctrl.Result, error) {
-	protected, err := r.protectReservationNodes(ctx, rr.Status.ReservationID)
-	if err != nil {
-		return ctrl.Result{}, err
+	ids := heldReservationIDs(rr)
+	protected := 0
+	for _, id := range ids {
+		n, err := r.protectReservationNodes(ctx, id)
+		if err != nil {
+			return ctrl.Result{}, err
+		}
+		protected += n
 	}
-	if protected == 0 {
-		// The virtual node has not materialised yet; check again shortly.
-		if err := r.writePhase(ctx, rr, autoscalingv1alpha1.ResourceRequestReserved,
-			"reserved on "+rr.Status.ProviderClusterID+"; waiting for the virtual node", "", "", 0); err != nil {
+	if protected < len(ids) {
+		// Not every virtual node has materialised yet; check again shortly.
+		msg := "reserved on " + rr.Status.ProviderClusterID + "; waiting for the virtual node"
+		if len(ids) > 1 {
+			msg = fmt.Sprintf("reserved on %s; %d of %d virtual nodes ready", rr.Status.ProviderClusterID, protected, len(ids))
+		}
+		if err := r.writePhase(ctx, rr, autoscalingv1alpha1.ResourceRequestReserved, msg, "", "", 0); err != nil {
 			return ctrl.Result{}, err
 		}
 		return ctrl.Result{RequeueAfter: pendingRequeue}, nil

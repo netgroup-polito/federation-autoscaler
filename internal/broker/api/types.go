@@ -328,6 +328,12 @@ type ConsumerChoiceReport struct {
 	Source string `json:"source"`
 	// DecidedAt is when the ranking was made.
 	DecidedAt metav1.Time `json:"decidedAt"`
+	// PerRequest is true when the text is a ResourceRequest's own (a capacity
+	// reservation), false when it is the ConsumerPolicy's.
+	PerRequest bool `json:"perRequest,omitempty"`
+	// Requested is the size the reservation asked for, e.g. "4 CPU, 8Gi
+	// memory" (PerRequest only; empty when unknown).
+	Requested string `json:"requested,omitempty"`
 }
 
 // ConsumerChoiceReport.Source values.
@@ -341,6 +347,7 @@ const (
 const (
 	maxChoiceRanked    = 64
 	maxChoicePromptLen = 2048
+	maxChoiceSizeLen   = 256
 	maxClusterIDLen    = 253
 )
 
@@ -411,10 +418,23 @@ type NodeGroupListResponse struct {
 	// manual-reservation re-eval loop (feature 7) reads it to migrate only under a
 	// stable-metric policy (Price/Eco/Latency), never Standard.
 	AppliedPlacement autoscalingv1alpha1.PlacementStrategy `json:"appliedPlacement,omitempty"`
-	Generation       int64                                 `json:"generation"`
-	ServedAt         metav1.Time                           `json:"servedAt"`
-	CacheAgeSeconds  int32                                 `json:"cacheAgeSeconds"`
+	// Waiting, when not empty, says why nothing in this list is growable for
+	// now even though providers may have room: the consumer's local AI is
+	// still choosing (WaitingAIChoosing), or the Broker has not applied the
+	// ConsumerChoice policy yet (WaitingPolicyApplying). Set only by the
+	// Consumer Agent's local API; a caller should ask again in a few seconds
+	// instead of concluding there is no capacity.
+	Waiting         string      `json:"waiting,omitempty"`
+	Generation      int64       `json:"generation"`
+	ServedAt        metav1.Time `json:"servedAt"`
+	CacheAgeSeconds int32       `json:"cacheAgeSeconds"`
 }
+
+// NodeGroupListResponse.Waiting values.
+const (
+	WaitingAIChoosing     = "the AI is choosing a provider"
+	WaitingPolicyApplying = "waiting for the ConsumerChoice policy to take effect"
+)
 
 // -----------------------------------------------------------------------------
 // 7.3.5 — POST /api/v1/reservations   (Consumer Agent → Broker, synchronous)

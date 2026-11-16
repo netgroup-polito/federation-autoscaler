@@ -328,6 +328,43 @@
     #toast.err {
       border-color: var(--red);
     }
+    .rq-status {
+      background: var(--panel-2);
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      padding: 12px 14px;
+      margin-top: 14px;
+      font-size: 13px;
+      line-height: 1.7;
+    }
+
+    .rq-status .k {
+      color: var(--muted);
+      display: inline-block;
+      min-width: 92px;
+    }
+
+    .rq-phase {
+      font-size: 11px;
+      font-weight: 700;
+      padding: 1px 7px;
+      border-radius: 4px;
+      margin-left: 6px;
+      background: rgba(210, 153, 34, .15);
+      color: var(--amber);
+    }
+
+    .rq-phase.ok {
+      background: rgba(63, 185, 80, .15);
+      color: var(--green);
+    }
+
+    details.rq-amount summary {
+      cursor: pointer;
+      color: var(--muted);
+      font-size: 12px;
+      margin: 12px 0 8px;
+    }
   </style>
 </head>
 
@@ -343,6 +380,30 @@
   </header>
 
   <main>
+    <!-- Plain-language request -->
+    <section>
+      <h2>Request capacity in plain language</h2>
+      <p class="hint">Say what you need and where; the local AI reads how much, ranks the providers from the
+        catalog and the capacity is borrowed from its first choice.</p>
+      <textarea id="rqText" rows="3"
+        style="width:100%;background:var(--bg);color:var(--fg);border:1px solid var(--border);border-radius:6px;padding:9px 11px;font-size:14px;resize:vertical;font-family:inherit"
+        placeholder="e.g. I need 4 CPUs and 8 GB, as close to me as possible"></textarea>
+      <div class="cards" id="rqModes" style="margin-top:12px"></div>
+      <details class="rq-amount">
+        <summary>Amount (optional: overrides what the AI reads)</summary>
+        <div class="row">
+          <label>CPU <input type="text" id="rqCpu" placeholder="e.g. 4" style="width:6rem;min-width:0"></label>
+          <label>Memory <input type="text" id="rqMem" placeholder="e.g. 8Gi" style="width:7rem;min-width:0"></label>
+          <label>GPU <input type="text" id="rqGpu" placeholder="opt." style="width:4.5rem;min-width:0"></label>
+        </div>
+      </details>
+      <div class="submit-row">
+        <button id="rqSend">Send request</button>
+        <button id="rqRelease" style="background:var(--panel-2);color:var(--fg);border:1px solid var(--border)">Release</button>
+      </div>
+      <div class="rq-status" id="rqStatus" style="display:none"></div>
+    </section>
+
     <!-- Placement policy -->
     <section>
       <h2>Placement policy</h2>
@@ -595,6 +656,97 @@
         await loadState();
       } catch (e) { toast(e.message, true); }
     };
+
+    // ---- plain-language request panel ------------------------------------
+    const MODES = [
+      { value: "reserve", t: "Reserve now", d: "Reserve the capacity at once, no workload needed." },
+      { value: "ondemand", t: "On demand (autoscaler)", d: "A workload of that size starts; the autoscaler borrows the nodes." },
+    ];
+    let selectedMode = "reserve";
+    function renderModes() {
+      const box = document.getElementById("rqModes");
+      box.replaceChildren();
+      for (const m of MODES) {
+        const el = document.createElement("div");
+        el.className = "opt" + (m.value === selectedMode ? " sel" : "");
+        const t = document.createElement("div"); t.className = "t"; t.textContent = m.t;
+        const d = document.createElement("div"); d.className = "d"; d.textContent = m.d;
+        el.append(t, d);
+        el.onclick = () => { selectedMode = m.value; renderModes(); };
+        box.appendChild(el);
+      }
+    }
+    const SOURCE = { ai: "read by the AI", text: "read from the text", form: "from the amount fields", default: "default size" };
+    function statusLine(k, v, phase, ok) {
+      const row = document.createElement("div");
+      const key = document.createElement("span"); key.className = "k"; key.textContent = k;
+      const val = document.createElement("span"); val.textContent = v;
+      row.append(key, val);
+      if (phase) {
+        const p = document.createElement("span");
+        p.className = "rq-phase" + (ok ? " ok" : "");
+        p.textContent = phase;
+        row.appendChild(p);
+      }
+      return row;
+    }
+    function renderRequest(v) {
+      const box = document.getElementById("rqStatus");
+      if (!v || !v.text && !v.active) { box.style.display = "none"; return; }
+      box.style.display = "block";
+      box.replaceChildren();
+      box.appendChild(statusLine("Request", "\u201C" + (v.text || "") + "\u201D"));
+      if (v.understood) {
+        const nodes = v.nodes ? " \u2192 " + v.nodes + (v.nodes === 1 ? " node" : " nodes") : "";
+        box.appendChild(statusLine("Understood", v.understood + nodes + (v.source ? " (" + (SOURCE[v.source] || v.source) + ")" : "")));
+      }
+      const mode = v.mode === "ondemand" ? "On demand (autoscaler)" : "Reserve now";
+      box.appendChild(statusLine("Mode", mode));
+      if (v.mode === "ondemand" && v.active) {
+        box.appendChild(statusLine("Status", v.status || "", v.ready === v.nodes && v.nodes ? "Ready" : "Scaling", v.ready === v.nodes && v.nodes > 0));
+      } else {
+        const ok = v.phase === "Active";
+        box.appendChild(statusLine("Status", (v.provider ? v.provider + ": " : "") + (v.status || ""), v.active ? (v.phase || "Pending") : "", ok));
+      }
+      document.getElementById("rqSend").disabled = !!v.active;
+    }
+    async function loadRequest() {
+      try {
+        const res = await fetch("/api/request", { cache: "no-store" });
+        if (res.ok) renderRequest(await res.json());
+      } catch (e) { /* keep the last view */ }
+    }
+    document.getElementById("rqSend").onclick = async () => {
+      const body = {
+        action: "send",
+        text: document.getElementById("rqText").value,
+        mode: selectedMode,
+        cpu: document.getElementById("rqCpu").value.trim(),
+        memory: document.getElementById("rqMem").value.trim(),
+        gpu: document.getElementById("rqGpu").value.trim(),
+      };
+      const btn = document.getElementById("rqSend");
+      btn.disabled = true;
+      btn.textContent = "Reading the request\u2026";
+      try {
+        await postJSON("/api/request", body);
+        toast("Request sent \u2014 the AI is choosing a provider");
+      } catch (e) { toast(e.message, true); }
+      btn.textContent = "Send request";
+      await loadRequest();
+      await loadState();
+    };
+    document.getElementById("rqRelease").onclick = async () => {
+      try {
+        await postJSON("/api/request", { action: "release" });
+        toast("Released \u2014 the borrowed capacity is given back shortly");
+      } catch (e) { toast(e.message, true); }
+      await loadRequest();
+      await loadState();
+    };
+    renderModes();
+    loadRequest();
+    setInterval(loadRequest, 3000);
 
     (async () => {
       try { await loadState(); }
