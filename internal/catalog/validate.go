@@ -49,7 +49,7 @@ func validateKey(providerID, siteID string) error {
 
 // MinTTLSeconds and MaxTTLSeconds bound Offer.TTLSeconds.
 const (
-	MinTTLSeconds = 30
+	MinTTLSeconds = 60
 	MaxTTLSeconds = 3600
 )
 
@@ -65,4 +65,17 @@ func offerTTL(o Offer) (time.Duration, error) {
 			ErrInvalidOffer, o.TTLSeconds, MinTTLSeconds, MaxTTLSeconds)
 	}
 	return time.Duration(o.TTLSeconds) * time.Second, nil
+}
+
+// MaxValiditySeconds is the longest validity a provider can state: 30 days.
+const MaxValiditySeconds = 2592000
+
+// checkValidity rejects a negative or too large ValiditySeconds.
+// 0 means "not stated" and is always allowed.
+func checkValidity(o Offer) error {
+	if o.ValiditySeconds < 0 || o.ValiditySeconds > MaxValiditySeconds {
+		return fmt.Errorf("%w: validitySeconds %d is outside 0..%d",
+			ErrInvalidOffer, o.ValiditySeconds, MaxValiditySeconds)
+	}
+	return nil
 }

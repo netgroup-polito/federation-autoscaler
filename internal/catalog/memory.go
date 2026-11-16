@@ -80,6 +80,9 @@ func (m *MemoryCatalog) UpsertOffer(ctx context.Context, o Offer) error {
 	if err != nil {
 		return err
 	}
+	if err = checkValidity(o); err != nil {
+		return err
+	}
 	data, err := json.Marshal(o)
 	if err != nil {
 		return fmt.Errorf("catalog: encode offer: %w", err)

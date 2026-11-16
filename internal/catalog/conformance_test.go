@@ -179,6 +179,41 @@ func RunCatalogConformance(newBackend func() conformanceBackend) {
 		})
 	}
 
+	for _, c := range []struct {
+		name     string
+		validity int
+	}{
+		{"a negative validitySeconds", -1},
+		{"a validitySeconds above the maximum", MaxValiditySeconds + 1},
+	} {
+		It("rejects "+c.name+" and stores nothing", func() {
+			o := sampleOffer("fibercop", "asti")
+			o.ValiditySeconds = c.validity
+			Expect(b.w.UpsertOffer(ctx, o)).To(MatchError(ErrInvalidOffer))
+
+			_, err := b.r.GetOffer(ctx, "fibercop", "asti")
+			Expect(err).To(MatchError(ErrNotFound))
+		})
+	}
+
+	for _, c := range []struct {
+		name     string
+		validity int
+	}{
+		{"a validitySeconds of 0, meaning not stated", 0},
+		{"the maximum validitySeconds", MaxValiditySeconds},
+	} {
+		It("accepts "+c.name, func() {
+			o := sampleOffer("fibercop", "asti")
+			o.ValiditySeconds = c.validity
+			Expect(b.w.UpsertOffer(ctx, o)).To(Succeed())
+
+			got, err := b.r.GetOffer(ctx, "fibercop", "asti")
+			Expect(err).NotTo(HaveOccurred())
+			Expect(got.ValiditySeconds).To(Equal(c.validity))
+		})
+	}
+
 	It("restarts the TTL when the provider publishes again", func() {
 		o := sampleOffer("fibercop", "asti")
 		Expect(b.w.UpsertOffer(ctx, o)).To(Succeed())
