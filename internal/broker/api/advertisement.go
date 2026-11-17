@@ -126,6 +126,7 @@ func (s *Server) handleAdvertisementUpsert(w http.ResponseWriter, r *http.Reques
 		Accepted:       true,
 		ChunkCount:     chunkResult.Count,
 		ChunkResources: chunkResult.PerChunk,
+		ReservedChunks: cadv.Status.ReservedChunks,
 		NextReportIn:   advertisementReportInterval,
 		Instructions:   instr,
 	})

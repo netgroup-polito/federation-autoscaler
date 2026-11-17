@@ -183,3 +183,23 @@ func TestAdvertisementHandler_NilCatalogDoesNothing(t *testing.T) {
 		t.Fatalf("status = %d, want 200, body = %s", w.Code, w.Body.String())
 	}
 }
+
+func TestAdvertisementHandler_ResponseCarriesReservedChunks(t *testing.T) {
+	existing := &brokerv1alpha1.ClusterAdvertisement{
+		ObjectMeta: metav1.ObjectMeta{Name: catProvider, Namespace: catTestNS},
+		Status:     brokerv1alpha1.ClusterAdvertisementStatus{ReservedChunks: 2},
+	}
+	s := catServer(t, nil, existing)
+
+	w := catPost(t, s, catReq())
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, body = %s", w.Code, w.Body.String())
+	}
+	var body AdvertisementResponse
+	if err := json.Unmarshal(w.Body.Bytes(), &body); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if body.ReservedChunks != 2 {
+		t.Errorf("ReservedChunks = %d, want 2", body.ReservedChunks)
+	}
+}
