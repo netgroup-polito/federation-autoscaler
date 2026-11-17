@@ -76,6 +76,7 @@ type Offer struct {
 	// ValiditySeconds is how long a resource booked from this offer is
 	// guaranteed by the provider. 0 means "not stated". Informational: the
 	// catalog stores it and never enforces it.
+	// Allowed range: 0 to MaxValiditySeconds (30 days).
 	ValiditySeconds int `json:"validitySeconds,omitempty"`
 
 	UpdatedAt time.Time `json:"updatedAt"`
