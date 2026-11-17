@@ -68,6 +68,12 @@ type ResourceRequestSpec struct {
 	UserPrompt string `json:"userPrompt,omitempty"`
 }
 
+// HeldByLabel is set on every borrowed node a ResourceRequest holds, with the
+// request's name as value. A workload that must not use capacity held for
+// someone else's request (the console's On demand workload) avoids nodes that
+// carry it.
+const HeldByLabel = "federation-autoscaler.io/held-by"
+
 // ResourceRequestPhase is the coarse lifecycle state of a manual request.
 type ResourceRequestPhase string
 

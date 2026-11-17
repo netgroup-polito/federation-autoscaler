@@ -189,8 +189,6 @@ type Server struct {
 	log           logr.Logger
 	shutdown      time.Duration
 
-	request requestMemo
-
 	srv *http.Server
 }
 

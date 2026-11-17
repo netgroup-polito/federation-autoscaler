@@ -27,6 +27,7 @@ import (
 	"testing"
 	"time"
 
+	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
 
 	brokerapi "github.com/netgroup-polito/federation-autoscaler/internal/broker/api"
@@ -121,7 +122,7 @@ func TestNodeGroupViewToProviderInfo_CapacityAndIdentity(t *testing.T) {
 // The model reads the cost as text: 52m must reach it as 0.052, not as the
 // 0.052000000000000005 a float conversion yields.
 func TestNodeGroupViewToProviderInfo_CostIsExactDecimal(t *testing.T) {
-	for milli, want := range map[int64]string{52: `"costPerChunk":0.052}`, 26: `"costPerChunk":0.026}`, 70: `"costPerChunk":0.07}`} {
+	for milli, want := range map[int64]string{52: `"costPerChunk":0.052,`, 26: `"costPerChunk":0.026,`, 70: `"costPerChunk":0.07,`} {
 		ng := makeNodeGroup("provider-1", 5, 0, nil, nil, "")
 		ng.Cost = resource.NewMilliQuantity(milli, resource.DecimalSI)
 		before := ng.Cost.String()
@@ -403,5 +404,32 @@ func TestSelectDetailed_ShortcutsWithoutCallingTheModel(t *testing.T) {
 
 	if calls.Load() != 0 {
 		t.Errorf("the model must not be called in either shortcut; it was called %d time(s)", calls.Load())
+	}
+}
+
+// The AI gets the city, the renewable flag (false included), the 6-hour
+// forecast average and the unit prices, as plain numbers.
+func TestNodeGroupViewToProviderInfo_RicherOfferData(t *testing.T) {
+	ng := makeNodeGroup("provider-2", 3, 0, nil, nil, "PIE")
+	ng.Topology.City = "Turin"
+	ng.Renewable = true
+	ng.CarbonForecast = []float64{200, 170, 150, 140, 145, 160, 999}
+	ng.UnitPrices = corev1.ResourceList{
+		corev1.ResourceCPU:    resource.MustParse("25m"),
+		corev1.ResourceMemory: resource.MustParse("3500u"),
+	}
+	body, err := json.Marshal(NodeGroupViewToProviderInfo(ng))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{`"city":"Turin"`, `"renewable":true`, `"carbonForecast6hAvg":160.8`,
+		`"pricePerCpuHour":0.025`, `"pricePerGiBHour":0.0035`} {
+		if !strings.Contains(string(body), want) {
+			t.Errorf("want %s in %s", want, body)
+		}
+	}
+	plain, _ := json.Marshal(NodeGroupViewToProviderInfo(makeNodeGroup("provider-1", 3, 0, nil, nil, "")))
+	if !strings.Contains(string(plain), `"renewable":false`) || strings.Contains(string(plain), "pricePerCpuHour") {
+		t.Errorf("an unpriced, non-renewable provider: %s", plain)
 	}
 }

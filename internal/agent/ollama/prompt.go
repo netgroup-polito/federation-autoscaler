@@ -19,6 +19,7 @@ package ollama
 import (
 	"encoding/json"
 	"fmt"
+	"math"
 	"strconv"
 	"strings"
 
@@ -66,8 +67,12 @@ Provider fields (a field is omitted when the provider does not advertise it):
 - providerId: the identifier to return.
 - carbonIntensity: grams of CO2 emitted per kWh by the provider's electricity grid (gCO2eq/kWh). Lower is greener: 50 is much greener than 500. The greenest provider is the one with the LOWEST carbonIntensity.
 - costPerChunk: price of one chunk for one hour. Lower is cheaper. The cheapest provider is the one with the LOWEST costPerChunk.
+- pricePerCpuHour, pricePerGiBHour: the provider's price for one CPU core, and for one GiB of memory, for one hour. Lower is cheaper.
+- renewable: true when the provider declares that it runs on renewable energy, false otherwise.
+- carbonForecast6hAvg: the average carbon intensity expected over the next 6 hours (gCO2eq/kWh). Lower is greener over the coming hours.
 - availableChunks: free capacity in chunks; availableCpuMillicores and availableMemoryMiB are the same capacity in CPU millicores and MiB.
-- latitude, longitude: where the provider is, in decimal degrees; region: its region code. The closer a provider is to the consumer location, the better for proximity: the farther away, the worse. Coordinates within a few degrees of the consumer's are near; tens of degrees apart are far.
+- city: the provider's city. region: its region code.
+- latitude, longitude: where the provider is, in decimal degrees. The closer a provider is to the consumer location, the better for proximity: the farther away, the worse. Coordinates within a few degrees of the consumer's are near; tens of degrees apart are far.
 - measuredLatencyMs: the round-trip time from the consumer to the provider, measured just now, in milliseconds. Lower is better: 2 is much better than 10. Only the nearest providers are measured; a provider without measuredLatencyMs is farther away and slower than every measured one.
 
 The consumer location, when present, gives the latitude and longitude (decimal degrees) and region code
@@ -76,6 +81,11 @@ of the consumer making the request, in the same form as the providers' location 
 How words in the request map to fields:
 - green, greenest, eco, clean, sustainable, low emissions, low carbon: carbonIntensity, lowest is best.
 - cheap, cheapest, low cost, budget: costPerChunk, lowest is best.
+- cheapest per CPU, per core, per vCPU: pricePerCpuHour, lowest is best (NOT costPerChunk). Cheapest per GB, per GiB, per memory: pricePerGiBHour, lowest is best.
+- renewable, renewables, solar, wind, hydro, green energy: renewable true first, then lowest carbonIntensity.
+- next hours, later today, this afternoon, tonight, upcoming, forecast: carbonForecast6hAvg instead of carbonIntensity.
+- a place named in the request ("in Turin", "at Frankfurt", "near Cuneo"): providers whose city (or region) is that place come FIRST, the others after.
+- a place to avoid ("not in X", "outside X", "except X", "no X"): X can be a city, a region or a country; use what you know about which country each city is in. Providers in X come LAST, below every other provider, even if they are cheaper or greener. Then rank the others by the rest of the request.
 - close, near, nearby, proximity: distance between the consumer location and the provider's latitude/longitude, shortest is best, farthest is worst.
 - latency, low latency, lowest latency, fast, responsive, round-trip: measuredLatencyMs, lowest is best; providers without it come after all measured ones, ordered by distance.
 - resources, capacity: availableChunks, highest is best.
@@ -125,6 +135,18 @@ type ProviderInfo struct {
 	// MeasuredLatencyMs is the round-trip time the consumer just measured to
 	// this provider, when it was among the nearest few (nil otherwise).
 	MeasuredLatencyMs *float64 `json:"measuredLatencyMs,omitempty"`
+	// City is the provider's city, so a request naming a place ("in Turin")
+	// can be matched by name rather than guessed from coordinates.
+	City string `json:"city,omitempty"`
+	// Renewable is always present: "false" is information too.
+	Renewable bool `json:"renewable"`
+	// CarbonForecast6hAvg is the average of the first 6 hours of the
+	// provider's carbon forecast, when it advertises one.
+	CarbonForecast6hAvg *float64 `json:"carbonForecast6hAvg,omitempty"`
+	// PricePerCPUHour and PricePerGiBHour are the provider's unit prices for
+	// one CPU core and one GiB of memory per hour, when it advertises them.
+	PricePerCPUHour *float64 `json:"pricePerCpuHour,omitempty"`
+	PricePerGiBHour *float64 `json:"pricePerGiBHour,omitempty"`
 }
 
 // Location is where the requesting consumer is: coordinates in decimal degrees
@@ -206,12 +228,49 @@ func NodeGroupViewToProviderInfo(ng brokerapi.NodeGroupView) ProviderInfo {
 	// Carbon and topology.
 	info.CarbonIntensity = ng.CarbonIntensity
 	if ng.Topology != nil {
+		info.City = ng.Topology.City
 		info.Region = ng.Topology.Region
 		info.Latitude = ng.Topology.Latitude
 		info.Longitude = ng.Topology.Longitude
 	}
+	info.Renewable = ng.Renewable
+	info.CarbonForecast6hAvg = forecastAverage(ng.CarbonForecast, 6)
+	info.PricePerCPUHour = unitPrice(ng.UnitPrices, corev1.ResourceCPU)
+	info.PricePerGiBHour = unitPrice(ng.UnitPrices, corev1.ResourceMemory)
 
 	return info
+}
+
+// forecastAverage is the mean of the first n values of an hourly forecast,
+// rounded to one decimal; nil when there is no forecast.
+func forecastAverage(forecast []float64, n int) *float64 {
+	if len(forecast) == 0 {
+		return nil
+	}
+	if len(forecast) < n {
+		n = len(forecast)
+	}
+	sum := 0.0
+	for _, v := range forecast[:n] {
+		sum += v
+	}
+	avg := math.Round(sum/float64(n)*10) / 10
+	return &avg
+}
+
+// unitPrice is a unit price as a plain number through its decimal form (see
+// the cost conversion above); nil when the resource is not priced.
+func unitPrice(prices corev1.ResourceList, name corev1.ResourceName) *float64 {
+	q, ok := prices[name]
+	if !ok {
+		return nil
+	}
+	c := q.DeepCopy()
+	v, err := strconv.ParseFloat(c.AsDec().String(), 64)
+	if err != nil {
+		v = q.AsApproximateFloat64()
+	}
+	return &v
 }
 
 // BuildUserPrompt assembles the user-facing portion of the Ollama prompt from

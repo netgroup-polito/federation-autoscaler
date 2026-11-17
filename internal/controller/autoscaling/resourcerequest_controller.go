@@ -578,7 +578,7 @@ func (r *ResourceRequestReconciler) holdReservation(ctx context.Context, rr *aut
 	ids := heldReservationIDs(rr)
 	protected := 0
 	for _, id := range ids {
-		n, err := r.protectReservationNodes(ctx, id)
+		n, err := r.protectReservationNodes(ctx, id, rr.Name)
 		if err != nil {
 			return ctrl.Result{}, err
 		}
@@ -606,7 +606,7 @@ func (r *ResourceRequestReconciler) holdReservation(ctx context.Context, rr *aut
 // protectReservationNodes annotates every materialised node backing the given
 // reservation with the CA scale-down-disabled annotation, and returns how many
 // nodes are now protected. Nodes that have not appeared yet are skipped.
-func (r *ResourceRequestReconciler) protectReservationNodes(ctx context.Context, reservationID string) (int, error) {
+func (r *ResourceRequestReconciler) protectReservationNodes(ctx context.Context, reservationID, holder string) (int, error) {
 	var list autoscalingv1alpha1.VirtualNodeStateList
 	if err := r.List(ctx, &list, client.MatchingLabels{virtualNodeReservationLabel: reservationID}); err != nil {
 		return 0, err
@@ -617,7 +617,7 @@ func (r *ResourceRequestReconciler) protectReservationNodes(ctx context.Context,
 		if nodeName == "" {
 			continue
 		}
-		ok, err := r.disableScaleDown(ctx, nodeName)
+		ok, err := r.disableScaleDown(ctx, nodeName, holder)
 		if err != nil {
 			return protected, err
 		}
@@ -628,10 +628,12 @@ func (r *ResourceRequestReconciler) protectReservationNodes(ctx context.Context,
 	return protected, nil
 }
 
-// disableScaleDown sets the CA scale-down-disabled annotation on the named node.
-// Returns true when the node exists (already annotated or just annotated); false
-// with no error when the node does not exist yet.
-func (r *ResourceRequestReconciler) disableScaleDown(ctx context.Context, name string) (bool, error) {
+// disableScaleDown sets the CA scale-down-disabled annotation on the named node,
+// and the HeldByLabel with the holding request's name, so other workloads can
+// avoid capacity held for this request. Returns true when the node exists
+// (already marked or just marked); false with no error when the node does not
+// exist yet.
+func (r *ResourceRequestReconciler) disableScaleDown(ctx context.Context, name, holder string) (bool, error) {
 	var node corev1.Node
 	if err := r.Get(ctx, types.NamespacedName{Name: name}, &node); err != nil {
 		if apierrors.IsNotFound(err) {
@@ -639,7 +641,8 @@ func (r *ResourceRequestReconciler) disableScaleDown(ctx context.Context, name s
 		}
 		return false, err
 	}
-	if node.Annotations[scaleDownDisabledAnnotation] == scaleDownDisabledValue {
+	if node.Annotations[scaleDownDisabledAnnotation] == scaleDownDisabledValue &&
+		node.Labels[autoscalingv1alpha1.HeldByLabel] == holder {
 		return true, nil
 	}
 	patch := client.MergeFrom(node.DeepCopy())
@@ -647,6 +650,10 @@ func (r *ResourceRequestReconciler) disableScaleDown(ctx context.Context, name s
 		node.Annotations = map[string]string{}
 	}
 	node.Annotations[scaleDownDisabledAnnotation] = scaleDownDisabledValue
+	if node.Labels == nil {
+		node.Labels = map[string]string{}
+	}
+	node.Labels[autoscalingv1alpha1.HeldByLabel] = holder
 	if err := r.Patch(ctx, &node, patch); err != nil {
 		return false, err
 	}

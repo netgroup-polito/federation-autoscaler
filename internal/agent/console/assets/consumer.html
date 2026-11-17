@@ -359,6 +359,28 @@
       color: var(--green);
     }
 
+    .rq-head {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 10px;
+      margin-bottom: 4px;
+    }
+
+    .rq-head .rq-name {
+      color: var(--muted);
+      font-size: 11px;
+      font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+    }
+
+    .rq-head button {
+      padding: 5px 12px;
+      font-size: 12px;
+      background: var(--panel);
+      color: var(--fg);
+      border: 1px solid var(--border);
+    }
+
     details.rq-amount summary {
       cursor: pointer;
       color: var(--muted);
@@ -399,9 +421,9 @@
       </details>
       <div class="submit-row">
         <button id="rqSend">Send request</button>
-        <button id="rqRelease" style="background:var(--panel-2);color:var(--fg);border:1px solid var(--border)">Release</button>
+        <button id="rqRelease" style="background:var(--panel-2);color:var(--fg);border:1px solid var(--border)">Release all</button>
       </div>
-      <div class="rq-status" id="rqStatus" style="display:none"></div>
+      <div id="rqList"></div>
     </section>
 
     <!-- Placement policy -->
@@ -690,11 +712,27 @@
       }
       return row;
     }
-    function renderRequest(v) {
-      const box = document.getElementById("rqStatus");
-      if (!v || !v.text && !v.active) { box.style.display = "none"; return; }
-      box.style.display = "block";
-      box.replaceChildren();
+    function requestCard(v) {
+      const box = document.createElement("div");
+      box.className = "rq-status";
+      const head = document.createElement("div");
+      head.className = "rq-head";
+      const name = document.createElement("span");
+      name.className = "rq-name";
+      name.textContent = v.name;
+      const rel = document.createElement("button");
+      rel.textContent = "Release";
+      rel.onclick = async () => {
+        rel.disabled = true;
+        try {
+          await postJSON("/api/request", { action: "release", name: v.name });
+          toast("Released \u2014 wait about 30 s before a request that needs the same capacity");
+        } catch (e) { toast(e.message, true); }
+        await loadRequest();
+        await loadState();
+      };
+      head.append(name, rel);
+      box.appendChild(head);
       box.appendChild(statusLine("Request", "\u201C" + (v.text || "") + "\u201D"));
       if (v.understood) {
         const nodes = v.nodes ? " \u2192 " + v.nodes + (v.nodes === 1 ? " node" : " nodes") : "";
@@ -702,18 +740,25 @@
       }
       const mode = v.mode === "ondemand" ? "On demand (autoscaler)" : "Reserve now";
       box.appendChild(statusLine("Mode", mode));
-      if (v.mode === "ondemand" && v.active) {
-        box.appendChild(statusLine("Status", v.status || "", v.ready === v.nodes && v.nodes ? "Ready" : "Scaling", v.ready === v.nodes && v.nodes > 0));
+      if (v.mode === "ondemand") {
+        const ok = v.nodes > 0 && v.ready === v.nodes;
+        box.appendChild(statusLine("Status", v.status || "", ok ? "Ready" : "Scaling", ok));
       } else {
-        const ok = v.phase === "Active";
-        box.appendChild(statusLine("Status", (v.provider ? v.provider + ": " : "") + (v.status || ""), v.active ? (v.phase || "Pending") : "", ok));
+        box.appendChild(statusLine("Status", (v.provider ? v.provider + ": " : "") + (v.status || ""), v.phase || "Pending", v.phase === "Active"));
       }
-      document.getElementById("rqSend").disabled = !!v.active;
+      return box;
+    }
+    function renderRequests(list) {
+      const box = document.getElementById("rqList");
+      box.replaceChildren();
+      const items = (list && list.requests) || [];
+      for (const v of items) box.appendChild(requestCard(v));
+      document.getElementById("rqRelease").disabled = items.length === 0;
     }
     async function loadRequest() {
       try {
         const res = await fetch("/api/request", { cache: "no-store" });
-        if (res.ok) renderRequest(await res.json());
+        if (res.ok) renderRequests(await res.json());
       } catch (e) { /* keep the last view */ }
     }
     document.getElementById("rqSend").onclick = async () => {
@@ -731,15 +776,17 @@
       try {
         await postJSON("/api/request", body);
         toast("Request sent \u2014 the AI is choosing a provider");
+        document.getElementById("rqText").value = "";
       } catch (e) { toast(e.message, true); }
       btn.textContent = "Send request";
+      btn.disabled = false;
       await loadRequest();
       await loadState();
     };
     document.getElementById("rqRelease").onclick = async () => {
       try {
         await postJSON("/api/request", { action: "release" });
-        toast("Released \u2014 the borrowed capacity is given back shortly");
+        toast("All released \u2014 the borrowed capacity is given back shortly");
       } catch (e) { toast(e.message, true); }
       await loadRequest();
       await loadState();

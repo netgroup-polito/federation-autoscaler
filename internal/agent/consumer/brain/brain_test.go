@@ -281,3 +281,47 @@ func TestNewValidates(t *testing.T) {
 		}
 	}
 }
+
+// A request with its own placement (its own text) ignores the ConsumerPolicy's
+// latency limit: only its own limit, if any, applies.
+func TestBrainPerRequestPlacementIgnoresThePolicyBound(t *testing.T) {
+	cat := catalogWith(t,
+		probed(withPrice(located(siteOffer("p-near", "near", 6, 12), astiLat, astiLon), "0.05"), "near:7777"),
+		probed(withPrice(located(siteOffer("p-far", "far", 6, 12), cuneoLat, cuneoLon), "0.01"), "far:7777"),
+	)
+	pol := consumerPolicy("default", autoscalingv1alpha1.ConsumerPolicySpec{
+		Placement:    autoscalingv1alpha1.PlacementPolicy{Type: autoscalingv1alpha1.PlacementStrategyConsumerChoice},
+		LatencyBound: bound(3), // set by an On demand request
+	})
+	prober := &fakeProber{rtts: map[string]float64{"near:7777": 1, "far:7777": 9}}
+	b, err := New(Options{
+		Catalog: cat, Reservations: fakeLister{}, LocalClient: kubeWith(t, pol), Namespace: testNS,
+		Location: func() (float64, float64, bool) { return astiLat, astiLon, true }, Prober: prober,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	cc := &autoscalingv1alpha1.PlacementPolicy{Type: autoscalingv1alpha1.PlacementStrategyConsumerChoice}
+
+	own, err := b.NodeGroupsFor(context.Background(), nil, cc)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := growable(*own); len(got) != 2 {
+		t.Errorf("a request without its own limit must see both providers, got %v", got)
+	}
+	limited, err := b.NodeGroupsFor(context.Background(), bound(3), cc)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := growable(*limited); len(got) != 1 || got[0] != "p-near" {
+		t.Errorf("its own 3 ms limit applies: growable = %v, want [p-near]", got)
+	}
+	policy, err := b.NodeGroups(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := growable(*policy); len(got) != 1 || got[0] != "p-near" {
+		t.Errorf("the plain read keeps the policy's limit: growable = %v, want [p-near]", got)
+	}
+}

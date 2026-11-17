@@ -125,8 +125,9 @@ func (b *Brain) NodeGroupsWithin(
 // NodeGroupsFor is NodeGroupsWithin with an optional placement override for
 // this one decision. A ResourceRequest with its own plain-language request
 // passes ConsumerChoice here, so the brain returns every provider unmasked for
-// the local AI to rank, whatever the ConsumerPolicy says. A nil placement uses
-// the ConsumerPolicy's.
+// the local AI to rank, whatever the ConsumerPolicy says; with an override,
+// only requestBound limits the latency (the ConsumerPolicy's bound is
+// ignored). A nil placement uses the ConsumerPolicy's placement and bound.
 func (b *Brain) NodeGroupsFor(
 	ctx context.Context, requestBound *autoscalingv1alpha1.LatencyBound,
 	placement *autoscalingv1alpha1.PlacementPolicy,
@@ -153,6 +154,13 @@ func (b *Brain) NodeGroupsFor(
 		consumer.Latitude, consumer.Longitude, consumer.HasLocation = b.opts.Location()
 	}
 	bound := EffectiveBound(spec.LatencyBound, requestBound)
+	if placement != nil {
+		// A request with its own placement (its own plain-language text) is
+		// self-contained: only its own latency limit applies, never the
+		// ConsumerPolicy's (which may belong to another request, e.g. an
+		// On demand one).
+		bound = requestBound
+	}
 	var measured map[string]float64
 	if bound != nil && b.opts.Prober != nil {
 		// Measure every candidate site, not a shortlist: the bound is a hard

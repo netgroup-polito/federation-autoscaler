@@ -484,6 +484,9 @@ func TestResourceRequestHoldProtectsNode(t *testing.T) {
 	if n.Annotations[scaleDownDisabledAnnotation] != scaleDownDisabledValue {
 		t.Errorf("node not protected: annotations=%v", n.Annotations)
 	}
+	if n.Labels[autoscalingv1alpha1.HeldByLabel] != "held" {
+		t.Errorf("node must be labelled as held by the request: labels=%v", n.Labels)
+	}
 	// And the request reflects it as Active (held).
 	if err := cl.Get(ctx, key, rr); err != nil {
 		t.Fatalf("get rr: %v", err)

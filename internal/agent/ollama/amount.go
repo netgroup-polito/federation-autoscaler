@@ -125,7 +125,9 @@ func (a Amount) String() string {
 	if a.GPU > 0 {
 		parts = append(parts, fmt.Sprintf("%d GPU", a.GPU))
 	}
-	if a.Nodes > 0 {
+	if a.Nodes == 1 {
+		parts = append(parts, "1 node")
+	} else if a.Nodes > 1 {
 		parts = append(parts, fmt.Sprintf("%d nodes", a.Nodes))
 	}
 	if a.MaxLatencyMs > 0 {

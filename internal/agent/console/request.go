@@ -20,8 +20,9 @@ import (
 	"context"
 	"fmt"
 	"net/http"
+	"sort"
+	"strconv"
 	"strings"
-	"sync"
 	"time"
 
 	appsv1 "k8s.io/api/apps/v1"
@@ -80,11 +81,16 @@ type requestBody struct {
 	CPU    string `json:"cpu,omitempty"`
 	Memory string `json:"memory,omitempty"`
 	GPU    string `json:"gpu,omitempty"`
+	// Name selects the request to release; empty releases all of them.
+	Name string `json:"name,omitempty"`
 }
 
-// requestView is what the panel shows: what was asked, what was understood,
-// and how it is going.
+// requestView is one placed request as the panel shows it: what was asked,
+// what was understood, and how it is going.
 type requestView struct {
+	// Name identifies the request for Release: the ResourceRequest's name
+	// (Reserve now) or onDemandName (On demand).
+	Name       string            `json:"name"`
 	Active     bool              `json:"active"`
 	Text       string            `json:"text,omitempty"`
 	Mode       string            `json:"mode,omitempty"`
@@ -103,12 +109,25 @@ type requestView struct {
 	SentAt   string `json:"sentAt,omitempty"`
 }
 
-// requestMemo is the last request the panel sent (process memory: after an
-// agent restart the panel still finds the live objects, without the text).
-type requestMemo struct {
-	mu   sync.Mutex
-	last *requestView
+// requestList is the GET /api/request body: every placed request, oldest
+// first.
+type requestList struct {
+	Requests []requestView `json:"requests"`
 }
+
+// What a request understood is kept on its own object (annotations on the
+// ResourceRequest, or on the On demand Deployment), so the panel's list
+// survives a page reload and an agent restart.
+const (
+	annoText       = "federation-autoscaler.io/request-text"
+	annoUnderstood = "federation-autoscaler.io/request-understood"
+	annoSource     = "federation-autoscaler.io/request-source"
+	annoNodes      = "federation-autoscaler.io/request-nodes"
+	annoMaxLatency = "federation-autoscaler.io/request-max-latency-ms"
+
+	// onDemandName names the On demand request in the panel's list.
+	onDemandName = "on-demand"
+)
 
 // handleRequest serves POST /api/request.
 func (s *Server) handleRequest(w http.ResponseWriter, r *http.Request) {
@@ -125,8 +144,9 @@ func (s *Server) handleRequest(w http.ResponseWriter, r *http.Request) {
 		}
 		s.writeJSON(w, http.StatusOK, view)
 	case "release":
-		if err := s.releaseRequest(r.Context()); err != nil {
-			s.writeError(w, http.StatusInternalServerError, err.Error())
+		status, err := s.releaseRequest(r.Context(), body.Name)
+		if err != nil {
+			s.writeError(w, status, err.Error())
 			return
 		}
 		s.ok(w)
@@ -135,10 +155,15 @@ func (s *Server) handleRequest(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-// handleRequestState serves GET /api/request: the current request and its
+// handleRequestState serves GET /api/request: every placed request and its
 // progress, polled by the panel.
 func (s *Server) handleRequestState(w http.ResponseWriter, r *http.Request) {
-	s.writeJSON(w, http.StatusOK, s.requestState(r.Context()))
+	list, err := s.listRequests(r.Context())
+	if err != nil {
+		s.writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	s.writeJSON(w, http.StatusOK, list)
 }
 
 // sendRequest understands, sizes and places one request. It returns the HTTP
@@ -153,10 +178,14 @@ func (s *Server) sendRequest(ctx context.Context, body requestBody) (*requestVie
 	case body.Mode != RequestModeReserve && body.Mode != RequestModeOnDemand:
 		return nil, http.StatusBadRequest, fmt.Errorf("unknown mode %q (want %s|%s)", body.Mode, RequestModeReserve, RequestModeOnDemand)
 	}
-	if active, err := s.requestActive(ctx); err != nil {
-		return nil, http.StatusInternalServerError, err
-	} else if active {
-		return nil, http.StatusConflict, fmt.Errorf("a request is already active: release it first")
+	if body.Mode == RequestModeOnDemand {
+		// On demand works through the consumer's single policy text, so only
+		// one can be active; Reserve now requests can be many.
+		if dep, err := s.onDemand(ctx); err != nil {
+			return nil, http.StatusInternalServerError, err
+		} else if dep != nil {
+			return nil, http.StatusConflict, fmt.Errorf("an On demand request is already active: release it first")
+		}
 	}
 
 	amount, source, err := s.understandAmount(ctx, text, body)
@@ -172,38 +201,49 @@ func (s *Server) sendRequest(ctx context.Context, body requestBody) (*requestVie
 	if amount.MaxLatencyMs > 0 {
 		bound = &autoscalingv1alpha1.LatencyBound{MaxLatencyMs: amount.MaxLatencyMs}
 	}
+	understood := amount.String()
+	if !amount.HasSize() {
+		understood = "1 node (no amount stated)"
+		if amount.MaxLatencyMs > 0 {
+			understood += fmt.Sprintf(", max %d ms", amount.MaxLatencyMs)
+		}
+	}
+	annos := map[string]string{
+		annoText:       text,
+		annoUnderstood: understood,
+		annoSource:     source,
+		annoNodes:      strconv.Itoa(int(nodes)),
+	}
+	if bound != nil {
+		annos[annoMaxLatency] = strconv.Itoa(int(bound.MaxLatencyMs))
+	}
+
+	name := onDemandName
 	switch body.Mode {
 	case RequestModeReserve:
-		err = s.createRequestReservation(ctx, text, resources, bound)
+		name, err = s.createRequestReservation(ctx, text, resources, bound, annos)
 	case RequestModeOnDemand:
-		err = s.applyOnDemand(ctx, text, nodes, block, bound)
+		err = s.applyOnDemand(ctx, text, nodes, block, bound, annos)
 	}
 	if err != nil {
 		return nil, http.StatusInternalServerError, err
 	}
 
 	view := &requestView{
-		Active:     true,
-		Text:       text,
-		Mode:       body.Mode,
-		Understood: amount.String(),
-		Source:     source,
-		Nodes:      nodes,
-		Resources:  resourceListToMap(resources),
-		SentAt:     time.Now().UTC().Format(time.RFC3339),
+		Name:         name,
+		Active:       true,
+		Text:         text,
+		Mode:         body.Mode,
+		Understood:   understood,
+		Source:       source,
+		Nodes:        nodes,
+		Resources:    resourceListToMap(resources),
+		MaxLatencyMs: amount.MaxLatencyMs,
+		Status:       "submitted",
+		SentAt:       time.Now().UTC().Format(time.RFC3339),
 	}
-	if !amount.HasSize() {
-		view.Understood = "1 node (no amount stated)"
-		if amount.MaxLatencyMs > 0 {
-			view.Understood += fmt.Sprintf(", max %d ms", amount.MaxLatencyMs)
-		}
-	}
-	view.MaxLatencyMs = amount.MaxLatencyMs
-	s.request.mu.Lock()
-	s.request.last = view
-	s.request.mu.Unlock()
 	s.log.Info("plain-language request sent",
-		"mode", body.Mode, "text", text, "understood", view.Understood, "source", source, "nodes", nodes)
+		"name", name, "mode", body.Mode, "text", text, "understood", understood, "source", source, "nodes", nodes)
 	return view, 0, nil
 }
 
@@ -306,16 +346,19 @@ func sizeRequest(a ollama.Amount) (corev1.ResourceList, int32, corev1.ResourceLi
 	return res, nodes, block, nil
 }
 
-// createRequestReservation creates the Reserve now ResourceRequest, with the
-// latency limit read from the text when there is one.
+// createRequestReservation creates one Reserve now ResourceRequest, with the
+// latency limit read from the text when there is one and what was understood
+// as annotations, and returns its name.
 func (s *Server) createRequestReservation(
-	ctx context.Context, text string, res corev1.ResourceList, bound *autoscalingv1alpha1.LatencyBound,
-) error {
+	ctx context.Context, text string, res corev1.ResourceList,
+	bound *autoscalingv1alpha1.LatencyBound, annos map[string]string,
+) (string, error) {
 	rr := &autoscalingv1alpha1.ResourceRequest{
 		ObjectMeta: metav1.ObjectMeta{
 			GenerateName: requestPrefix,
 			Namespace:    s.ns,
 			Labels:       map[string]string{consoleManagedLabel: requestLabelValue},
+			Annotations:  annos,
 		},
 		Spec: autoscalingv1alpha1.ResourceRequestSpec{
 			Resources:    res,
@@ -324,16 +367,17 @@ func (s *Server) createRequestReservation(
 		},
 	}
 	if err := s.local.Create(ctx, rr); err != nil {
-		return fmt.Errorf("create the reservation: %w", err)
+		return "", fmt.Errorf("create the reservation: %w", err)
 	}
-	return nil
+	return rr.Name, nil
 }
 
 // applyOnDemand sets the ConsumerPolicy to ConsumerChoice with the text (and
 // the latency limit read from it, if any) and applies a workload of one pod
 // per node, pinned to borrowed nodes.
 func (s *Server) applyOnDemand(
-	ctx context.Context, text string, nodes int32, block corev1.ResourceList, bound *autoscalingv1alpha1.LatencyBound,
+	ctx context.Context, text string, nodes int32, block corev1.ResourceList,
+	bound *autoscalingv1alpha1.LatencyBound, annos map[string]string,
 ) error {
 	if err := s.upsertConsumerPolicy(ctx, autoscalingv1alpha1.PlacementStrategyConsumerChoice, text); err != nil {
 		return fmt.Errorf("set the ConsumerChoice policy: %w", err)
@@ -341,7 +385,9 @@ func (s *Server) applyOnDemand(
 	if err := s.setPolicyBound(ctx, bound); err != nil {
 		return fmt.Errorf("set the latency limit: %w", err)
 	}
-	if err := s.local.Create(ctx, onDemandDeployment(nodes, block)); err != nil {
+	dep := onDemandDeployment(nodes, block)
+	dep.Annotations = annos
+	if err := s.local.Create(ctx, dep); err != nil {
 		return fmt.Errorf("apply the workload: %w", err)
 	}
 	return nil
@@ -349,7 +395,8 @@ func (s *Server) applyOnDemand(
 
 // onDemandDeployment is the On demand workload: nodes pause pods, each
 // requesting podShareOfNode of one node and allowed only on borrowed (Liqo
-// virtual) nodes, so the Cluster Autoscaler borrows exactly nodes nodes.
+// virtual) nodes not held for a Reserve now request, so the Cluster
+// Autoscaler borrows exactly nodes nodes.
 func onDemandDeployment(nodes int32, block corev1.ResourceList) *appsv1.Deployment {
 	requests := corev1.ResourceList{}
 	for name, q := range block {
@@ -369,6 +416,18 @@ func onDemandDeployment(nodes int32, block corev1.ResourceList) *appsv1.Deployme
 				ObjectMeta: metav1.ObjectMeta{Labels: labels},
 				Spec: corev1.PodSpec{
 					NodeSelector: map[string]string{"liqo.io/type": "virtual-node"},
+					// Never on a node held for a Reserve now request: that
+					// capacity belongs to the other request (and may not meet
+					// this request's latency limit).
+					Affinity: &corev1.Affinity{NodeAffinity: &corev1.NodeAffinity{
+						RequiredDuringSchedulingIgnoredDuringExecution: &corev1.NodeSelector{
+							NodeSelectorTerms: []corev1.NodeSelectorTerm{{
+								MatchExpressions: []corev1.NodeSelectorRequirement{{
+									Key: autoscalingv1alpha1.HeldByLabel, Operator: corev1.NodeSelectorOpDoesNotExist,
+								}},
+							}},
+						},
+					}},
 					Tolerations: []corev1.Toleration{{
 						Key: "virtual-node.liqo.io/not-allowed", Operator: corev1.TolerationOpExists,
 						Effect: corev1.TaintEffectNoExecute,
@@ -384,17 +443,32 @@ func onDemandDeployment(nodes int32, block corev1.ResourceList) *appsv1.Deployme
 	}
 }
 
-// releaseRequest removes whatever the panel placed: its ResourceRequests and
-// the On demand workload. Missing objects are fine.
-func (s *Server) releaseRequest(ctx context.Context) error {
-	var list autoscalingv1alpha1.ResourceRequestList
-	if err := s.local.List(ctx, &list, ctrlclient.InNamespace(s.ns),
-		ctrlclient.MatchingLabels{consoleManagedLabel: requestLabelValue}); err != nil {
-		return fmt.Errorf("list requests: %w", err)
-	}
-	for i := range list.Items {
-		if err := s.local.Delete(ctx, &list.Items[i]); err != nil && !apierrors.IsNotFound(err) {
-			return fmt.Errorf("release %s: %w", list.Items[i].Name, err)
+// releaseRequest removes one placed request by name (a ResourceRequest's
+// name, or onDemandName), or every one of them when name is empty. It returns
+// the HTTP status to answer with on error.
+func (s *Server) releaseRequest(ctx context.Context, name string) (int, error) {
+	if name == "" || name != onDemandName {
+		var list autoscalingv1alpha1.ResourceRequestList
+		if err := s.local.List(ctx, &list, ctrlclient.InNamespace(s.ns),
+			ctrlclient.MatchingLabels{consoleManagedLabel: requestLabelValue}); err != nil {
+			return http.StatusInternalServerError, fmt.Errorf("list requests: %w", err)
+		}
+		found := false
+		for i := range list.Items {
+			if name != "" && list.Items[i].Name != name {
+				continue
+			}
+			found = true
+			if err := s.local.Delete(ctx, &list.Items[i]); err != nil && !apierrors.IsNotFound(err) {
+				return http.StatusInternalServerError, fmt.Errorf("release %s: %w", list.Items[i].Name, err)
+			}
+		}
+		if name != "" {
+			if !found {
+				return http.StatusNotFound, fmt.Errorf("no request named %q", name)
+			}
+			s.log.Info("plain-language request released", "name", name)
+			return 0, nil
 		}
 	}
 	dep := &appsv1.Deployment{ObjectMeta: metav1.ObjectMeta{Name: onDemandWorkload, Namespace: workloadNamespace}}
@@ -404,19 +478,17 @@ func (s *Server) releaseRequest(ctx context.Context) error {
 		// The On demand latency limit lives on the ConsumerPolicy; drop it so
 		// it does not constrain later autoscaler decisions.
 		if err := s.setPolicyBound(ctx, nil); err != nil {
-			return fmt.Errorf("clear the latency limit: %w", err)
+			return http.StatusInternalServerError, fmt.Errorf("clear the latency limit: %w", err)
 		}
-	case !apierrors.IsNotFound(err):
-		return fmt.Errorf("delete the workload: %w", err)
+	case apierrors.IsNotFound(err):
+		if name == onDemandName {
+			return http.StatusNotFound, fmt.Errorf("no On demand request is active")
+		}
+	default:
+		return http.StatusInternalServerError, fmt.Errorf("delete the workload: %w", err)
 	}
-	s.request.mu.Lock()
-	if s.request.last != nil {
-		s.request.last.Active = false
-		s.request.last.Status = "released"
-	}
-	s.request.mu.Unlock()
-	s.log.Info("plain-language request released")
-	return nil
+	s.log.Info("plain-language request released", "name", name)
+	return 0, nil
 }
 
 // setPolicyBound sets (or, with nil, clears) the ConsumerPolicy's latency
@@ -438,35 +510,6 @@ func (s *Server) setPolicyBound(ctx context.Context, bound *autoscalingv1alpha1.
 	return s.local.Update(ctx, &cp)
 }
 
-// requestActive reports whether a panel request is still placed.
-func (s *Server) requestActive(ctx context.Context) (bool, error) {
-	rr, err := s.panelReservation(ctx)
-	if err != nil {
-		return false, err
-	}
-	if rr != nil {
-		return true, nil
-	}
-	dep, err := s.onDemand(ctx)
-	return dep != nil, err
-}
-
-// panelReservation returns the panel's ResourceRequest still alive (not
-// being deleted), or nil.
-func (s *Server) panelReservation(ctx context.Context) (*autoscalingv1alpha1.ResourceRequest, error) {
-	var list autoscalingv1alpha1.ResourceRequestList
-	if err := s.local.List(ctx, &list, ctrlclient.InNamespace(s.ns),
-		ctrlclient.MatchingLabels{consoleManagedLabel: requestLabelValue}); err != nil {
-		return nil, fmt.Errorf("list requests: %w", err)
-	}
-	for i := range list.Items {
-		if list.Items[i].DeletionTimestamp.IsZero() {
-			return &list.Items[i], nil
-		}
-	}
-	return nil, nil
-}
-
 // onDemand returns the On demand workload when it exists (not being deleted).
 func (s *Server) onDemand(ctx context.Context) (*appsv1.Deployment, error) {
 	var dep appsv1.Deployment
@@ -482,44 +525,77 @@ func (s *Server) onDemand(ctx context.Context) (*appsv1.Deployment, error) {
 	return &dep, nil
 }
 
-// requestState is the panel's view: the last request plus live progress.
-func (s *Server) requestState(ctx context.Context) requestView {
-	s.request.mu.Lock()
-	var view requestView
-	if s.request.last != nil {
-		view = *s.request.last
+// listRequests returns every placed request (oldest first; the On demand one
+// last) with its live progress.
+func (s *Server) listRequests(ctx context.Context) (requestList, error) {
+	out := requestList{Requests: []requestView{}}
+	var list autoscalingv1alpha1.ResourceRequestList
+	if err := s.local.List(ctx, &list, ctrlclient.InNamespace(s.ns),
+		ctrlclient.MatchingLabels{consoleManagedLabel: requestLabelValue}); err != nil {
+		return out, fmt.Errorf("list requests: %w", err)
 	}
-	s.request.mu.Unlock()
-
-	if rr, err := s.panelReservation(ctx); err == nil && rr != nil {
-		view.Active = true
-		view.Mode = RequestModeReserve
-		if view.Text == "" {
-			view.Text = rr.Spec.UserPrompt
+	sort.Slice(list.Items, func(i, j int) bool {
+		a, b := list.Items[i].CreationTimestamp, list.Items[j].CreationTimestamp
+		if a.Equal(&b) {
+			return list.Items[i].Name < list.Items[j].Name
 		}
-		view.Phase = string(rr.Status.Phase)
-		view.Provider = rr.Status.ProviderClusterID
-		view.Status = rr.Status.Message
-		if view.Status == "" {
-			view.Status = "submitted"
+		return a.Before(&b)
+	})
+	for i := range list.Items {
+		rr := &list.Items[i]
+		if !rr.DeletionTimestamp.IsZero() {
+			continue // being released
 		}
-		return view
+		v := viewFromAnnotations(rr.Annotations)
+		v.Name = rr.Name
+		v.Active = true
+		v.Mode = RequestModeReserve
+		v.Text = rr.Spec.UserPrompt
+		v.Resources = resourceListToMap(rr.Spec.Resources)
+		if rr.Spec.LatencyBound != nil {
+			v.MaxLatencyMs = rr.Spec.LatencyBound.MaxLatencyMs
+		}
+		if v.Nodes == 0 {
+			v.Nodes = rr.Status.ChunkCount
+		}
+		v.Phase = string(rr.Status.Phase)
+		v.Provider = rr.Status.ProviderClusterID
+		v.Status = rr.Status.Message
+		if v.Status == "" {
+			v.Status = "submitted"
+		}
+		v.SentAt = rr.CreationTimestamp.UTC().Format(time.RFC3339)
+		out.Requests = append(out.Requests, v)
 	}
-	if dep, err := s.onDemand(ctx); err == nil && dep != nil {
-		view.Active = true
-		view.Mode = RequestModeOnDemand
-		want := int32(0)
+	dep, err := s.onDemand(ctx)
+	if err != nil {
+		return out, err
+	}
+	if dep != nil {
+		v := viewFromAnnotations(dep.Annotations)
+		v.Name = onDemandName
+		v.Active = true
+		v.Mode = RequestModeOnDemand
+		v.Text = dep.Annotations[annoText]
 		if dep.Spec.Replicas != nil {
-			want = *dep.Spec.Replicas
+			v.Nodes = *dep.Spec.Replicas
 		}
-		view.Nodes = want
-		view.Ready = dep.Status.ReadyReplicas
-		view.Status = fmt.Sprintf("%d of %d pods running on borrowed nodes", view.Ready, want)
-		return view
+		v.Ready = dep.Status.ReadyReplicas
+		v.Status = fmt.Sprintf("%d of %d pods running on borrowed nodes", v.Ready, v.Nodes)
+		v.SentAt = dep.CreationTimestamp.UTC().Format(time.RFC3339)
+		out.Requests = append(out.Requests, v)
 	}
-	if view.Active { // placed earlier, now gone
-		view.Active = false
-		view.Status = "released"
+	return out, nil
+}
+
+// viewFromAnnotations fills what a request understood from its annotations.
+func viewFromAnnotations(annos map[string]string) requestView {
+	v := requestView{Understood: annos[annoUnderstood], Source: annos[annoSource]}
+	if n, err := strconv.Atoi(annos[annoNodes]); err == nil {
+		v.Nodes = int32(n)
 	}
-	return view
+	if ms, err := strconv.Atoi(annos[annoMaxLatency]); err == nil {
+		v.MaxLatencyMs = int32(ms)
+	}
+	return v
 }

@@ -196,6 +196,8 @@ func nodeGroupView(
 		ProbeEndpoint:         cadv.Spec.ProbeEndpoint,
 		CarbonIntensity:       cadv.Spec.CarbonIntensity,
 		UnitPrices:            cadv.Spec.UnitPrices,
+		CarbonForecast:        cadv.Spec.CarbonForecast,
+		Renewable:             cadv.Spec.Renewable,
 		// LiqoLabels / LiqoTaints aren't on ClusterAdvertisementSpec yet
 		// (designed but pending). When they land, populate Labels /
 		// Taints straight from the spec; for now, leave them nil.

@@ -401,6 +401,12 @@ type NodeGroupView struct {
 	// Populated when the provider advertises prices; nil otherwise. Used by the
 	// ConsumerChoice AI strategy to evaluate cost.
 	UnitPrices corev1.ResourceList `json:"unitPrices,omitempty"`
+	// CarbonForecast is the provider's hourly carbon-intensity forecast
+	// (gCO2eq/kWh, next hours first), when advertised. Renewable is the
+	// provider's self-declared renewable-energy flag. Both are informational,
+	// for the ConsumerChoice AI strategy.
+	CarbonForecast []float64 `json:"carbonForecast,omitempty"`
+	Renewable      bool      `json:"renewable,omitempty"`
 }
 
 type NodeGroupListResponse struct {

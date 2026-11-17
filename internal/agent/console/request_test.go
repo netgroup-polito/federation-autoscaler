@@ -112,18 +112,18 @@ func sendRequest(t *testing.T, ts *httptest.Server, body map[string]string) (int
 	return resp.StatusCode, v
 }
 
-func getRequest(t *testing.T, ts *httptest.Server) requestView {
+func getRequests(t *testing.T, ts *httptest.Server) []requestView {
 	t.Helper()
 	resp, err := http.Get(ts.URL + "/api/request")
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer func() { _ = resp.Body.Close() }()
-	var v requestView
-	if err := json.NewDecoder(resp.Body).Decode(&v); err != nil {
+	var l requestList
+	if err := json.NewDecoder(resp.Body).Decode(&l); err != nil {
 		t.Fatal(err)
 	}
-	return v
+	return l.Requests
 }
 
 func panelRequests(t *testing.T, fc ctrlclient.Client) []autoscalingv1alpha1.ResourceRequest {
@@ -143,8 +143,8 @@ func TestRequestReserveNow(t *testing.T) {
 	text := "I need 4 CPUs and 8 GB, closest to me"
 	code, v := sendRequest(t, ts, map[string]string{"action": "send", "text": text, "mode": RequestModeReserve})
 	wantStatus(t, code, http.StatusOK)
-	if v.Nodes != 2 || v.Source != ollama.AmountSourceText || v.Understood != "4 CPU, 8Gi memory" {
-		t.Errorf("view = %+v, want 2 nodes read from the text", v)
+	if v.Nodes != 2 || v.Source != ollama.AmountSourceText || v.Understood != "4 CPU, 8Gi memory" || v.Name == "" {
+		t.Errorf("view = %+v, want 2 nodes read from the text, and a name", v)
 	}
 	items := panelRequests(t, fc)
 	if len(items) != 1 {
@@ -157,19 +157,36 @@ func TestRequestReserveNow(t *testing.T) {
 	if cpu := rr.Spec.Resources[corev1.ResourceCPU]; cpu.Cmp(resource.MustParse("4")) != 0 {
 		t.Errorf("resources = %v, want 4 CPU", rr.Spec.Resources)
 	}
-	if st := getRequest(t, ts); !st.Active || st.Mode != RequestModeReserve || st.Text != text {
-		t.Errorf("state = %+v, want the active Reserve now request", st)
+	// What was understood is kept on the object, not in memory.
+	list := getRequests(t, ts)
+	if len(list) != 1 || list[0].Name != rr.Name || list[0].Text != text || list[0].Understood != "4 CPU, 8Gi memory" ||
+		list[0].Nodes != 2 || list[0].Mode != RequestModeReserve || !list[0].Active {
+		t.Errorf("list = %+v, want the request with what was understood", list)
+	}
+}
+
+// Several Reserve now requests can be active; each is released by name, and
+// a release without a name releases all.
+func TestRequestSeveralReserveNow(t *testing.T) {
+	fc, ts := requestServer(t, nil)
+	_, a := sendRequest(t, ts, map[string]string{"action": "send", "text": "I need 2 VMs in Turin", "mode": RequestModeReserve})
+	code, b := sendRequest(t, ts, map[string]string{"action": "send", "text": "I need 1 VM in Frankfurt", "mode": RequestModeReserve})
+	wantStatus(t, code, http.StatusOK)
+	_, c := sendRequest(t, ts, map[string]string{"action": "send", "text": "I need 1 VM, closest to me", "mode": RequestModeReserve})
+	if list := getRequests(t, ts); len(list) != 3 {
+		t.Fatalf("list = %d requests, want 3", len(list))
 	}
 
-	code, _ = sendRequest(t, ts, map[string]string{"action": "send", "text": "more", "mode": RequestModeReserve})
-	wantStatus(t, code, http.StatusConflict)
+	wantStatus(t, post(t, ts, "/api/request", `{"action":"release","name":"`+b.Name+`"}`), http.StatusOK)
+	left := panelRequests(t, fc)
+	if len(left) != 2 || (left[0].Name != a.Name && left[1].Name != a.Name) || (left[0].Name != c.Name && left[1].Name != c.Name) {
+		t.Errorf("after releasing %s: %d left, want %s and %s", b.Name, len(left), a.Name, c.Name)
+	}
+	wantStatus(t, post(t, ts, "/api/request", `{"action":"release","name":"no-such-request"}`), http.StatusNotFound)
 
 	wantStatus(t, post(t, ts, "/api/request", `{"action":"release"}`), http.StatusOK)
-	if len(panelRequests(t, fc)) != 0 {
-		t.Error("release must delete the request")
-	}
-	if st := getRequest(t, ts); st.Active {
-		t.Errorf("after release: state = %+v, want inactive", st)
+	if len(panelRequests(t, fc)) != 0 || len(getRequests(t, ts)) != 0 {
+		t.Error("a release without a name must release every request")
 	}
 }
 
@@ -201,15 +218,29 @@ func TestRequestOnDemand(t *testing.T) {
 		t.Errorf("workload = %d replicas, selector %v, tolerations %v; want 3 pinned to virtual nodes",
 			*dep.Spec.Replicas, pod.NodeSelector, pod.Tolerations)
 	}
+	na := pod.Affinity.NodeAffinity.RequiredDuringSchedulingIgnoredDuringExecution.NodeSelectorTerms[0].MatchExpressions[0]
+	if na.Key != autoscalingv1alpha1.HeldByLabel || na.Operator != corev1.NodeSelectorOpDoesNotExist {
+		t.Errorf("pods must avoid nodes held for other requests, affinity %+v", na)
+	}
 	cpu := pod.Containers[0].Resources.Requests[corev1.ResourceCPU]
 	if cpu.Cmp(resource.MustParse("1")) <= 0 || cpu.Cmp(resource.MustParse("2")) >= 0 {
 		t.Errorf("pod cpu = %s, want more than half a 2-CPU node and less than a whole one", cpu.String())
 	}
-	if st := getRequest(t, ts); !st.Active || st.Mode != RequestModeOnDemand || st.Nodes != 3 {
-		t.Errorf("state = %+v, want the active On demand request", st)
+	list := getRequests(t, ts)
+	if len(list) != 1 || list[0].Name != onDemandName || list[0].Mode != RequestModeOnDemand || list[0].Nodes != 3 ||
+		list[0].Text != text || list[0].Understood != "3 nodes" {
+		t.Errorf("list = %+v, want the On demand request", list)
 	}
+	code, _ = sendRequest(t, ts, map[string]string{"action": "send", "text": "more", "mode": RequestModeOnDemand})
+	wantStatus(t, code, http.StatusConflict)
+	// A Reserve now request can still be added next to it.
+	code, _ = sendRequest(t, ts, map[string]string{"action": "send", "text": "1 VM", "mode": RequestModeReserve})
+	wantStatus(t, code, http.StatusOK)
 
-	wantStatus(t, post(t, ts, "/api/request", `{"action":"release"}`), http.StatusOK)
+	wantStatus(t, post(t, ts, "/api/request", `{"action":"release","name":"`+onDemandName+`"}`), http.StatusOK)
+	if len(panelRequests(t, fc)) != 1 {
+		t.Error("releasing the On demand request must leave the Reserve now one")
+	}
 	if err := fc.Get(context.Background(), types.NamespacedName{Namespace: workloadNamespace, Name: onDemandWorkload}, &dep); err == nil {
 		t.Error("release must delete the workload")
 	}
