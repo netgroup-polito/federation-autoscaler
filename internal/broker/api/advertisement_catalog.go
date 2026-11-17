@@ -31,6 +31,10 @@ import (
 // catalogSiteID is the single site every provider has in Phase 1.
 const catalogSiteID = "default"
 
+// catalogWriteTimeout bounds one catalog write, so an unreachable catalog
+// cannot hold an advertisement for long.
+const catalogWriteTimeout = 2 * time.Second
+
 // publishOffer writes the provider's offer to the catalog, if one is
 // configured. It is best effort: a failure is logged at Info and never fails
 // the advertisement, because the ClusterAdvertisement stays the source of
@@ -45,6 +49,8 @@ func (s *Server) publishOffer(
 	if s.catalog == nil {
 		return
 	}
+	ctx, cancel := context.WithTimeout(ctx, catalogWriteTimeout)
+	defer cancel()
 	offer := offerFromAdvertisement(req, cadv.Status.ReservedChunks, res, time.Now())
 	if err := s.catalog.UpsertOffer(ctx, offer); err != nil {
 		s.log.Info("catalog write failed (will retry next advertisement)",

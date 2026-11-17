@@ -40,7 +40,8 @@ const (
 
 // Writer is used by providers (and, at first, by the broker).
 type Writer interface {
-	// UpsertOffer stores the offer with OfferTTL.
+	// UpsertOffer stores the offer with its TTL: Offer.TTLSeconds, or
+	// OfferTTL when that is 0.
 	UpsertOffer(ctx context.Context, o Offer) error
 	// DeleteOffer removes the offer of one (provider, site).
 	DeleteOffer(ctx context.Context, providerID, siteID string) error

@@ -69,6 +69,16 @@ type Offer struct {
 	// Extra holds anything else, unstructured.
 	Extra map[string]any `json:"extra,omitempty"`
 
+	// TTLSeconds is how long this offer lives without a refresh. 0 means the
+	// default OfferTTL. Allowed range: MinTTLSeconds to MaxTTLSeconds.
+	TTLSeconds int `json:"ttlSeconds,omitempty"`
+
+	// ValiditySeconds is how long a resource booked from this offer is
+	// guaranteed by the provider. 0 means "not stated". Informational: the
+	// catalog stores it and never enforces it.
+	// Allowed range: 0 to MaxValiditySeconds (30 days).
+	ValiditySeconds int `json:"validitySeconds,omitempty"`
+
 	UpdatedAt time.Time `json:"updatedAt"`
 }
 

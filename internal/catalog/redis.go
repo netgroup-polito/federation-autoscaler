@@ -89,11 +89,18 @@ func (c *RedisCatalog) UpsertOffer(ctx context.Context, o Offer) error {
 	if err := validateKey(o.ProviderID, o.SiteID); err != nil {
 		return err
 	}
+	ttl, err := offerTTL(o)
+	if err != nil {
+		return err
+	}
+	if err = checkValidity(o); err != nil {
+		return err
+	}
 	data, err := json.Marshal(o)
 	if err != nil {
 		return fmt.Errorf("catalog: encode offer: %w", err)
 	}
-	if err := c.client.Set(ctx, redisKey(o.ProviderID, o.SiteID), data, OfferTTL).Err(); err != nil {
+	if err := c.client.Set(ctx, redisKey(o.ProviderID, o.SiteID), data, ttl).Err(); err != nil {
 		return fmt.Errorf("catalog: store offer: %w", err)
 	}
 	return nil

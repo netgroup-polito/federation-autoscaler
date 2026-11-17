@@ -107,6 +107,113 @@ func RunCatalogConformance(newBackend func() conformanceBackend) {
 		Expect(all).To(BeEmpty())
 	})
 
+	It("keeps an offer with its own TTL alive exactly that long", func() {
+		o := sampleOffer("fibercop", "asti")
+		o.TTLSeconds = 300
+		Expect(b.w.UpsertOffer(ctx, o)).To(Succeed())
+
+		// Well past the default OfferTTL, one second before its own TTL.
+		b.advance(299 * time.Second)
+		got, err := b.r.GetOffer(ctx, "fibercop", "asti")
+		Expect(err).NotTo(HaveOccurred())
+		Expect(got.TTLSeconds).To(Equal(300))
+
+		b.advance(2 * time.Second)
+		_, err = b.r.GetOffer(ctx, "fibercop", "asti")
+		Expect(err).To(MatchError(ErrNotFound))
+	})
+
+	It("drops an offer with a short TTL before the default OfferTTL", func() {
+		o := sampleOffer("fibercop", "asti")
+		o.TTLSeconds = MinTTLSeconds
+		Expect(b.w.UpsertOffer(ctx, o)).To(Succeed())
+
+		b.advance((MinTTLSeconds + 1) * time.Second)
+		_, err := b.r.GetOffer(ctx, "fibercop", "asti")
+		Expect(err).To(MatchError(ErrNotFound))
+	})
+
+	It("uses the default OfferTTL when TTLSeconds is 0", func() {
+		o := sampleOffer("fibercop", "asti")
+		o.TTLSeconds = 0
+		Expect(b.w.UpsertOffer(ctx, o)).To(Succeed())
+
+		b.advance(OfferTTL - time.Second)
+		_, err := b.r.GetOffer(ctx, "fibercop", "asti")
+		Expect(err).NotTo(HaveOccurred())
+
+		b.advance(2 * time.Second)
+		_, err = b.r.GetOffer(ctx, "fibercop", "asti")
+		Expect(err).To(MatchError(ErrNotFound))
+	})
+
+	for _, c := range []struct {
+		name string
+		ttl  int
+	}{
+		{"a negative ttlSeconds", -1},
+		{"a ttlSeconds below the minimum", MinTTLSeconds - 1},
+		{"a ttlSeconds above the maximum", MaxTTLSeconds + 1},
+	} {
+		It("rejects "+c.name+" and stores nothing", func() {
+			o := sampleOffer("fibercop", "asti")
+			o.TTLSeconds = c.ttl
+			Expect(b.w.UpsertOffer(ctx, o)).To(MatchError(ErrInvalidOffer))
+
+			_, err := b.r.GetOffer(ctx, "fibercop", "asti")
+			Expect(err).To(MatchError(ErrNotFound))
+		})
+	}
+
+	for _, c := range []struct {
+		name string
+		ttl  int
+	}{
+		{"the minimum ttlSeconds", MinTTLSeconds},
+		{"the maximum ttlSeconds", MaxTTLSeconds},
+	} {
+		It("accepts "+c.name, func() {
+			o := sampleOffer("fibercop", "asti")
+			o.TTLSeconds = c.ttl
+			Expect(b.w.UpsertOffer(ctx, o)).To(Succeed())
+		})
+	}
+
+	for _, c := range []struct {
+		name     string
+		validity int
+	}{
+		{"a negative validitySeconds", -1},
+		{"a validitySeconds above the maximum", MaxValiditySeconds + 1},
+	} {
+		It("rejects "+c.name+" and stores nothing", func() {
+			o := sampleOffer("fibercop", "asti")
+			o.ValiditySeconds = c.validity
+			Expect(b.w.UpsertOffer(ctx, o)).To(MatchError(ErrInvalidOffer))
+
+			_, err := b.r.GetOffer(ctx, "fibercop", "asti")
+			Expect(err).To(MatchError(ErrNotFound))
+		})
+	}
+
+	for _, c := range []struct {
+		name     string
+		validity int
+	}{
+		{"a validitySeconds of 0, meaning not stated", 0},
+		{"the maximum validitySeconds", MaxValiditySeconds},
+	} {
+		It("accepts "+c.name, func() {
+			o := sampleOffer("fibercop", "asti")
+			o.ValiditySeconds = c.validity
+			Expect(b.w.UpsertOffer(ctx, o)).To(Succeed())
+
+			got, err := b.r.GetOffer(ctx, "fibercop", "asti")
+			Expect(err).NotTo(HaveOccurred())
+			Expect(got.ValiditySeconds).To(Equal(c.validity))
+		})
+	}
+
 	It("restarts the TTL when the provider publishes again", func() {
 		o := sampleOffer("fibercop", "asti")
 		Expect(b.w.UpsertOffer(ctx, o)).To(Succeed())

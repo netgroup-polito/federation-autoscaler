@@ -66,13 +66,21 @@ func NewMemoryCatalogWithClock(now func() time.Time) *MemoryCatalog {
 	}
 }
 
-// UpsertOffer stores the offer with OfferTTL. A second call for the same
-// (provider, site) replaces the offer and restarts the TTL.
+// UpsertOffer stores the offer with its TTL (Offer.TTLSeconds, or OfferTTL
+// when that is 0). A second call for the same (provider, site) replaces the
+// offer and restarts the TTL.
 func (m *MemoryCatalog) UpsertOffer(ctx context.Context, o Offer) error {
 	if err := ctx.Err(); err != nil {
 		return err
 	}
 	if err := validateKey(o.ProviderID, o.SiteID); err != nil {
+		return err
+	}
+	ttl, err := offerTTL(o)
+	if err != nil {
+		return err
+	}
+	if err = checkValidity(o); err != nil {
 		return err
 	}
 	data, err := json.Marshal(o)
@@ -86,7 +94,7 @@ func (m *MemoryCatalog) UpsertOffer(ctx context.Context, o Offer) error {
 	m.purgeExpiredLocked(now)
 	m.entries[memoryKey{o.ProviderID, o.SiteID}] = memoryEntry{
 		data:      data,
-		expiresAt: now.Add(OfferTTL),
+		expiresAt: now.Add(ttl),
 	}
 	return nil
 }

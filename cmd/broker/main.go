@@ -153,7 +153,12 @@ func main() {
 	// exactly as before.
 	var catalogWriter catalog.Writer
 	if catalogAddr != "" {
-		rdb := redis.NewClient(&redis.Options{Addr: catalogAddr})
+		rdb := redis.NewClient(&redis.Options{
+			Addr:         catalogAddr,
+			DialTimeout:  2 * time.Second,
+			ReadTimeout:  2 * time.Second,
+			WriteTimeout: 2 * time.Second,
+		})
 		catalogWriter = catalog.NewRedisCatalog(rdb)
 		setupLog.Info("offer catalog enabled", "addr", catalogAddr)
 	}
