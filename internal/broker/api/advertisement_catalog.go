@@ -51,20 +51,21 @@ func (s *Server) publishOffer(
 	}
 	ctx, cancel := context.WithTimeout(ctx, catalogWriteTimeout)
 	defer cancel()
-	offer := offerFromAdvertisement(req, cadv.Status.ReservedChunks, res, time.Now())
+	offer := OfferFromAdvertisement(req, cadv.Status.ReservedChunks, res.PerChunk, time.Now())
 	if err := s.catalog.UpsertOffer(ctx, offer); err != nil {
 		s.log.Info("catalog write failed (will retry next advertisement)",
 			"err", err.Error(), "clusterId", req.ClusterID, "requestId", requestID)
 	}
 }
 
-// offerFromAdvertisement maps an accepted advertisement to the catalog Offer.
+// OfferFromAdvertisement maps an accepted advertisement to the catalog Offer.
 // Available is the FREE capacity: the advertised resources minus
 // reserved x PerChunk, per resource, never below zero.
-func offerFromAdvertisement(
+// The broker and the provider agent both call it, so they build the same offer.
+func OfferFromAdvertisement(
 	req *AdvertisementRequest,
 	reserved int32,
-	res chunk.Result,
+	perChunk corev1.ResourceList,
 	now time.Time,
 ) catalog.Offer {
 	return catalog.Offer{
@@ -73,7 +74,7 @@ func offerFromAdvertisement(
 		LiqoClusterID:   req.LiqoClusterID,
 		SiteID:          catalogSiteID,
 		Location:        locationFromTopology(req),
-		Available:       freeCapacity(req.Resources, reserved, res.PerChunk),
+		Available:       freeCapacity(req.Resources, reserved, perChunk),
 		UnitPrices:      req.UnitPrices,
 		CarbonIntensity: req.CarbonIntensity,
 		CarbonForecast:  req.CarbonForecast,
