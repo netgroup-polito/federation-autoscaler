@@ -524,6 +524,13 @@ type InstructionView struct {
 
 type InstructionsResponse struct {
 	Instructions []InstructionView `json:"instructions"`
+
+	// ReservedChunks is the number of chunks reserved on the ClusterAdvertisement of
+	// the caller. It is set only when the Broker knows it (a provider with an
+	// advertisement); absent means not known, which is different from 0. A provider
+	// uses it to refresh its catalog offer without waiting for the next
+	// advertisement. Older agents ignore it.
+	ReservedChunks *int32 `json:"reservedChunks,omitempty"`
 }
 
 // -----------------------------------------------------------------------------

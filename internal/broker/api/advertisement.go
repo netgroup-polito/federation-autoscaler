@@ -315,3 +315,22 @@ func decodeJSONBody(r *http.Request, out any) error {
 	}
 	return nil
 }
+
+// reservedChunksFor returns how many chunks are reserved on the ClusterAdvertisement
+// of the caller, for the poll response (GET /api/v1/instructions). It returns nil
+// when the value is not known: the caller has no advertisement (a consumer has
+// none) or the read failed. Nil is not 0: a provider must not read an unknown
+// value as "nothing is reserved".
+func (s *Server) reservedChunksFor(ctx context.Context, callerID string) *int32 {
+	var cadv brokerv1alpha1.ClusterAdvertisement
+	key := types.NamespacedName{Name: callerID, Namespace: s.namespace}
+	if err := s.client.Get(ctx, key, &cadv); err != nil {
+		if !apierrors.IsNotFound(err) {
+			s.log.V(1).Info("get ClusterAdvertisement for the poll response failed",
+				"clusterId", callerID, "err", err.Error())
+		}
+		return nil
+	}
+	n := cadv.Status.ReservedChunks
+	return &n
+}
