@@ -145,6 +145,24 @@
       register: fa_catalog_patch
       changed_when: "'patched' in fa_catalog_patch.stdout"
 
+    - name: Stop the broker writing offers (the providers write their own)
+      when: fa_catalog_provider_write | bool
+      ansible.builtin.shell:
+        cmd: |
+          set -e
+          args=$(kubectl --kubeconfig {{ cluster_kubeconfig }} -n {{ fa_namespace }} \
+            get deploy broker -o jsonpath='{.spec.template.spec.containers[0].args}')
+          case "$args" in
+            *--catalog-write=*) echo unchanged ;;
+            *)
+              kubectl --kubeconfig {{ cluster_kubeconfig }} -n {{ fa_namespace }} \
+                patch deploy broker --type=json -p \
+                '[{"op":"add","path":"/spec/template/spec/containers/0/args/-","value":"--catalog-write=false"}]'
+              echo patched ;;
+          esac
+      register: fa_catalog_write_patch
+      changed_when: "'patched' in fa_catalog_write_patch.stdout"
+
     - name: Wait for the broker rollout with the catalog flag
       ansible.builtin.shell:
         cmd: |

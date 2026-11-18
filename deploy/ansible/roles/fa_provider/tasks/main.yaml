@@ -40,6 +40,21 @@
         '{"data":{"brokerUrl":"https://{{ broker_address }}:{{ broker_node_port }}","clusterId":"{{ cluster_id }}","liqoClusterId":"{{ cluster_id }}","mockEcoUrl":"{{ fa_mock_eco_url }}","mockGeoUrl":"{{ fa_mock_geo_url }}"}}'
   changed_when: true
 
+# Provider-side offer writing (optional, demo): with fa_catalog_provider_write
+# (and fa_catalog) true, this provider writes its own offer to the catalog Redis
+# at fa_catalog_addr. The agent-config ConfigMap is applied from the base first,
+# so this patch comes after that apply, like the one above. Otherwise catalogAddr
+# stays empty and the provider writes no offer.
+- name: Point this provider at the catalog (it writes its own offer)
+  delegate_to: localhost
+  when: (fa_catalog | bool) and (fa_catalog_provider_write | bool)
+  ansible.builtin.shell:
+    cmd: |
+      kubectl --kubeconfig {{ cluster_kubeconfig }} -n {{ fa_namespace }} \
+        patch configmap agent-config --type merge -p \
+        '{"data":{"catalogAddr":"{{ fa_catalog_addr }}"}}'
+  changed_when: true
+
 # Location is AUTO-DISCOVERED from the provider's node IP (mock-geo maps the IP
 # to a region + coordinates that drive the eco/latency strategies). Optionally
 # define `fa_advertised_ip` in inventory (per host) to OVERRIDE the node IP — the

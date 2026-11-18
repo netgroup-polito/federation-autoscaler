@@ -112,5 +112,11 @@ fa_catalog: false
 # NodePort of the catalog Redis on the central host.
 fa_catalog_node_port: 30379
 
-# Address the consumer clusters use to reach the catalog Redis.
+# Address the consumer clusters (and the providers, with fa_catalog_provider_write)
+# use to reach the catalog Redis.
 fa_catalog_addr: "{{ broker_address }}:{{ fa_catalog_node_port }}"
+
+# When true (and fa_catalog is true), each provider writes its own offer to the
+# catalog Redis and the broker stops writing offers (--catalog-write=false).
+# Off by default: the broker writes the offers, exactly as before.
+fa_catalog_provider_write: false
