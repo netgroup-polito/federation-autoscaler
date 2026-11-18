@@ -209,9 +209,10 @@ func main() {
 			"Broker (default); \"local\" decides on this consumer from the catalog. "+
 			"Booking goes through the Broker in both modes. \"local\" needs --catalog-addr.")
 	flag.StringVar(&catalogAddr, "catalog-addr", "",
-		"(consumer role only) host:port of the Redis catalog the local brain reads "+
-			"provider offers from (read-only). Required with --brain=local; ignored "+
-			"otherwise.")
+		"host:port of the Redis catalog. Consumer role: the local brain reads "+
+			"provider offers from it (read-only); required with --brain=local, "+
+			"ignored otherwise. Provider role: the agent writes its own offer to "+
+			"it after every accepted advertisement; empty means no offer is written.")
 
 	opts := zap.Options{Development: true}
 	opts.BindFlags(flag.CommandLine)
@@ -368,6 +369,7 @@ func main() {
 			ConsoleAddr:           consoleAddr,
 			Logger:                ctrl.Log.WithName("provider"),
 			Probe:                 probe,
+			Catalog:               catalogWriter(catalogAddr),
 		}); err != nil {
 			setupLog.Error(err, "failed to bootstrap provider role")
 			os.Exit(1)
@@ -419,6 +421,22 @@ func validateFlags(role, clusterID, liqoClusterID, brokerURL,
 // fails fast and the next read retries.
 func catalogReader(brainMode, addr string) catalog.Reader {
 	if brainMode != consumer.BrainLocal || addr == "" {
+		return nil
+	}
+	return catalog.NewRedisCatalog(redis.NewClient(&redis.Options{
+		Addr:         addr,
+		DialTimeout:  2 * time.Second,
+		ReadTimeout:  2 * time.Second,
+		WriteTimeout: 2 * time.Second,
+	}))
+}
+
+// catalogWriter returns the Redis catalog this provider writes its own offer
+// to, or nil without an address (the provider then writes no offer). Same
+// short timeouts as catalogReader: an unreachable Redis must not hold up the
+// advertisement loop, which is also the provider's heartbeat.
+func catalogWriter(addr string) catalog.Writer {
+	if addr == "" {
 		return nil
 	}
 	return catalog.NewRedisCatalog(redis.NewClient(&redis.Options{
