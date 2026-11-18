@@ -52,6 +52,9 @@ type Server struct {
 	// catalog, when non-nil, receives one offer per accepted advertisement.
 	// Nil means the catalog is off.
 	catalog catalog.Writer
+	// catalogWriteDisabled, when true, makes publishOffer write nothing (the
+	// providers write their own offers).
+	catalogWriteDisabled bool
 }
 
 // ServerOptions bundles the construction-time settings of a Server. Empty
@@ -91,6 +94,11 @@ type ServerOptions struct {
 	// Catalog is the optional offer catalog writer. When nil the catalog is
 	// off and the broker behaves exactly as before.
 	Catalog catalog.Writer
+
+	// CatalogWriteDisabled stops the Server writing offers even when Catalog is
+	// set (--catalog-write=false, used when the providers write their own
+	// offers). The zero value means the Server writes, as before.
+	CatalogWriteDisabled bool
 }
 
 // NewServer returns a Server ready to serve traffic via Handler(). Panics if
@@ -116,14 +124,15 @@ func NewServer(opts ServerOptions) *Server {
 		resvTimeout = defaultReservationTimeout
 	}
 	return &Server{
-		log:                log,
-		client:             opts.Client,
-		namespace:          opts.Namespace,
-		sizer:              sizer,
-		consumers:          NewConsumerRegistry(),
-		reservationTimeout: resvTimeout,
-		justEnforced:       newStaleEnforced(),
-		catalog:            opts.Catalog,
+		log:                  log,
+		client:               opts.Client,
+		namespace:            opts.Namespace,
+		sizer:                sizer,
+		consumers:            NewConsumerRegistry(),
+		reservationTimeout:   resvTimeout,
+		justEnforced:         newStaleEnforced(),
+		catalog:              opts.Catalog,
+		catalogWriteDisabled: opts.CatalogWriteDisabled,
 	}
 }
 

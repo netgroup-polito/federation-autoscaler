@@ -39,6 +39,9 @@ const catalogWriteTimeout = 2 * time.Second
 // configured. It is best effort: a failure is logged at Info and never fails
 // the advertisement, because the ClusterAdvertisement stays the source of
 // truth and the next advertisement rewrites the offer.
+//
+// It writes nothing when the catalog is off or when catalogWriteDisabled is set
+// (the providers then write their own offers).
 func (s *Server) publishOffer(
 	ctx context.Context,
 	req *AdvertisementRequest,
@@ -46,7 +49,7 @@ func (s *Server) publishOffer(
 	res chunk.Result,
 	requestID string,
 ) {
-	if s.catalog == nil {
+	if s.catalog == nil || s.catalogWriteDisabled {
 		return
 	}
 	ctx, cancel := context.WithTimeout(ctx, catalogWriteTimeout)

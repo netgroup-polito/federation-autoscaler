@@ -203,3 +203,29 @@ func TestAdvertisementHandler_ResponseCarriesReservedChunks(t *testing.T) {
 		t.Errorf("ReservedChunks = %d, want 2", body.ReservedChunks)
 	}
 }
+
+func TestAdvertisementHandler_CatalogWriteDisabledWritesNothing(t *testing.T) {
+	mem := catalog.NewMemoryCatalog()
+	s := catServer(t, mem)
+	s.catalogWriteDisabled = true
+
+	w := catPost(t, s, catReq())
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, body = %s", w.Code, w.Body.String())
+	}
+	var body AdvertisementResponse
+	if err := json.Unmarshal(w.Body.Bytes(), &body); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if !body.Accepted {
+		t.Errorf("Accepted = false, want true: only the offer write is skipped")
+	}
+
+	all, err := mem.ListOffers(context.Background())
+	if err != nil {
+		t.Fatalf("ListOffers: %v", err)
+	}
+	if len(all) != 0 {
+		t.Errorf("offers = %d, want 0 when the broker does not write", len(all))
+	}
+}
