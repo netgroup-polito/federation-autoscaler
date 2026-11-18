@@ -52,6 +52,7 @@ import (
 	"github.com/netgroup-polito/federation-autoscaler/internal/agent/nodeip"
 	"github.com/netgroup-polito/federation-autoscaler/internal/agent/provider/snapshot"
 	brokerapi "github.com/netgroup-polito/federation-autoscaler/internal/broker/api"
+	"github.com/netgroup-polito/federation-autoscaler/internal/catalog"
 )
 
 // DefaultInterval is the cadence at which the publisher POSTs to
@@ -141,6 +142,11 @@ type Options struct {
 	// this to health.Probe.RecordPoll so a stalled advertisement
 	// reddens /readyz alongside a stalled instruction poll.
 	OnPublishResult func(success bool)
+
+	// Catalog, if non-nil, receives the offer of this provider after every
+	// accepted advertisement (best effort: a failed write is logged and never
+	// stops the loop). Nil means this provider writes no offer.
+	Catalog catalog.Writer
 }
 
 // Publisher drives the 30 s advertisement loop. A single Run goroutine
@@ -165,6 +171,7 @@ type Publisher struct {
 	interval      time.Duration
 	log           logr.Logger
 	onResult      func(success bool)
+	catalog       catalog.Writer
 }
 
 // New validates opts and returns a Publisher ready to Run. It performs
@@ -206,6 +213,7 @@ func New(opts Options) (*Publisher, error) {
 		interval:      interval,
 		log:           logger,
 		onResult:      opts.OnPublishResult,
+		catalog:       opts.Catalog,
 	}, nil
 }
 
@@ -302,6 +310,29 @@ func (p *Publisher) publishOnce(ctx context.Context) {
 		"percentCappedResources", len(pctCustom),
 		"fixedCappedResources", len(fixedCustom),
 		"piggybackedInstructions", len(resp.Instructions))
+
+	// Write this provider's own offer to the catalog (no-op when none is set).
+	p.publishOffer(ctx, req, resp)
+}
+
+// catalogWriteTimeout bounds one catalog write, so an unreachable catalog
+// cannot hold up the advertisement loop.
+const catalogWriteTimeout = 2 * time.Second
+
+// publishOffer writes this provider's own offer to the catalog, if one is
+// configured. It is best effort, like the advertisement itself: a failure is
+// logged at Info and never stops the loop, and the next cycle writes the
+// offer again. An advertisement the Broker did not accept is not published.
+func (p *Publisher) publishOffer(ctx context.Context, req *brokerapi.AdvertisementRequest, resp *brokerapi.AdvertisementResponse) {
+	if p.catalog == nil || !resp.Accepted {
+		return
+	}
+	ctx, cancel := context.WithTimeout(ctx, catalogWriteTimeout)
+	defer cancel()
+	offer := brokerapi.OfferFromAdvertisement(req, resp.ReservedChunks, resp.ChunkResources, time.Now())
+	if err := p.catalog.UpsertOffer(ctx, offer); err != nil {
+		p.log.Info("catalog write failed (will retry next advertisement)", "err", err.Error())
+	}
 }
 
 // applyCapacityScaling caps each allocatable resource to the operator's
