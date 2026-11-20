@@ -25,8 +25,9 @@ import (
 	"k8s.io/apimachinery/pkg/util/validation"
 )
 
-// ErrInvalidOffer is returned when an offer cannot be stored because its key
-// or its TTL is not valid. Use errors.Is(err, ErrInvalidOffer) to test for it.
+// ErrInvalidOffer is returned when an offer cannot be stored because its key,
+// TTL or validity is not valid. Use errors.Is(err, ErrInvalidOffer) to test
+// for it.
 var ErrInvalidOffer = errors.New("catalog: invalid offer")
 
 // validateKey checks that providerID and siteID are safe to embed in a
