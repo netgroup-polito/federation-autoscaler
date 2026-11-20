@@ -290,3 +290,15 @@ func TestUnderstandAmount_DropsAnInventedLatencyLimit(t *testing.T) {
 		t.Errorf("a written limit must stay: %+v", res.Amount)
 	}
 }
+
+// A value written plainly in the text wins over the model's reading of it.
+func TestUnderstandAmount_TextValuesWin(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewEncoder(w).Encode(ollamaResponse{Response: `{"memoryGiB": 15.625, "nodes": null, "maxLatencyMs": 3000}`, Done: true})
+	}))
+	defer srv.Close()
+	res := UnderstandAmount(context.Background(), New(srv.URL, "m"), "3 VMs with 16 GB, at most 3 ms")
+	if res.Amount.Memory.Cmp(resource.MustParse("16Gi")) != 0 || res.Amount.Nodes != 3 || res.Amount.MaxLatencyMs != 3 {
+		t.Errorf("amount = %s, want 16Gi, 3 nodes, max 3 ms", res.Amount)
+	}
+}

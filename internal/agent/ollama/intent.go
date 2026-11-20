@@ -25,6 +25,8 @@ import (
 	"sort"
 	"strings"
 	"time"
+	"unicode"
+	"unicode/utf8"
 
 	brokerapi "github.com/netgroup-polito/federation-autoscaler/internal/broker/api"
 )
@@ -154,8 +156,23 @@ func (r intentResponse) toIntent(text string) (Intent, error) {
 	if len(r.Places) > maxIntentPlaces || len(r.Exclude) > maxIntentPlaces {
 		return Intent{}, fmt.Errorf("too many places (%d, %d)", len(r.Places), len(r.Exclude))
 	}
-	in.Places = placesInText(r.Places, text)
-	in.Exclude = placesInText(r.Exclude, text)
+	// A "place" the model wrote as "outside X" or "not in X" is an exclusion.
+	var places, exclude []string
+	exclude = append(exclude, r.Exclude...)
+	for _, p := range r.Places {
+		if excludePrefixRe.MatchString(strings.TrimSpace(p)) {
+			exclude = append(exclude, p)
+		} else {
+			places = append(places, p)
+		}
+	}
+	in.Exclude = placesInText(exclude, text)
+	// A place cannot be both wanted and avoided: avoiding wins.
+	for _, p := range placesInText(places, text) {
+		if !containsFold(in.Exclude, p) {
+			in.Places = append(in.Places, p)
+		}
+	}
 	// Like a latency limit, "renewable only" must be in the text: a model
 	// tends to set it for any "green" request, which would drop every
 	// provider that is clean but not declared renewable.
@@ -174,9 +191,64 @@ func (r intentResponse) toIntent(text string) (Intent, error) {
 		if math.IsNaN(h) || h < 0 || h > maxIntentHours {
 			return Intent{}, fmt.Errorf("minGuaranteedHours %v out of range [0, %d]", h, maxIntentHours)
 		}
-		in.MinGuaranteedHours = h
+		// A duration must be in the text: a model can turn "4 CPUs" or
+		// "6 ms" into hours.
+		if durationWordRe.MatchString(text) {
+			in.MinGuaranteedHours = h
+		}
 	}
 	return in, nil
+}
+
+func containsFold(list []string, s string) bool {
+	for _, v := range list {
+		if strings.EqualFold(v, s) {
+			return true
+		}
+	}
+	return false
+}
+
+// checkWithText corrects the model's intent with what fixed patterns read
+// from the text over the providers' own places, which is exact for what it
+// recognises: an exclusion in the text always wins, a known place the model
+// missed is added, a preference keyword decides the preference, and a
+// duration the text states decides the duration.
+func checkWithText(in Intent, text string, knownPlaces []string) Intent {
+	pat := ParseIntent(text, knownPlaces)
+	for _, x := range pat.Exclude {
+		if !containsFold(in.Exclude, x) {
+			in.Exclude = append(in.Exclude, x)
+		}
+	}
+	kept := in.Places[:0:0]
+	for _, p := range in.Places {
+		excluded := false
+		for _, x := range in.Exclude {
+			if strings.EqualFold(p, x) || placeRe(x).MatchString(p) {
+				excluded = true
+			}
+		}
+		if !excluded {
+			kept = append(kept, p)
+		}
+	}
+	for _, p := range pat.Places {
+		if !containsFold(kept, p) && !containsFold(in.Exclude, p) {
+			kept = append(kept, p)
+		}
+	}
+	in.Places = nil
+	if len(kept) > 0 {
+		in.Places = kept
+	}
+	if pat.Prefer != PreferNone {
+		in.Prefer = pat.Prefer
+	}
+	if pat.MinGuaranteedHours > 0 {
+		in.MinGuaranteedHours = pat.MinGuaranteedHours
+	}
+	return in
 }
 
 // placeRe matches a place name as a whole word. A short all-capitals code
@@ -199,9 +271,9 @@ func placesInText(names []string, text string) []string {
 	out := make([]string, 0, len(names))
 	seen := map[string]bool{}
 	for _, n := range names {
-		n = strings.TrimSpace(n)
+		n = placePrefixRe.ReplaceAllString(strings.TrimSpace(n), "")
 		key := strings.ToLower(n)
-		if n == "" || seen[key] || !placeRe(n).MatchString(text) {
+		if n == "" || seen[key] || !capitalisedInText(n, text) {
 			continue
 		}
 		seen[key] = true
@@ -211,6 +283,27 @@ func placesInText(names []string, text string) []string {
 		return nil
 	}
 	return out
+}
+
+// placePrefixRe is a preposition a model may copy with the place ("in
+// Turin"); excludePrefixRe marks a place the request avoids ("outside X").
+var (
+	placePrefixRe   = regexp.MustCompile(`(?i)^(?:(?:not|but\s+not|except|outside(?:\s+of)?|without|no|in|at|near|from)\s+)+`)
+	excludePrefixRe = regexp.MustCompile(`(?i)^(?:not|but\s+not|except|outside|without|no)\b`)
+	durationWordRe  = regexp.MustCompile(`(?i)\b(?:hours?|hrs?|h|days?|weeks?|tomorrow|tonight)\b`)
+)
+
+// capitalisedInText reports whether name appears in text as a whole word
+// starting with a capital letter: places are proper nouns, so a model's "us",
+// "me" or "closest" is not taken for one.
+func capitalisedInText(name, text string) bool {
+	for _, loc := range placeRe(name).FindAllStringIndex(text, -1) {
+		word := strings.TrimLeftFunc(text[loc[0]:loc[1]], func(r rune) bool { return !unicode.IsLetter(r) })
+		if r, _ := utf8.DecodeRuneInString(word); unicode.IsUpper(r) {
+			return true
+		}
+	}
+	return false
 }
 
 // ExtractIntent asks the model for the request's preferences. The returned
@@ -354,7 +447,7 @@ func UnderstandIntent(ctx context.Context, c *Client, text string, knownPlaces [
 		trace, in, err := c.ExtractIntent(ctx, text)
 		res.Trace = trace
 		if err == nil {
-			res.Intent = in
+			res.Intent = checkWithText(in, text, knownPlaces)
 			res.Source = AmountSourceAI
 			return res
 		}

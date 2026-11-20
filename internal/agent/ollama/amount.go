@@ -256,6 +256,7 @@ func UnderstandAmount(ctx context.Context, c *Client, text string) AmountResult 
 			if !latencyNumberRe.MatchString(text) {
 				amount.MaxLatencyMs = 0
 			}
+			amount = preferTextAmount(amount, ParseAmount(text))
 			res.Amount = amount
 			res.Source = AmountSourceAI
 			if amount.IsZero() {
@@ -271,6 +272,30 @@ func UnderstandAmount(ctx context.Context, c *Client, text string) AmountResult 
 		res.Source = AmountSourceNone
 	}
 	return res
+}
+
+// preferTextAmount keeps every value the fixed patterns read from the text
+// ("16 GB", "at most 3 ms", "two machines") over the model's reading of it,
+// which can slip (16 GB read as 16000 MiB, 3 ms as 3000 ms). The model's
+// value is kept only where the patterns found nothing, e.g. a phrasing they
+// do not know.
+func preferTextAmount(ai, text Amount) Amount {
+	if !text.CPU.IsZero() {
+		ai.CPU = text.CPU
+	}
+	if !text.Memory.IsZero() {
+		ai.Memory = text.Memory
+	}
+	if text.GPU > 0 {
+		ai.GPU = text.GPU
+	}
+	if text.Nodes > 0 {
+		ai.Nodes = text.Nodes
+	}
+	if text.MaxLatencyMs > 0 {
+		ai.MaxLatencyMs = text.MaxLatencyMs
+	}
+	return ai
 }
 
 // Patterns for ParseAmount. Numbers are digits ("4", "2.5", "2,5") or the

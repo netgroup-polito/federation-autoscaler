@@ -27,12 +27,13 @@ import (
 
 func TestMightSplit(t *testing.T) {
 	for text, want := range map[string]bool{
-		"I need 2 VMs in Turin and 1 VM in Frankfurt": true,
-		"2 VMs in Turin, 1 in Frankfurt":              true,
-		"4 CPUs and 8 GB in Turin":                    false, // one place
-		"I need 2 VMs in Turin":                       false,
-		"the cheapest and the greenest":               false, // no place
-		"a VM in Turin or in Milan":                   false, // no conjunction: a choice
+		"I need 2 VMs in Turin and 1 VM in Frankfurt":      true,
+		"2 VMs in Turin, 1 in Frankfurt":                   true,
+		"4 CPUs and 8 GB in Turin":                         false, // one place
+		"I need 2 VMs in Turin":                            false,
+		"the cheapest and the greenest":                    false, // no place
+		"a VM in Turin or in Milan":                        false, // no conjunction: a choice
+		"A VM in Turin or in Cuneo, whichever is cheaper.": false, // a choice, despite the comma
 	} {
 		if got := MightSplit(text); got != want {
 			t.Errorf("MightSplit(%q) = %v, want %v", text, got, want)
@@ -48,6 +49,13 @@ func TestCheckParts(t *testing.T) {
 	}
 	if got, err := checkParts([]string{"2 VMs in Turin and 1 VM in Frankfurt"}, text); err != nil || !reflect.DeepEqual(got, []string{text}) {
 		t.Errorf("one part must be the whole text: %v, %v", got, err)
+	}
+	// A part that asks for nothing is a condition, not a request: the
+	// request stays whole.
+	cond := "I need 3 VMs in Turin, the cheapest, and nothing in Frankfurt."
+	if got, err := checkParts([]string{"3 VMs in Turin, the cheapest", "nothing in Frankfurt"}, cond); err != nil ||
+		!reflect.DeepEqual(got, []string{cond}) {
+		t.Errorf("a part asking for nothing must leave the request whole: %v, %v", got, err)
 	}
 	if _, err := checkParts([]string{"2 VMs in Turin", "1 VM in Milan"}, text); err == nil {
 		t.Error("a place not in the request must be rejected")

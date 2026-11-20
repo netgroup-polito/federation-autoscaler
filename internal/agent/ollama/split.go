@@ -51,9 +51,18 @@ var (
 	splitConjunctionRe = regexp.MustCompile(`(?i)\band\b|\bplus\b|[,;]`)
 )
 
+// orChoiceRe finds a choice between places ("in Turin or in Cuneo"), which is
+// one request with a choice, never two requests.
+var orChoiceRe = regexp.MustCompile(`\b(?:in|at|from|near)\s+\p{Lu}[\p{L}'-]*\s*,?\s+or\s+(?:(?:in|at|from|near)\s+)?\p{Lu}`)
+
+// emptyPartRe finds a part that asks for nothing ("nothing in Frankfurt",
+// "0 VMs in Frankfurt"): that is a condition of the request, not a request.
+var emptyPartRe = regexp.MustCompile(`(?i)^\s*(?:nothing|none|no|not|except|without|zero|0)\b`)
+
 // MightSplit reports whether text may ask for resources in several places.
 func MightSplit(text string) bool {
-	return len(splitHintRe.FindAllStringIndex(text, -1)) >= 2 && splitConjunctionRe.MatchString(text)
+	return len(splitHintRe.FindAllStringIndex(text, -1)) >= 2 && splitConjunctionRe.MatchString(text) &&
+		!orChoiceRe.MatchString(text)
 }
 
 // SplitResult is what UnderstandSplit concluded.
@@ -127,7 +136,7 @@ func checkParts(parts []string, text string) ([]string, error) {
 	for _, p := range parts {
 		p = strings.TrimSpace(p)
 		key := strings.ToLower(p)
-		if p == "" || seen[key] {
+		if p == "" || seen[key] || emptyPartRe.MatchString(p) {
 			continue
 		}
 		if len(p) > len(text)+64 {

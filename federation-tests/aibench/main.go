@@ -153,7 +153,15 @@ func main() {
 	parallel := flag.Int("parallel", 10, "requests at once for the parallel test (0 skips it)")
 	timeout := flag.Duration("timeout", 120*time.Second, "bound on one AI call")
 	out := flag.String("out", "aibench.jsonl", "file for every single answer (JSON lines)")
+	split := flag.Bool("split", false, "check only how requests naming several places are split")
 	flag.Parse()
+
+	if *split {
+		for _, model := range split2(*models) {
+			checkSplit(ollama.NewWithOptions(*url, model, ollama.Options{API: *api, Timeout: *timeout}), model, *runs)
+		}
+		return
+	}
 
 	f, err := os.Create(*out)
 	if err != nil {
@@ -165,10 +173,10 @@ func main() {
 
 	fmt.Println("| model | api | job | choice ok | amount ok | fallback | median s | p90 s | parallel | parallel median s | parallel req/min |")
 	fmt.Println("|---|---|---|---|---|---|---|---|---|---|---|")
-	for _, model := range split(*models) {
+	for _, model := range split2(*models) {
 		client := ollama.NewWithOptions(*url, model, ollama.Options{API: *api, Timeout: *timeout})
 		warmUp(client)
-		for _, job := range split(*jobs) {
+		for _, job := range split2(*jobs) {
 			var all []answer
 			for run := 1; run <= *runs; run++ {
 				for _, q := range questions {
@@ -327,7 +335,7 @@ func percentile(v []float64, p float64) float64 {
 	return s[int(math.Ceil(p/100*float64(len(s))))-1]
 }
 
-func split(s string) []string {
+func split2(s string) []string {
 	var out []string
 	for _, p := range strings.Split(s, ",") {
 		if p = strings.TrimSpace(p); p != "" {
@@ -335,4 +343,36 @@ func split(s string) []string {
 		}
 	}
 	return out
+}
+
+// splitQuestions are requests and the parts they must be split into (one
+// part: not split).
+var splitQuestions = []struct {
+	text string
+	want int
+}{
+	{"I need 2 VMs in Turin and 1 VM in Frankfurt.", 2},
+	{"2 VMs in Turin and 1 in Frankfurt, at most 12 ms.", 2},
+	{"One VM in Cuneo, two in Turin and one in Frankfurt.", 3},
+	{"4 CPUs and 8 GB in Turin.", 1},
+	{"I need 3 VMs in Turin, the cheapest, and nothing in Frankfurt.", 1},
+	{"A VM in Turin or in Cuneo, whichever is cheaper.", 1},
+}
+
+// checkSplit asks each split question runs times and prints the parts.
+func checkSplit(c *ollama.Client, model string, runs int) {
+	ok, total := 0, 0
+	for range runs {
+		for _, q := range splitQuestions {
+			start := time.Now()
+			res := ollama.UnderstandSplit(context.Background(), c, q.text)
+			total++
+			good := len(res.Parts) == q.want
+			if good {
+				ok++
+			}
+			fmt.Printf("%s | %v | %.1fs | %q -> %q %s\n", model, good, time.Since(start).Seconds(), q.text, res.Parts, res.AIError)
+		}
+	}
+	fmt.Printf("SPLIT %s: %d/%d right\n", model, ok, total)
 }

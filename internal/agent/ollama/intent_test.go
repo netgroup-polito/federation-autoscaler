@@ -193,3 +193,37 @@ func TestValidJob(t *testing.T) {
 }
 
 var _ = brokerv1alpha1.ChunkTypeStandard
+
+// The code checks correct the model's usual slips: a non-place taken for a
+// place, "outside X" kept as a place, a place both wanted and avoided, a
+// duration taken from another number, and a preference keyword ignored.
+func TestUnderstandIntent_CodeChecksTheModel(t *testing.T) {
+	known := KnownPlaces(demoGroups())
+	for _, c := range []struct {
+		text, answer string
+		want         Intent
+	}{
+		{"I need 4 CPUs and 8 GB with the lowest latency to us.",
+			`{"places":["us"],"minGuaranteedHours":4,"prefer":"latency"}`, Intent{Prefer: PreferLatency}},
+		{"Need 1 server, low cost, outside Frankfurt.",
+			`{"places":["outside Frankfurt"],"prefer":"price"}`, Intent{Exclude: []string{"Frankfurt"}, Prefer: PreferPrice}},
+		{"8 GB of memory and 2 cores, except in Turin, the greenest.",
+			`{"places":["Turin"],"exclude":["Turin"],"prefer":"green"}`, Intent{Exclude: []string{"Turin"}, Prefer: PreferGreen}},
+		{"I need 2 VMs in Turin.",
+			`{"places":[],"prefer":"capacity"}`, Intent{Places: []string{"Turin"}, Prefer: PreferCapacity}},
+		{"I need 1 VM, the greenest over the next hours.",
+			`{"prefer":"green"}`, Intent{Prefer: PreferGreenForecast}},
+		{"Give me 2 nodes with renewables, at most 6 ms",
+			`{"places":["at most 6 ms"],"renewableOnly":true,"minGuaranteedHours":6,"prefer":"latency"}`,
+			Intent{RenewableOnly: true, Prefer: PreferLatency}},
+	} {
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			_ = json.NewEncoder(w).Encode(ollamaResponse{Response: c.answer, Done: true})
+		}))
+		res := UnderstandIntent(context.Background(), New(srv.URL, "m"), c.text, known)
+		srv.Close()
+		if res.AIError != "" || !reflect.DeepEqual(res.Intent, c.want) {
+			t.Errorf("%q: got %+v (err %q), want %+v", c.text, res.Intent, res.AIError, c.want)
+		}
+	}
+}
