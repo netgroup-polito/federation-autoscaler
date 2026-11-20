@@ -500,7 +500,8 @@ func TestSelect_OpenAIAPI(t *testing.T) {
 		t.Errorf("path = %q, want /v1/chat/completions", path)
 	}
 	if len(req.Messages) != 2 || req.Messages[0].Role != "system" || req.Messages[1].Role != "user" ||
-		req.Messages[0].Content != SystemPrompt || req.ResponseFormat["type"] != "json_object" || req.Model != "qwen" {
+		req.Messages[0].Content != SystemPrompt || req.ResponseFormat["type"] != "json_object" || req.Model != "qwen" ||
+		req.ReasoningEffort != "none" || req.ChatTemplateKwargs["enable_thinking"] != false {
 		t.Errorf("unexpected request: %+v", req)
 	}
 	if len(trace.Ranked) != 2 || trace.Ranked[0] != providerTwo {
@@ -570,5 +571,23 @@ func TestValidAPI(t *testing.T) {
 		if got := ValidAPI(api); got != want {
 			t.Errorf("ValidAPI(%q) = %v, want %v", api, got, want)
 		}
+	}
+}
+
+// Ollama's own API always asks the model not to think.
+func TestSelect_OllamaAPI_ThinkingOff(t *testing.T) {
+	var got map[string]any
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewDecoder(r.Body).Decode(&got)
+		_ = json.NewEncoder(w).Encode(ollamaResponse{Response: `{"rankedList":["provider-1","provider-2"]}`, Done: true})
+	}))
+	defer srv.Close()
+	if _, err := New(srv.URL, "qwen3:4b").Select(context.Background(), "any", []brokerapi.NodeGroupView{
+		makeNodeGroup(providerOne, 3, 0, nil, nil, ""), makeNodeGroup(providerTwo, 3, 0, nil, nil, ""),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if think, ok := got["think"]; !ok || think != false {
+		t.Errorf("think = %v (present %v), want false", think, ok)
 	}
 }

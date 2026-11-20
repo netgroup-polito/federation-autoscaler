@@ -65,7 +65,8 @@ func okEnvelope(response string) ollamaResponse {
 
 // The model decides on its own: the request is plain JSON mode with the
 // server's default sampling -- no schema, no temperature, no seed -- whatever
-// Options are set.
+// Options are set. The one extra field is think=false, which only stops a
+// thinking model from writing a hidden reasoning first (see ollamaRequest).
 func TestRequestShape_PlainJSONModeOnly(t *testing.T) {
 	for name, c := range map[string]func(url string) *Client{
 		"New":         func(url string) *Client { return New(url, "m") },
@@ -84,7 +85,7 @@ func TestRequestShape_PlainJSONModeOnly(t *testing.T) {
 			}
 			for key := range *body {
 				switch key {
-				case "model", "system", "prompt", "format", "stream":
+				case "model", "system", "prompt", "format", "stream", "think":
 				default:
 					t.Errorf("unexpected request field %q: only the model, prompts and JSON mode are sent", key)
 				}

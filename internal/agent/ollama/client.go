@@ -149,14 +149,21 @@ func (c *Client) WithMeasuredLatencies(rtts map[string]float64) *Client {
 	return &cp
 }
 
-// ollamaRequest is the JSON body sent to POST /api/generate.
+// ollamaRequest is the JSON body sent to POST /api/generate. Think is always
+// false: a model that "thinks" first (Qwen3 and later) writes a long hidden
+// reasoning before the answer, which on CPU took 17 s instead of 0.3 s on the
+// lab for the same answer. Models that do not think ignore it.
 type ollamaRequest struct {
 	Model  string `json:"model"`
 	System string `json:"system"`
 	Prompt string `json:"prompt"`
 	Format string `json:"format"`
 	Stream bool   `json:"stream"`
+	Think  *bool  `json:"think,omitempty"`
 }
+
+// noThinking is the value sent to switch a thinking model's reasoning off.
+var noThinking = false
 
 // ollamaResponse is the JSON body returned by POST /api/generate (non-streaming).
 // Beyond the generated text it carries the runtime's own timing, which is the
@@ -344,12 +351,16 @@ func (c *Client) SelectDetailed(ctx context.Context, userPrompt string, nodeGrou
 
 // openAIRequest is the JSON body sent to POST /v1/chat/completions.
 // ResponseFormat {"type":"json_object"} is the OpenAI-style equivalent of
-// Ollama's `format: "json"`.
+// Ollama's `format: "json"`. Thinking is switched off both ways servers
+// understand: Ollama reads ReasoningEffort "none", vLLM reads
+// ChatTemplateKwargs enable_thinking=false; each ignores the other.
 type openAIRequest struct {
-	Model          string            `json:"model"`
-	Messages       []openAIMessage   `json:"messages"`
-	ResponseFormat map[string]string `json:"response_format"`
-	Stream         bool              `json:"stream"`
+	Model              string            `json:"model"`
+	Messages           []openAIMessage   `json:"messages"`
+	ResponseFormat     map[string]string `json:"response_format"`
+	Stream             bool              `json:"stream"`
+	ReasoningEffort    string            `json:"reasoning_effort,omitempty"`
+	ChatTemplateKwargs map[string]any    `json:"chat_template_kwargs,omitempty"`
 }
 
 type openAIMessage struct {
@@ -383,7 +394,9 @@ func (c *Client) endpoint(trace *Trace) (string, any) {
 				{Role: "system", Content: trace.SystemPrompt},
 				{Role: "user", Content: trace.UserPrompt},
 			},
-			ResponseFormat: map[string]string{"type": "json_object"},
+			ResponseFormat:     map[string]string{"type": "json_object"},
+			ReasoningEffort:    "none",
+			ChatTemplateKwargs: map[string]any{"enable_thinking": false},
 		}
 	}
 	return c.baseURL + "/api/generate", ollamaRequest{
@@ -392,6 +405,7 @@ func (c *Client) endpoint(trace *Trace) (string, any) {
 		Prompt: trace.UserPrompt,
 		Format: trace.Format,
 		Stream: false,
+		Think:  &noThinking,
 	}
 }
 

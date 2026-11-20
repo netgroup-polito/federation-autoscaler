@@ -156,8 +156,11 @@ func (r intentResponse) toIntent(text string) (Intent, error) {
 	}
 	in.Places = placesInText(r.Places, text)
 	in.Exclude = placesInText(r.Exclude, text)
+	// Like a latency limit, "renewable only" must be in the text: a model
+	// tends to set it for any "green" request, which would drop every
+	// provider that is clean but not declared renewable.
 	if r.RenewableOnly != nil {
-		in.RenewableOnly = *r.RenewableOnly
+		in.RenewableOnly = *r.RenewableOnly && renewableRe.MatchString(text)
 	}
 	if r.Prefer != nil {
 		p := strings.TrimSpace(*r.Prefer)
@@ -511,13 +514,17 @@ func WithoutPlaces(groups []brokerapi.NodeGroupView, places []string) []brokerap
 }
 
 // inPlaces reports whether the provider's city or region is one of places.
+// A place matches when the city or region appears in it as a whole word, so
+// a model's "in Frankfurt" or "outside Frankfurt" still matches Frankfurt.
 func inPlaces(ng brokerapi.NodeGroupView, places []string) bool {
 	if ng.Topology == nil {
 		return false
 	}
 	for _, p := range places {
-		if strings.EqualFold(p, ng.Topology.City) || strings.EqualFold(p, ng.Topology.Region) {
-			return true
+		for _, name := range []string{ng.Topology.City, ng.Topology.Region} {
+			if name != "" && (strings.EqualFold(p, name) || placeRe(name).MatchString(p)) {
+				return true
+			}
 		}
 	}
 	return false

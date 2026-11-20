@@ -22,6 +22,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"reflect"
+	"slices"
 	"testing"
 
 	corev1 "k8s.io/api/core/v1"
@@ -89,6 +90,17 @@ func TestIntentResponse_DropsPlacesNotInText(t *testing.T) {
 	}
 	if !reflect.DeepEqual(in.Places, []string{"Turin"}) || len(in.Exclude) != 0 || in.Prefer != PreferPrice {
 		t.Errorf("got %+v", in)
+	}
+	// A place with its preposition still matches the city, and "renewable
+	// only" needs the word in the text.
+	yes := true
+	green, err := intentResponse{Exclude: []string{"outside Frankfurt"}, RenewableOnly: &yes, Prefer: &prefer}.
+		toIntent("1 VM, the greenest, outside Frankfurt")
+	if err != nil || green.RenewableOnly {
+		t.Errorf("renewableOnly must need the word in the text: %+v %v", green, err)
+	}
+	if got := RankByIntent(demoGroups(), green, nil, nil); slices.Contains(got, "provider-3") {
+		t.Errorf("\"outside Frankfurt\" must drop provider-3: %v", got)
 	}
 	bad := "fastest-ever"
 	if _, err := (intentResponse{Prefer: &bad}).toIntent("x"); err == nil {
