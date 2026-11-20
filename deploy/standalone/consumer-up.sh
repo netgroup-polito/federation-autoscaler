@@ -21,6 +21,7 @@
 #                  [--namespace <ns>] [--public-endpoint <ip|host>]
 #                  [--mock-geo-url <url>]
 #                  [--ollama-url <url>] [--ollama-model <name>] [--ollama-timeout <dur>]
+#                  [--llm-api <ollama|openai>]
 #                  [--pod-cidr <cidr>] [--service-cidr <cidr>]
 #                  [--liqo-provider <k3s|kubeadm|…>] [--skip-liqo]
 #                  [--ca-image <img>] [--scale-down-unneeded-time <dur>]
@@ -37,7 +38,9 @@
 #                  that LLM to choose the provider; without it, ConsumerChoice
 #                  uses the deterministic fallback. --ollama-model (default
 #                  llama3.2) and --ollama-timeout (default 120s, per LLM call)
-#                  apply only when it is set.
+#                  apply only when it is set. --llm-api (default ollama) picks
+#                  the server's API: "openai" for an OpenAI-style server (Ollama,
+#                  vLLM or KubeAI), whose URL may end in /v1.
 #   --pod-cidr / --service-cidr  Passed to `liqoctl install`; MUST be globally
 #                  non-overlapping across the federation.
 #   --scale-down-unneeded-time  CA scale-down window (default 5m; use ~1m for a
@@ -69,6 +72,7 @@ MOCK_GEO_URL=""
 OLLAMA_URL=""
 OLLAMA_MODEL="llama3.2"
 OLLAMA_TIMEOUT="120s"
+LLM_API="ollama"
 POD_CIDR=""
 SERVICE_CIDR=""
 LIQO_PROVIDER="k3s"
@@ -95,6 +99,7 @@ while [[ $# -gt 0 ]]; do
     --ollama-url)                OLLAMA_URL="$2"; shift 2 ;;
     --ollama-model)              OLLAMA_MODEL="$2"; shift 2 ;;
     --ollama-timeout)            OLLAMA_TIMEOUT="$2"; shift 2 ;;
+    --llm-api)                   LLM_API="$2"; shift 2 ;;
     --pod-cidr)                  POD_CIDR="$2"; shift 2 ;;
     --service-cidr)              SERVICE_CIDR="$2"; shift 2 ;;
     --liqo-provider)             LIQO_PROVIDER="$2"; shift 2 ;;
@@ -225,9 +230,9 @@ apply_overlay "${FA_REPO_ROOT}/config/standalone/grpc-server" "grpc-server"
 #    optionally, at the Ollama server ConsumerChoice asks (empty URL = no LLM).
 log "Configuring agent-config (broker + mock-geo URL$([[ -z "$OLLAMA_URL" ]] || echo ' + Ollama'))"
 kubectl -n "$NAMESPACE" patch configmap agent-config --type merge -p \
-  "$(printf '{"data":{"clusterId":"%s","liqoClusterId":"%s","brokerUrl":"%s","mockEcoUrl":"","mockGeoUrl":"%s","ollamaUrl":"%s","ollamaModel":"%s","ollamaTimeout":"%s"}}' \
+  "$(printf '{"data":{"clusterId":"%s","liqoClusterId":"%s","brokerUrl":"%s","mockEcoUrl":"","mockGeoUrl":"%s","ollamaUrl":"%s","ollamaModel":"%s","ollamaTimeout":"%s","llmApi":"%s"}}' \
       "$CLUSTER_ID" "$CLUSTER_ID" "$BROKER_URL" "$MOCK_GEO_URL" \
-      "$OLLAMA_URL" "$OLLAMA_MODEL" "$OLLAMA_TIMEOUT")" >/dev/null
+      "$OLLAMA_URL" "$OLLAMA_MODEL" "$OLLAMA_TIMEOUT" "$LLM_API")" >/dev/null
 
 # 8. Cluster Autoscaler (externalgrpc -> gRPC server) + Liqo NamespaceOffloading.
 if [[ -n "$SKIP_CLUSTER_AUTOSCALER" ]]; then

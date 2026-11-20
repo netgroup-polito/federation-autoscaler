@@ -39,6 +39,10 @@ data:
   ollamaUrl: ""
   ollamaModel: "llama3.2"
   ollamaTimeout: "120s"
+  # Which API the AI server at ollamaUrl speaks: "ollama" (Ollama's own API,
+  # the default) or "openai" (OpenAI-style /v1/chat/completions, served by
+  # Ollama, vLLM and KubeAI; ollamaUrl may then end in /v1).
+  llmApi: "ollama"
   # Who makes the placement decision (consumer-only): "central" asks the
   # Broker, "local" decides on this consumer from the Redis catalog at
   # catalogAddr (host:port). Booking goes through the Broker in both modes.

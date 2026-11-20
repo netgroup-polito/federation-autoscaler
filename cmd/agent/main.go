@@ -45,6 +45,7 @@ import (
 	"github.com/netgroup-polito/federation-autoscaler/internal/agent/consumer"
 	"github.com/netgroup-polito/federation-autoscaler/internal/agent/consumer/heartbeat"
 	"github.com/netgroup-polito/federation-autoscaler/internal/agent/health"
+	"github.com/netgroup-polito/federation-autoscaler/internal/agent/ollama"
 	"github.com/netgroup-polito/federation-autoscaler/internal/agent/poller"
 	"github.com/netgroup-polito/federation-autoscaler/internal/agent/provider"
 	"github.com/netgroup-polito/federation-autoscaler/internal/agent/provider/advertise"
@@ -106,6 +107,7 @@ func main() {
 		ollamaURL             string
 		ollamaModel           string
 		ollamaTimeout         time.Duration
+		llmAPI                string
 		brainMode             string
 		catalogAddr           string
 	)
@@ -204,6 +206,11 @@ func main() {
 		"(consumer role only) Upper bound on one ConsumerChoice LLM call. A call that "+
 			"exceeds it falls back to the deterministic strategy; a small model on CPU "+
 			"needs tens of seconds. Ignored when --ollama-url is empty.")
+	flag.StringVar(&llmAPI, "llm-api", ollama.APIOllama,
+		"(consumer role only) Which API the AI server speaks: \"ollama\" (Ollama's own "+
+			"/api/generate, the default) or \"openai\" (OpenAI-style /v1/chat/completions, "+
+			"served by Ollama, vLLM and KubeAI). With \"openai\", --ollama-url may be a "+
+			"base ending in /v1. Ignored when --ollama-url is empty.")
 	flag.StringVar(&brainMode, "brain", consumer.BrainCentral,
 		"(consumer role only) Who makes the placement decision: \"central\" asks the "+
 			"Broker (default); \"local\" decides on this consumer from the catalog. "+
@@ -336,6 +343,7 @@ func main() {
 			OllamaURL:         ollamaURL,
 			OllamaModel:       ollamaModel,
 			OllamaTimeout:     ollamaTimeout,
+			LLMAPI:            llmAPI,
 			Namespace:         namespace,
 			NodeName:          nodeName,
 			AdvertisedIP:      advertisedIP,

@@ -200,6 +200,7 @@ func memoryFromGiB(gib float64) resource.Quantity {
 func (c *Client) ExtractAmount(ctx context.Context, text string) (*Trace, Amount, error) {
 	trace := &Trace{
 		Model:        c.model,
+		API:          c.api,
 		SystemPrompt: AmountSystemPrompt,
 		UserPrompt:   "Request: " + text,
 		Format:       jsonMode,

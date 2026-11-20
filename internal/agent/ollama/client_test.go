@@ -19,6 +19,7 @@ package ollama
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -452,4 +453,122 @@ func searchString(s, substr string) bool {
 		}
 	}
 	return false
+}
+
+// --- OpenAI-style API ---
+
+// openAIServer answers /v1/chat/completions with content and records the
+// path and request it got.
+func openAIServer(t *testing.T, content string, gotPath *string, gotReq *openAIRequest) *httptest.Server {
+	t.Helper()
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		*gotPath = r.URL.Path
+		if err := json.NewDecoder(r.Body).Decode(gotReq); err != nil {
+			t.Errorf("decode request: %v", err)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"model":"qwen","choices":[{"message":{"role":"assistant","content":` +
+			mustJSON(t, content) + `},"finish_reason":"stop"}],"usage":{"prompt_tokens":120,"completion_tokens":30}}`))
+	}))
+	t.Cleanup(srv.Close)
+	return srv
+}
+
+func mustJSON(t *testing.T, v any) string {
+	t.Helper()
+	b, err := json.Marshal(v)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return string(b)
+}
+
+func TestSelect_OpenAIAPI(t *testing.T) {
+	var path string
+	var req openAIRequest
+	srv := openAIServer(t, `{"rankedList":["provider-2","provider-1"]}`, &path, &req)
+
+	c := NewWithOptions(srv.URL, "qwen", Options{API: APIOpenAI})
+	trace, err := c.SelectDetailed(context.Background(), "cheapest", []brokerapi.NodeGroupView{
+		makeNodeGroup(providerOne, 3, 0, nil, nil, ""),
+		makeNodeGroup(providerTwo, 3, 0, nil, nil, ""),
+	})
+	if err != nil {
+		t.Fatalf("SelectDetailed: %v", err)
+	}
+	if path != "/v1/chat/completions" {
+		t.Errorf("path = %q, want /v1/chat/completions", path)
+	}
+	if len(req.Messages) != 2 || req.Messages[0].Role != "system" || req.Messages[1].Role != "user" ||
+		req.Messages[0].Content != SystemPrompt || req.ResponseFormat["type"] != "json_object" || req.Model != "qwen" {
+		t.Errorf("unexpected request: %+v", req)
+	}
+	if len(trace.Ranked) != 2 || trace.Ranked[0] != providerTwo {
+		t.Errorf("ranked = %v, want provider-2 first", trace.Ranked)
+	}
+	if trace.API != APIOpenAI || trace.Envelope.EvalCount != 30 || trace.Envelope.DoneReason != "stop" {
+		t.Errorf("trace: api=%q envelope=%+v", trace.API, trace.Envelope)
+	}
+}
+
+// A base URL that already ends in /v1 (KubeAI's /openai/v1) is not doubled.
+func TestSelect_OpenAIAPI_BaseWithV1(t *testing.T) {
+	var path string
+	var req openAIRequest
+	srv := openAIServer(t, `{"rankedList":["provider-1","provider-2"]}`, &path, &req)
+
+	c := NewWithOptions(srv.URL+"/openai/v1/", "qwen", Options{API: APIOpenAI})
+	if _, err := c.Select(context.Background(), "any", []brokerapi.NodeGroupView{
+		makeNodeGroup(providerOne, 3, 0, nil, nil, ""),
+		makeNodeGroup(providerTwo, 3, 0, nil, nil, ""),
+	}); err != nil {
+		t.Fatalf("Select: %v", err)
+	}
+	if path != "/openai/v1/chat/completions" {
+		t.Errorf("path = %q, want /openai/v1/chat/completions", path)
+	}
+}
+
+func TestSelect_OpenAIAPI_NoChoices(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(`{"choices":[]}`))
+	}))
+	defer srv.Close()
+
+	c := NewWithOptions(srv.URL, "qwen", Options{API: APIOpenAI})
+	_, err := c.Select(context.Background(), "any", []brokerapi.NodeGroupView{
+		makeNodeGroup(providerOne, 3, 0, nil, nil, ""),
+		makeNodeGroup(providerTwo, 3, 0, nil, nil, ""),
+	})
+	var selErr *SelectError
+	if !errors.As(err, &selErr) || selErr.Kind != ErrKindEnvelopeDecode {
+		t.Errorf("err = %v, want kind envelope_decode", err)
+	}
+}
+
+// The amount reader goes through the same API.
+func TestExtractAmount_OpenAIAPI(t *testing.T) {
+	var path string
+	var req openAIRequest
+	srv := openAIServer(t, `{"nodes":3,"maxLatencyMs":3}`, &path, &req)
+
+	c := NewWithOptions(srv.URL, "qwen", Options{API: APIOpenAI})
+	_, amt, err := c.ExtractAmount(context.Background(), "3 VMs, at most 3 ms from us")
+	if err != nil {
+		t.Fatalf("ExtractAmount: %v", err)
+	}
+	if path != "/v1/chat/completions" || req.Messages[0].Content != AmountSystemPrompt {
+		t.Errorf("path=%q system=%q", path, req.Messages[0].Content)
+	}
+	if amt.Nodes != 3 {
+		t.Errorf("amount = %+v, want 3 nodes", amt)
+	}
+}
+
+func TestValidAPI(t *testing.T) {
+	for api, want := range map[string]bool{"": true, APIOllama: true, APIOpenAI: true, "vllm": false} {
+		if got := ValidAPI(api); got != want {
+			t.Errorf("ValidAPI(%q) = %v, want %v", api, got, want)
+		}
+	}
 }

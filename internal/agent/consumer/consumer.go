@@ -130,6 +130,10 @@ type Options struct {
 	// (120 s). Ignored when OllamaURL is empty.
 	OllamaTimeout time.Duration
 
+	// LLMAPI is the API the AI server speaks: ollama.APIOllama (the default
+	// when empty) or ollama.APIOpenAI. Ignored when OllamaURL is empty.
+	LLMAPI string
+
 	// Namespace is where the consumer agent creates the kubeconfig
 	// Secret, the Liqo ResourceSlice, and the VirtualNodeState CR, and
 	// where the loopback API lists VirtualNodeState from. It is the
@@ -267,9 +271,9 @@ func Run(ctx context.Context, opts Options) error {
 	var ollamaClient *ollama.Client
 	if opts.OllamaURL != "" {
 		ollamaClient = ollama.NewWithOptions(opts.OllamaURL, opts.OllamaModel,
-			ollama.Options{Timeout: opts.OllamaTimeout})
+			ollama.Options{API: opts.LLMAPI, Timeout: opts.OllamaTimeout})
 		logger.Info("ConsumerChoice AI client configured",
-			"ollamaURL", opts.OllamaURL, "model", opts.OllamaModel, "timeout", opts.OllamaTimeout)
+			"ollamaURL", opts.OllamaURL, "model", opts.OllamaModel, "api", opts.LLMAPI, "timeout", opts.OllamaTimeout)
 	}
 
 	// The loopback API is built before the heartbeat, which reports its latest
@@ -381,6 +385,8 @@ func validate(o Options) error {
 		return errors.New("consumer: LocalAPIAddr is required")
 	case o.Probe == nil:
 		return errors.New("consumer: Probe is required")
+	case !ollama.ValidAPI(o.LLMAPI):
+		return fmt.Errorf("consumer: LLMAPI must be %q or %q, got %q", ollama.APIOllama, ollama.APIOpenAI, o.LLMAPI)
 	case o.BrainMode != "" && o.BrainMode != BrainCentral && o.BrainMode != BrainLocal:
 		return fmt.Errorf("consumer: BrainMode must be %q or %q, got %q", BrainCentral, BrainLocal, o.BrainMode)
 	case o.BrainMode == BrainLocal && o.Catalog == nil:

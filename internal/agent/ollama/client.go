@@ -56,10 +56,25 @@ const defaultTimeout = 120 * time.Second
 // server's defaults), so the model decides on its own.
 const jsonMode = "json"
 
+// The APIs a Client can speak. APIOllama is Ollama's own /api/generate;
+// APIOpenAI is the OpenAI-style /v1/chat/completions, which Ollama, vLLM and
+// KubeAI all serve, so one setting lets the same agent use any of them.
+const (
+	APIOllama = "ollama"
+	APIOpenAI = "openai"
+)
+
+// ValidAPI reports whether api is one a Client can speak ("" means APIOllama).
+func ValidAPI(api string) bool {
+	return api == "" || api == APIOllama || api == APIOpenAI
+}
+
 // Options tunes a Client. The zero value is the agent's historical behaviour
-// (120 s timeout, no consumer location).
+// (Ollama's own API, 120 s timeout, no consumer location).
 type Options struct {
-	// Timeout bounds one /api/generate call. Zero means 120 s.
+	// API is APIOllama (the default when empty) or APIOpenAI.
+	API string
+	// Timeout bounds one LLM call. Zero means 120 s.
 	Timeout time.Duration
 	// ConsumerLocation, when known, is included in the prompt so the model can
 	// judge proximity from the raw coordinates itself. Nothing is derived from
@@ -77,13 +92,16 @@ type Options struct {
 type Client struct {
 	baseURL string        // e.g. "http://localhost:11434"
 	model   string        // e.g. "llama3.2"
-	timeout time.Duration // per-request timeout for the /api/generate call
+	api     string        // APIOllama or APIOpenAI
+	timeout time.Duration // per-request timeout for one LLM call
 	opts    Options
 	http    *http.Client
 }
 
-// New returns an Ollama Client. baseURL is the Ollama API root (e.g.
-// "http://localhost:11434"), model is the model name (e.g. "llama3.2").
+// New returns an Ollama Client. baseURL is the server's root (e.g.
+// "http://localhost:11434"), model is the model name (e.g. "llama3.2"). With
+// APIOpenAI, baseURL may also be an OpenAI-style base that already ends in
+// "/v1" (e.g. KubeAI's "http://kubeai/openai/v1").
 func New(baseURL, model string) *Client {
 	return NewWithOptions(baseURL, model, Options{})
 }
@@ -94,9 +112,14 @@ func NewWithOptions(baseURL, model string, opts Options) *Client {
 	if timeout <= 0 {
 		timeout = defaultTimeout
 	}
+	api := opts.API
+	if api != APIOpenAI {
+		api = APIOllama
+	}
 	return &Client{
 		baseURL: strings.TrimRight(baseURL, "/"),
 		model:   model,
+		api:     api,
 		timeout: timeout,
 		opts:    opts,
 		http:    &http.Client{Timeout: timeout},
@@ -188,6 +211,7 @@ func selectErr(kind ErrorKind, format string, args ...any) *SelectError {
 // inspecting afterwards.
 type Trace struct {
 	Model        string             `json:"model"`
+	API          string             `json:"api,omitempty"`
 	SystemPrompt string             `json:"systemPrompt"`
 	UserPrompt   string             `json:"userPrompt"`
 	Providers    []ProviderInfo     `json:"providers"`
@@ -235,7 +259,7 @@ func (c *Client) Select(ctx context.Context, userPrompt string, nodeGroups []bro
 // SelectDetailed is Select, returning the full Trace alongside the result.
 // The returned Trace is never nil. Its decision rules are exactly Select's.
 func (c *Client) SelectDetailed(ctx context.Context, userPrompt string, nodeGroups []brokerapi.NodeGroupView) (*Trace, error) {
-	trace := &Trace{Model: c.model, SystemPrompt: SystemPrompt, StartedAt: time.Now()}
+	trace := &Trace{Model: c.model, API: c.api, SystemPrompt: SystemPrompt, StartedAt: time.Now()}
 
 	// Build provider info list (only providers with available capacity).
 	validIDs := make(map[string]struct{})
@@ -318,15 +342,91 @@ func (c *Client) SelectDetailed(ctx context.Context, userPrompt string, nodeGrou
 	return trace, nil
 }
 
-// generate performs the /api/generate round trip for a prepared trace.
-func (c *Client) generate(ctx context.Context, trace *Trace) (*ollamaResponse, *SelectError) {
-	reqBody := ollamaRequest{
+// openAIRequest is the JSON body sent to POST /v1/chat/completions.
+// ResponseFormat {"type":"json_object"} is the OpenAI-style equivalent of
+// Ollama's `format: "json"`.
+type openAIRequest struct {
+	Model          string            `json:"model"`
+	Messages       []openAIMessage   `json:"messages"`
+	ResponseFormat map[string]string `json:"response_format"`
+	Stream         bool              `json:"stream"`
+}
+
+type openAIMessage struct {
+	Role    string `json:"role"`
+	Content string `json:"content"`
+}
+
+// openAIResponse is the part of a /v1/chat/completions answer the client uses.
+type openAIResponse struct {
+	Model   string `json:"model"`
+	Choices []struct {
+		Message      openAIMessage `json:"message"`
+		FinishReason string        `json:"finish_reason"`
+	} `json:"choices"`
+	Usage struct {
+		PromptTokens     int `json:"prompt_tokens"`
+		CompletionTokens int `json:"completion_tokens"`
+	} `json:"usage"`
+}
+
+// endpoint returns the URL and JSON body of one call for the client's API.
+func (c *Client) endpoint(trace *Trace) (string, any) {
+	if c.api == APIOpenAI {
+		url := c.baseURL + "/v1/chat/completions"
+		if strings.HasSuffix(c.baseURL, "/v1") {
+			url = c.baseURL + "/chat/completions"
+		}
+		return url, openAIRequest{
+			Model: c.model,
+			Messages: []openAIMessage{
+				{Role: "system", Content: trace.SystemPrompt},
+				{Role: "user", Content: trace.UserPrompt},
+			},
+			ResponseFormat: map[string]string{"type": "json_object"},
+		}
+	}
+	return c.baseURL + "/api/generate", ollamaRequest{
 		Model:  c.model,
 		System: trace.SystemPrompt,
 		Prompt: trace.UserPrompt,
 		Format: trace.Format,
 		Stream: false,
 	}
+}
+
+// decode reads one answer for the client's API into the Ollama-shaped
+// envelope the rest of the package uses. An OpenAI-style answer has no
+// runtime timings, so only the token counts are filled.
+func (c *Client) decode(body io.Reader) (*ollamaResponse, error) {
+	if c.api != APIOpenAI {
+		var envelope ollamaResponse
+		if err := json.NewDecoder(body).Decode(&envelope); err != nil {
+			return nil, err
+		}
+		return &envelope, nil
+	}
+	var out openAIResponse
+	if err := json.NewDecoder(body).Decode(&out); err != nil {
+		return nil, err
+	}
+	if len(out.Choices) == 0 {
+		return nil, errors.New("answer has no choices")
+	}
+	return &ollamaResponse{
+		Model:           out.Model,
+		Response:        out.Choices[0].Message.Content,
+		Done:            true,
+		DoneReason:      out.Choices[0].FinishReason,
+		PromptEvalCount: out.Usage.PromptTokens,
+		EvalCount:       out.Usage.CompletionTokens,
+	}, nil
+}
+
+// generate performs one LLM round trip for a prepared trace, with the
+// client's API (Ollama's /api/generate or the OpenAI-style chat completions).
+func (c *Client) generate(ctx context.Context, trace *Trace) (*ollamaResponse, *SelectError) {
+	url, reqBody := c.endpoint(trace)
 	bodyBytes, err := json.Marshal(reqBody)
 	if err != nil {
 		return nil, selectErr(ErrKindInvalidJSON, "marshal ollama request: %w", err)
@@ -336,7 +436,7 @@ func (c *Client) generate(ctx context.Context, trace *Trace) (*ollamaResponse, *
 	defer cancel()
 
 	httpReq, err := http.NewRequestWithContext(reqCtx, http.MethodPost,
-		c.baseURL+"/api/generate", bytes.NewReader(bodyBytes))
+		url, bytes.NewReader(bodyBytes))
 	if err != nil {
 		return nil, selectErr(ErrKindUnreachable, "build ollama HTTP request: %w", err)
 	}
@@ -358,14 +458,14 @@ func (c *Client) generate(ctx context.Context, trace *Trace) (*ollamaResponse, *
 		return nil, selectErr(ErrKindHTTPStatus, "ollama returned status %d: %s", resp.StatusCode, string(body))
 	}
 
-	var envelope ollamaResponse
-	if err := json.NewDecoder(resp.Body).Decode(&envelope); err != nil {
+	envelope, err := c.decode(resp.Body)
+	if err != nil {
 		if isTimeout(err) {
 			return nil, selectErr(ErrKindTimeout, "read ollama response: %w", err)
 		}
 		return nil, selectErr(ErrKindEnvelopeDecode, "decode ollama response: %w", err)
 	}
-	return &envelope, nil
+	return envelope, nil
 }
 
 // isTimeout reports whether err is a deadline being hit, from either the
