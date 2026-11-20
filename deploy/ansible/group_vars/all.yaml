@@ -51,6 +51,9 @@ fa_ollama_timeout: "120s"
 # The API the AI server speaks: "ollama" (Ollama's own API) or "openai"
 # (OpenAI-style, served by Ollama, vLLM and KubeAI; the URL may end in /v1).
 fa_llm_api: "ollama"
+# What the AI does for a plain-language request: "rank" (the model ranks the
+# providers) or "fields" (the model only reads the text; code ranks).
+fa_ai_job: "rank"
 
 # Who makes each consumer's placement decision: "central" (the Broker, today's
 # behaviour) or "local" (the consumer's own brain, reading the Redis catalog at

@@ -75,7 +75,7 @@
     cmd: |
       kubectl --kubeconfig {{ cluster_kubeconfig }} -n {{ fa_namespace }} \
         patch configmap agent-config --type merge -p \
-        '{"data":{"brokerUrl":"https://{{ broker_address }}:{{ broker_node_port }}","clusterId":"{{ cluster_id }}","liqoClusterId":"{{ cluster_id }}","mockEcoUrl":"{{ fa_mock_eco_url }}","mockGeoUrl":"{{ fa_mock_geo_url }}","ollamaUrl":"{{ fa_ollama_url }}","ollamaModel":"{{ fa_ollama_model }}","ollamaTimeout":"{{ fa_ollama_timeout }}","llmApi":"{{ fa_llm_api }}","brainMode":"{{ fa_brain }}","catalogAddr":"{{ (fa_catalog_addr | default('')) if fa_brain == 'local' else '' }}"}}'
+        '{"data":{"brokerUrl":"https://{{ broker_address }}:{{ broker_node_port }}","clusterId":"{{ cluster_id }}","liqoClusterId":"{{ cluster_id }}","mockEcoUrl":"{{ fa_mock_eco_url }}","mockGeoUrl":"{{ fa_mock_geo_url }}","ollamaUrl":"{{ fa_ollama_url }}","ollamaModel":"{{ fa_ollama_model }}","ollamaTimeout":"{{ fa_ollama_timeout }}","llmApi":"{{ fa_llm_api }}","aiJob":"{{ fa_ai_job }}","brainMode":"{{ fa_brain }}","catalogAddr":"{{ (fa_catalog_addr | default('')) if fa_brain == 'local' else '' }}"}}'
   changed_when: true
 
 # The consumer's location (the origin point the Broker measures provider

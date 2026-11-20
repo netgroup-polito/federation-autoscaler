@@ -334,6 +334,11 @@ type ConsumerChoiceReport struct {
 	// Requested is the size the reservation asked for, e.g. "4 CPU, 8Gi
 	// memory" (PerRequest only; empty when unknown).
 	Requested string `json:"requested,omitempty"`
+	// Understood is what was read from the request and applied in code: with
+	// the "fields" job, every field (e.g. "in Turin, prefer price", the
+	// ranking then made in code); with the "rank" job, only an exclusion
+	// ("not in Frankfurt"). Empty when nothing was applied in code.
+	Understood string `json:"understood,omitempty"`
 }
 
 // ConsumerChoiceReport.Source values.

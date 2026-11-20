@@ -98,6 +98,8 @@ func validateConsumerChoice(c *ConsumerChoiceReport) error {
 		return fmt.Errorf("consumerChoice.prompt longer than %d bytes", maxChoicePromptLen)
 	case len(c.Requested) > maxChoiceSizeLen:
 		return fmt.Errorf("consumerChoice.requested longer than %d bytes", maxChoiceSizeLen)
+	case len(c.Understood) > maxChoicePromptLen:
+		return fmt.Errorf("consumerChoice.understood longer than %d bytes", maxChoicePromptLen)
 	case len(c.Ranked) > maxChoiceRanked:
 		return fmt.Errorf("consumerChoice.ranked has more than %d entries", maxChoiceRanked)
 	}

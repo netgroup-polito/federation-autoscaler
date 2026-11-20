@@ -43,6 +43,10 @@ data:
   # the default) or "openai" (OpenAI-style /v1/chat/completions, served by
   # Ollama, vLLM and KubeAI; ollamaUrl may then end in /v1).
   llmApi: "ollama"
+  # What the AI does for a plain-language request: "rank" (the model ranks
+  # the providers, the default) or "fields" (the model only turns the text
+  # into fields; the agent filters and ranks in code).
+  aiJob: "rank"
   # Who makes the placement decision (consumer-only): "central" asks the
   # Broker, "local" decides on this consumer from the Redis catalog at
   # catalogAddr (host:port). Booking goes through the Broker in both modes.

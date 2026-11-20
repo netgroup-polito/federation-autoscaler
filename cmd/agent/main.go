@@ -108,6 +108,7 @@ func main() {
 		ollamaModel           string
 		ollamaTimeout         time.Duration
 		llmAPI                string
+		aiJob                 string
 		brainMode             string
 		catalogAddr           string
 	)
@@ -211,6 +212,11 @@ func main() {
 			"/api/generate, the default) or \"openai\" (OpenAI-style /v1/chat/completions, "+
 			"served by Ollama, vLLM and KubeAI). With \"openai\", --ollama-url may be a "+
 			"base ending in /v1. Ignored when --ollama-url is empty.")
+	flag.StringVar(&aiJob, "ai-job", ollama.JobRank,
+		"(consumer role only) What the AI does for a plain-language request: \"rank\" "+
+			"(the model ranks the providers itself, the default) or \"fields\" (the model "+
+			"only turns the text into fields such as place, exclusions and preference, and "+
+			"the agent filters and ranks the providers in code; a smaller model is enough).")
 	flag.StringVar(&brainMode, "brain", consumer.BrainCentral,
 		"(consumer role only) Who makes the placement decision: \"central\" asks the "+
 			"Broker (default); \"local\" decides on this consumer from the catalog. "+
@@ -344,6 +350,7 @@ func main() {
 			OllamaModel:       ollamaModel,
 			OllamaTimeout:     ollamaTimeout,
 			LLMAPI:            llmAPI,
+			AIJob:             aiJob,
 			Namespace:         namespace,
 			NodeName:          nodeName,
 			AdvertisedIP:      advertisedIP,

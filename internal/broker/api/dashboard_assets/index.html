@@ -365,6 +365,12 @@
         ? "reserve now" + (cc.requested ? ": " + cc.requested : "")
         : "on demand (autoscaler)";
       cell.append(req, rank, how);
+      if (cc.understood) {
+        const und = document.createElement("div");
+        und.className = "muted-line";
+        und.textContent = "understood: " + cc.understood;
+        cell.append(und);
+      }
       cell.title = "decided at " + fmtTime(cc.decidedAt);
       return cell;
     }

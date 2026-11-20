@@ -62,6 +62,14 @@
         name: agent-config
         key: llmApi
 - op: add
+  path: /spec/template/spec/containers/0/env/-
+  value:
+    name: AI_JOB
+    valueFrom:
+      configMapKeyRef:
+        name: agent-config
+        key: aiJob
+- op: add
   path: /spec/template/spec/containers/0/args/-
   value: --ollama-url=$(OLLAMA_URL)
 - op: add
@@ -73,6 +81,9 @@
 - op: add
   path: /spec/template/spec/containers/0/args/-
   value: --llm-api=$(LLM_API)
+- op: add
+  path: /spec/template/spec/containers/0/args/-
+  value: --ai-job=$(AI_JOB)
 # Placement mode, from agent-config: brainMode "central" (default) or "local";
 # catalogAddr is the Redis catalog the local brain reads offers from.
 - op: add
