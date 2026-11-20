@@ -453,7 +453,7 @@ Three wire surfaces exist. There is no Broker-to-agent surface; see the [communi
 | `GET /api/v1/reservations/{id}` | participant | reservation lookup (consumer or provider of that reservation) |
 | `DELETE /api/v1/reservations/{id}` | consumer | release; 202, phase → `Unpeering` |
 | `GET /api/v1/reservations` | consumer | the caller's own reservations (as consumer), every phase, sorted by ID; lets a consumer-side brain rebuild its in-flight and reserved counts |
-| `GET /api/v1/instructions` | both, 5 s | pending un-enforced instructions for the caller; `Peer` carries the kubeconfig inlined; a provider also gets its current `reservedChunks` (absent when the Broker does not know it) |
+| `GET /api/v1/instructions` | both, 1 s | pending un-enforced instructions for the caller; `Peer` carries the kubeconfig inlined; a provider also gets its current `reservedChunks` (absent when the Broker does not know it) |
 | `POST /api/v1/instructions/{id}/result` | both | report outcome; advances the reservation phase machine |
 
 Representative bodies (field names as on the wire):
