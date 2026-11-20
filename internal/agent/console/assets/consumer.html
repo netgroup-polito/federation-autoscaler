@@ -732,7 +732,27 @@
         await loadState();
       };
       head.append(name, rel);
+      if (v.group) {
+        // One part of a request split by place: release all its parts at once.
+        const relAll = document.createElement("button");
+        relAll.textContent = "Release all parts";
+        relAll.style.marginLeft = "8px";
+        relAll.onclick = async () => {
+          relAll.disabled = true;
+          try {
+            await postJSON("/api/request", { action: "release", group: v.group });
+            toast("All parts released \u2014 wait about 30 s before a request that needs the same capacity");
+          } catch (e) { toast(e.message, true); }
+          await loadRequest();
+          await loadState();
+        };
+        head.appendChild(relAll);
+      }
       box.appendChild(head);
+      if (v.group) {
+        const [i, n] = (v.part || "").split("/");
+        box.appendChild(statusLine("Part", "part " + i + " of " + n + " of \u201C" + (v.groupText || "") + "\u201D"));
+      }
       box.appendChild(statusLine("Request", "\u201C" + (v.text || "") + "\u201D"));
       if (v.understood) {
         const nodes = v.nodes ? " \u2192 " + v.nodes + (v.nodes === 1 ? " node" : " nodes") : "";
@@ -774,8 +794,10 @@
       btn.disabled = true;
       btn.textContent = "Reading the request\u2026";
       try {
-        await postJSON("/api/request", body);
-        toast("Request sent \u2014 the AI is choosing a provider");
+        const sent = await postJSON("/api/request", body);
+        toast(sent && sent.parts > 1
+          ? "Request split into " + sent.parts + " parts, one per place \u2014 the AI is choosing the providers"
+          : "Request sent \u2014 the AI is choosing a provider");
         document.getElementById("rqText").value = "";
       } catch (e) { toast(e.message, true); }
       btn.textContent = "Send request";

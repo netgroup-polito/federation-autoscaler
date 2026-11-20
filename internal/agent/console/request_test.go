@@ -22,6 +22,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 
 	appsv1 "k8s.io/api/apps/v1"
@@ -316,5 +317,101 @@ func TestRequestLatencyLimit(t *testing.T) {
 	}
 	if cp.Spec.LatencyBound != nil {
 		t.Errorf("after release the policy bound must be cleared, got %+v", cp.Spec.LatencyBound)
+	}
+}
+
+// splitAI is a fake model: it splits by place when asked to split, and reads
+// "<n> VM(s)" when asked for the amount.
+func splitAI(t *testing.T, parts []string) *ollama.Client {
+	t.Helper()
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var req struct {
+			System string `json:"system"`
+			Prompt string `json:"prompt"`
+		}
+		_ = json.NewDecoder(r.Body).Decode(&req)
+		answer := `{"nodes": null}`
+		switch {
+		case req.System == ollama.SplitSystemPrompt:
+			b, _ := json.Marshal(map[string]any{"parts": parts})
+			answer = string(b)
+		case strings.Contains(req.Prompt, "2 VMs"):
+			answer = `{"nodes": 2}`
+		case strings.Contains(req.Prompt, "6 VMs"):
+			answer = `{"nodes": 6}`
+		case strings.Contains(req.Prompt, "1 VM"):
+			answer = `{"nodes": 1}`
+		}
+		_ = json.NewEncoder(w).Encode(map[string]any{"response": answer, "done": true})
+	}))
+	t.Cleanup(srv.Close)
+	return ollama.New(srv.URL, "m")
+}
+
+// A request asking for several places becomes one Reserve now request per
+// place, linked as one group, listed in order and released together.
+func TestRequestSplitByPlace(t *testing.T) {
+	text := "I need 2 VMs in Turin and 1 VM in Frankfurt"
+	fc, ts := requestServer(t, splitAI(t, []string{"2 VMs in Turin", "1 VM in Frankfurt"}))
+
+	code, v := sendRequest(t, ts, map[string]string{"action": "send", "text": text, "mode": RequestModeReserve})
+	wantStatus(t, code, http.StatusOK)
+	if v.Parts != 2 || v.Group == "" || v.Part != "1/2" || v.Text != "2 VMs in Turin" {
+		t.Errorf("view = %+v, want part 1 of 2", v)
+	}
+	items := panelRequests(t, fc)
+	if len(items) != 2 || items[0].Labels[groupLabel] != v.Group || items[1].Labels[groupLabel] != v.Group {
+		t.Fatalf("requests = %+v, want 2 in group %s", items, v.Group)
+	}
+	list := getRequests(t, ts)
+	if len(list) != 2 || list[0].Text != "2 VMs in Turin" || list[0].Nodes != 2 || list[0].Part != "1/2" ||
+		list[1].Text != "1 VM in Frankfurt" || list[1].Nodes != 1 || list[1].Part != "2/2" || list[1].GroupText != text {
+		t.Errorf("list = %+v, want the two parts in order with the whole request", list)
+	}
+
+	// Another request stays when the group is released.
+	_, other := sendRequest(t, ts, map[string]string{"action": "send", "text": "1 VM, closest to me", "mode": RequestModeReserve})
+	wantStatus(t, post(t, ts, "/api/request", `{"action":"release","group":"`+v.Group+`"}`), http.StatusOK)
+	left := panelRequests(t, fc)
+	if len(left) != 1 || left[0].Name != other.Name {
+		t.Errorf("after releasing the group: %+v, want only %s", left, other.Name)
+	}
+	wantStatus(t, post(t, ts, "/api/request", `{"action":"release","group":"`+v.Group+`"}`), http.StatusNotFound)
+}
+
+// A part that cannot be placed rejects the whole request: nothing is created.
+func TestRequestSplitAllOrNothing(t *testing.T) {
+	fc, ts := requestServer(t, splitAI(t, []string{"2 VMs in Turin", "6 VMs in Frankfurt"}))
+	code, _ := sendRequest(t, ts, map[string]string{
+		"action": "send", "text": "2 VMs in Turin and 6 VMs in Frankfurt", "mode": RequestModeReserve,
+	})
+	wantStatus(t, code, http.StatusBadRequest)
+	if n := len(panelRequests(t, fc)); n != 0 {
+		t.Errorf("%d requests created, want none", n)
+	}
+}
+
+// The text is not split with the amount fields filled, in On demand mode, or
+// without a model.
+func TestRequestNotSplit(t *testing.T) {
+	text := "I need 2 VMs in Turin and 1 VM in Frankfurt"
+	ai := splitAI(t, []string{"2 VMs in Turin", "1 VM in Frankfurt"})
+
+	fc, ts := requestServer(t, ai)
+	_, v := sendRequest(t, ts, map[string]string{"action": "send", "text": text, "mode": RequestModeReserve, "cpu": "2"})
+	if v.Parts != 1 || len(panelRequests(t, fc)) != 1 {
+		t.Errorf("with the amount fields: view %+v, want one request", v)
+	}
+
+	_, ts = requestServer(t, ai)
+	_, v = sendRequest(t, ts, map[string]string{"action": "send", "text": text, "mode": RequestModeOnDemand})
+	if v.Parts != 1 || v.Name != onDemandName {
+		t.Errorf("On demand: view %+v, want one request", v)
+	}
+
+	fc, ts = requestServer(t, nil)
+	_, v = sendRequest(t, ts, map[string]string{"action": "send", "text": text, "mode": RequestModeReserve})
+	if v.Parts != 1 || len(panelRequests(t, fc)) != 1 {
+		t.Errorf("without a model: view %+v, want one request", v)
 	}
 }
