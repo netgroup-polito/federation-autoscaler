@@ -407,6 +407,11 @@ type NodeGroupView struct {
 	// for the ConsumerChoice AI strategy.
 	CarbonForecast []float64 `json:"carbonForecast,omitempty"`
 	Renewable      bool      `json:"renewable,omitempty"`
+	// GuaranteedSeconds is how long the provider guarantees a booking, from
+	// the catalog offer's validitySeconds (local mode only; the Broker never
+	// sets it). 0 means the provider states no guarantee. Informational, for
+	// the ConsumerChoice AI strategy.
+	GuaranteedSeconds int32 `json:"guaranteedSeconds,omitempty"`
 }
 
 type NodeGroupListResponse struct {

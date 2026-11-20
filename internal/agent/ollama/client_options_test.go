@@ -433,3 +433,21 @@ func TestNodeGroupViewToProviderInfo_RicherOfferData(t *testing.T) {
 		t.Errorf("an unpriced, non-renewable provider: %s", plain)
 	}
 }
+
+// The guaranteed time reaches the AI in hours, and only when the offer
+// states it.
+func TestNodeGroupViewToProviderInfo_GuaranteedHours(t *testing.T) {
+	ng := makeNodeGroup("provider-1", 3, 0, nil, nil, "")
+	ng.GuaranteedSeconds = 9000
+	body, err := json.Marshal(NodeGroupViewToProviderInfo(ng))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(body), `"guaranteedHours":2.5`) {
+		t.Errorf("want guaranteedHours 2.5 in %s", body)
+	}
+	plain, _ := json.Marshal(NodeGroupViewToProviderInfo(makeNodeGroup("provider-2", 3, 0, nil, nil, "")))
+	if strings.Contains(string(plain), "guaranteedHours") {
+		t.Errorf("no guarantee stated, so no guaranteedHours: %s", plain)
+	}
+}

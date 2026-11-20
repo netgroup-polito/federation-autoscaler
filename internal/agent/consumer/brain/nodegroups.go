@@ -102,7 +102,7 @@ func nodeGroups(in Input) (brokerapi.NodeGroupListResponse, []string) {
 		offers = kept
 	}
 
-	advs := Advertisements(offers, in.OwnReserved, sizer)
+	advs, leads := advertisements(offers, in.OwnReserved, sizer)
 	for _, a := range advs {
 		if held[a.Spec.ClusterID] || in.Full[a.Spec.ClusterID] {
 			// Outside the bound but holding our chunks, or recently refused
@@ -112,12 +112,30 @@ func nodeGroups(in Input) (brokerapi.NodeGroupListResponse, []string) {
 		}
 	}
 
-	return brokerapi.BuildNodeGroups(brokerapi.PlacementInput{
+	resp := brokerapi.BuildNodeGroups(brokerapi.PlacementInput{
 		Advertisements: advs,
 		Consumer:       in.Consumer,
 		InFlight:       in.InFlight,
 		Sizer:          sizer,
-	}), estimated
+	})
+	// The guaranteed time has no place on a ClusterAdvertisement, so it is
+	// copied from each provider's lead site straight onto its view.
+	for i := range resp.NodeGroups {
+		if lead, ok := leads[resp.NodeGroups[i].ProviderClusterID]; ok {
+			resp.NodeGroups[i].GuaranteedSeconds = guaranteedSeconds(lead.ValiditySeconds)
+		}
+	}
+	return resp, estimated
+}
+
+// guaranteedSeconds turns an offer's validitySeconds into the view's field.
+// The catalog caps validity at catalog.MaxValiditySeconds (30 days), far below
+// the int32 limit; anything negative or above it is treated as "not stated".
+func guaranteedSeconds(validity int) int32 {
+	if validity <= 0 || validity > catalog.MaxValiditySeconds {
+		return 0
+	}
+	return int32(validity)
 }
 
 // Advertisements converts catalog offers into one in-memory
@@ -128,9 +146,9 @@ func nodeGroups(in Input) (brokerapi.NodeGroupListResponse, []string) {
 //   - free chunks are counted per site and then summed, so leftovers at
 //     different sites never add up to a chunk no single site could host;
 //   - only sites whose chunk type matches the provider's pooled type count;
-//   - location, prices, carbon and the probe endpoint come from the
-//     provider's "lead" site: the one with the most free chunks (lowest site
-//     ID on a tie), which is where a new chunk most likely lands.
+//   - location, prices, carbon, the probe endpoint and the guaranteed time
+//     come from the provider's "lead" site: the one with the most free chunks
+//     (lowest site ID on a tie), which is where a new chunk most likely lands.
 //
 // Status follows local-mode semantics: ReservedChunks is this consumer's own
 // count and TotalChunks is own + free, so MaxSize = own + free and
@@ -139,6 +157,15 @@ func nodeGroups(in Input) (brokerapi.NodeGroupListResponse, []string) {
 func Advertisements(
 	offers []catalog.Offer, ownReserved map[string]int32, sizer chunk.Sizer,
 ) []*brokerv1alpha1.ClusterAdvertisement {
+	advs, _ := advertisements(offers, ownReserved, sizer)
+	return advs
+}
+
+// advertisements is Advertisements that also returns each provider's lead
+// site offer, for the offer fields a ClusterAdvertisement has no place for.
+func advertisements(
+	offers []catalog.Offer, ownReserved map[string]int32, sizer chunk.Sizer,
+) ([]*brokerv1alpha1.ClusterAdvertisement, map[string]catalog.Offer) {
 	if sizer == nil {
 		sizer = chunk.NewDefaultSizer()
 	}
@@ -158,16 +185,20 @@ func Advertisements(
 	sort.Strings(providers)
 
 	out := make([]*brokerv1alpha1.ClusterAdvertisement, 0, len(providers))
+	leads := make(map[string]catalog.Offer, len(providers))
 	for _, p := range providers {
-		out = append(out, providerAdvertisement(p, byProvider[p], ownReserved[p], sizer))
+		adv, lead := providerAdvertisement(p, byProvider[p], ownReserved[p], sizer)
+		out = append(out, adv)
+		leads[p] = lead
 	}
-	return out
+	return out, leads
 }
 
-// providerAdvertisement pools one provider's sites into a ClusterAdvertisement.
+// providerAdvertisement pools one provider's sites into a ClusterAdvertisement
+// and returns its lead site offer.
 func providerAdvertisement(
 	provider string, sites []catalog.Offer, own int32, sizer chunk.Sizer,
-) *brokerv1alpha1.ClusterAdvertisement {
+) (*brokerv1alpha1.ClusterAdvertisement, catalog.Offer) {
 	sort.Slice(sites, func(i, j int) bool { return sites[i].SiteID < sites[j].SiteID })
 
 	pooled := corev1.ResourceList{}
@@ -190,7 +221,7 @@ func providerAdvertisement(
 	}
 	ref := sites[lead]
 
-	return &brokerv1alpha1.ClusterAdvertisement{
+	adv := &brokerv1alpha1.ClusterAdvertisement{
 		ObjectMeta: metav1.ObjectMeta{Name: provider},
 		Spec: brokerv1alpha1.ClusterAdvertisementSpec{
 			ClusterID:       provider,
@@ -211,6 +242,7 @@ func providerAdvertisement(
 			AvailableChunks: free,
 		},
 	}
+	return adv, ref
 }
 
 // sizedChunks returns the chunk type and count the sizer derives from capacity.
