@@ -35,6 +35,7 @@ import (
 	"os"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/go-logr/logr"
@@ -172,6 +173,14 @@ type Publisher struct {
 	log           logr.Logger
 	onResult      func(success bool)
 	catalog       catalog.Writer
+
+	// Rewrite of the offer when the reserved chunk count changes (NotifyReserved).
+	mu           sync.Mutex
+	lastReq      *brokerapi.AdvertisementRequest
+	lastChunkRes corev1.ResourceList
+	lastReserved int32
+	reservedNow  int32
+	reservedCh   chan struct{}
 }
 
 // New validates opts and returns a Publisher ready to Run. It performs
@@ -214,6 +223,7 @@ func New(opts Options) (*Publisher, error) {
 		log:           logger,
 		onResult:      opts.OnPublishResult,
 		catalog:       opts.Catalog,
+		reservedCh:    make(chan struct{}, 1),
 	}, nil
 }
 
@@ -235,6 +245,8 @@ func (p *Publisher) Run(ctx context.Context) {
 			return
 		case <-t.C:
 			p.publishOnce(ctx)
+		case <-p.reservedCh:
+			p.rewriteOffer(ctx)
 		}
 	}
 }
@@ -318,22 +330,6 @@ func (p *Publisher) publishOnce(ctx context.Context) {
 // catalogWriteTimeout bounds one catalog write, so an unreachable catalog
 // cannot hold up the advertisement loop.
 const catalogWriteTimeout = 2 * time.Second
-
-// publishOffer writes this provider's own offer to the catalog, if one is
-// configured. It is best effort, like the advertisement itself: a failure is
-// logged at Info and never stops the loop, and the next cycle writes the
-// offer again. An advertisement the Broker did not accept is not published.
-func (p *Publisher) publishOffer(ctx context.Context, req *brokerapi.AdvertisementRequest, resp *brokerapi.AdvertisementResponse) {
-	if p.catalog == nil || !resp.Accepted {
-		return
-	}
-	ctx, cancel := context.WithTimeout(ctx, catalogWriteTimeout)
-	defer cancel()
-	offer := brokerapi.OfferFromAdvertisement(req, resp.ReservedChunks, resp.ChunkResources, time.Now())
-	if err := p.catalog.UpsertOffer(ctx, offer); err != nil {
-		p.log.Info("catalog write failed (will retry next advertisement)", "err", err.Error())
-	}
-}
 
 // applyCapacityScaling caps each allocatable resource to the operator's
 // configured percentage or fixed amount and returns
@@ -614,4 +610,70 @@ func (p *Publisher) notifyResult(success bool) {
 	}
 	defer func() { _ = recover() }() // never let a misbehaving callback kill the loop
 	p.onResult(success)
+}
+
+// publishOffer writes this provider's own offer to the catalog, if one is
+// configured. It is best effort, like the advertisement itself: a failure is
+// logged at Info and never stops the loop, and the next cycle writes the
+// offer again. An advertisement the Broker did not accept is not published.
+// It also remembers the request, so that rewriteOffer can rebuild the offer
+// when only the reserved chunk count changes.
+func (p *Publisher) publishOffer(ctx context.Context, req *brokerapi.AdvertisementRequest, resp *brokerapi.AdvertisementResponse) {
+	if p.catalog == nil || !resp.Accepted {
+		return
+	}
+	p.mu.Lock()
+	p.lastReq = req
+	p.lastChunkRes = resp.ChunkResources
+	p.mu.Unlock()
+	p.writeOffer(ctx, req, resp.ReservedChunks, resp.ChunkResources)
+}
+
+// writeOffer builds the offer for the given reserved chunk count and upserts
+// it. The count is recorded as written only when the upsert succeeds, so a
+// failed write is retried by the next NotifyReserved.
+func (p *Publisher) writeOffer(ctx context.Context, req *brokerapi.AdvertisementRequest, reserved int32, chunkRes corev1.ResourceList) {
+	ctx, cancel := context.WithTimeout(ctx, catalogWriteTimeout)
+	defer cancel()
+	offer := brokerapi.OfferFromAdvertisement(req, reserved, chunkRes, time.Now())
+	if err := p.catalog.UpsertOffer(ctx, offer); err != nil {
+		p.log.Info("catalog write failed (will retry)", "err", err.Error())
+		return
+	}
+	p.mu.Lock()
+	p.lastReserved = reserved
+	p.mu.Unlock()
+}
+
+// NotifyReserved tells the publisher how many chunks the Broker currently
+// holds reserved for this provider. The poller goroutine calls it every
+// second, so it never waits: it records the value and wakes Run, which
+// rewrites the offer. It does nothing until a first offer has been written,
+// and nothing when the value is the one already in the offer. If a wake-up is
+// already pending, the pending one picks up the latest value.
+func (p *Publisher) NotifyReserved(reserved int32) {
+	p.mu.Lock()
+	p.reservedNow = reserved
+	stale := p.lastReq != nil && reserved != p.lastReserved
+	p.mu.Unlock()
+	if !stale {
+		return
+	}
+	select {
+	case p.reservedCh <- struct{}{}:
+	default:
+	}
+}
+
+// rewriteOffer rewrites the offer with the latest reserved chunk count, from
+// the last accepted advertisement. Only Run calls it.
+func (p *Publisher) rewriteOffer(ctx context.Context) {
+	p.mu.Lock()
+	req, chunkRes, reserved := p.lastReq, p.lastChunkRes, p.reservedNow
+	stale := req != nil && reserved != p.lastReserved
+	p.mu.Unlock()
+	if !stale {
+		return
+	}
+	p.writeOffer(ctx, req, reserved, chunkRes)
 }

@@ -734,3 +734,131 @@ func TestPublisher_DoesNotPublishARejectedAdvertisement(t *testing.T) {
 		t.Errorf("offers = %d, want 0 (the Broker did not accept the advertisement)", len(all))
 	}
 }
+
+// flakyWriter wraps a catalog.Writer and fails every upsert while fail is set.
+type flakyWriter struct {
+	catalog.Writer
+	fail atomic.Bool
+}
+
+func (w *flakyWriter) UpsertOffer(ctx context.Context, o catalog.Offer) error {
+	if w.fail.Load() {
+		return errors.New("redis is down")
+	}
+	return w.Writer.UpsertOffer(ctx, o)
+}
+
+// reservedResp is a Broker answer with 2 reserved chunks of 2 cpu / 4Gi each.
+func reservedResp() brokerapi.AdvertisementResponse {
+	return brokerapi.AdvertisementResponse{
+		Accepted:   true,
+		ChunkCount: 4,
+		ChunkResources: corev1.ResourceList{
+			corev1.ResourceCPU:    resource.MustParse("2"),
+			corev1.ResourceMemory: resource.MustParse("4Gi"),
+		},
+		ReservedChunks: 2,
+	}
+}
+
+func TestPublisher_RewritesTheOfferWhenReservedChanges(t *testing.T) {
+	mem := catalog.NewMemoryCatalog()
+	p, _ := catalogPublisher(t, reservedResp(), mem, nil)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go p.Run(ctx)
+
+	waitCPU := func(want string) {
+		t.Helper()
+		var last corev1.ResourceList
+		deadline := time.Now().Add(3 * time.Second)
+		for time.Now().Before(deadline) {
+			if got, err := mem.GetOffer(ctx, "provider-int", "default"); err == nil {
+				last = got.Available
+				if q := last[corev1.ResourceCPU]; q.Cmp(resource.MustParse(want)) == 0 {
+					return
+				}
+			}
+			time.Sleep(10 * time.Millisecond)
+		}
+		t.Fatalf("offer never reached %s cpu, last seen %v", want, last)
+	}
+
+	// First offer: 8 cpu minus 2 reserved chunks of 2 cpu.
+	waitCPU("4")
+	// The interval is an hour, so only the reserved-chunks hook can change the offer.
+	p.NotifyReserved(3)
+	waitCPU("2")
+}
+
+func TestPublisher_RewriteIsRetriedAfterAFailedWrite(t *testing.T) {
+	mem := catalog.NewMemoryCatalog()
+	w := &flakyWriter{Writer: mem}
+	p, _ := catalogPublisher(t, reservedResp(), w, nil)
+	ctx := context.Background()
+
+	wantCPU := func(want string) {
+		t.Helper()
+		got, err := mem.GetOffer(ctx, "provider-int", "default")
+		if err != nil {
+			t.Fatalf("GetOffer: %v", err)
+		}
+		offerWantQty(t, got.Available, corev1.ResourceCPU, want)
+	}
+
+	p.publishOnce(ctx)
+	wantCPU("4")
+
+	w.fail.Store(true)
+	p.NotifyReserved(3)
+	p.rewriteOffer(ctx)
+	wantCPU("4") // the write failed, the old offer stays
+
+	w.fail.Store(false)
+	p.rewriteOffer(ctx) // the next poll would do the same
+	wantCPU("2")
+}
+
+func TestPublisher_NotifyReservedWakesRunOnlyWhenTheOfferIsStale(t *testing.T) {
+	mem := catalog.NewMemoryCatalog()
+	p, _ := catalogPublisher(t, reservedResp(), mem, nil)
+	ctx := context.Background()
+
+	p.NotifyReserved(3)
+	if n := len(p.reservedCh); n != 0 {
+		t.Fatalf("wake-ups = %d before the first offer, want 0", n)
+	}
+
+	p.publishOnce(ctx) // offer written with 2 reserved chunks
+	p.NotifyReserved(2)
+	if n := len(p.reservedCh); n != 0 {
+		t.Fatalf("wake-ups = %d for the value already in the offer, want 0", n)
+	}
+
+	p.NotifyReserved(3)
+	p.NotifyReserved(1) // coalesces with the pending wake-up, latest value wins
+	if n := len(p.reservedCh); n != 1 {
+		t.Fatalf("wake-ups = %d, want 1", n)
+	}
+	p.rewriteOffer(ctx)
+
+	got, err := mem.GetOffer(ctx, "provider-int", "default")
+	if err != nil {
+		t.Fatalf("GetOffer: %v", err)
+	}
+	// 8 cpu minus 1 reserved chunk of 2 cpu.
+	offerWantQty(t, got.Available, corev1.ResourceCPU, "6")
+}
+
+func TestPublisher_NoCatalogMeansNoRewrite(t *testing.T) {
+	p, _ := catalogPublisher(t, reservedResp(), nil, nil)
+	ctx := context.Background()
+
+	p.publishOnce(ctx)
+	p.NotifyReserved(3)
+	p.rewriteOffer(ctx)
+	if n := len(p.reservedCh); n != 0 {
+		t.Errorf("wake-ups = %d without a catalog, want 0", n)
+	}
+}

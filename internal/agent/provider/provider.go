@@ -215,6 +215,10 @@ func Run(ctx context.Context, opts Options) error {
 	if err != nil {
 		return fmt.Errorf("provider: build advertisement publisher: %w", err)
 	}
+	// Rewrite the offer at once when the Broker reports that the reserved
+	// chunk count changed, instead of waiting for the next advertisement.
+	opts.Registry.OnReservedChunks(publisher.NotifyReserved)
+
 	go publisher.Run(ctx)
 
 	// Optional config console (plain HTTP, no auth) — the provider role's only
