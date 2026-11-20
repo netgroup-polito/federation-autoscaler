@@ -302,3 +302,15 @@ func TestUnderstandAmount_TextValuesWin(t *testing.T) {
 		t.Errorf("amount = %s, want 16Gi, 3 nodes, max 3 ms", res.Amount)
 	}
 }
+
+// A unit the text never mentions is dropped from the model's reading.
+func TestUnderstandAmount_DropsUnitsNotInText(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewEncoder(w).Encode(ollamaResponse{Response: `{"cpu": 3, "memoryGiB": 6, "nodes": 3}`, Done: true})
+	}))
+	defer srv.Close()
+	res := UnderstandAmount(context.Background(), New(srv.URL, "m"), "I need 3 VMs as Kubernetes workers")
+	if !res.Amount.CPU.IsZero() || !res.Amount.Memory.IsZero() || res.Amount.Nodes != 3 {
+		t.Errorf("amount = %s, want only 3 nodes", res.Amount)
+	}
+}

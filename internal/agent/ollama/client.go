@@ -39,6 +39,7 @@ import (
 	"net/http"
 	"sort"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	brokerapi "github.com/netgroup-polito/federation-autoscaler/internal/broker/api"
@@ -96,6 +97,10 @@ type Client struct {
 	timeout time.Duration // per-request timeout for one LLM call
 	opts    Options
 	http    *http.Client
+	// noEffort is set once the server rejected reasoning_effort "none" (an
+	// Ollama older than the setting); later calls leave it out. Shared by
+	// the copies WithConsumerLocation and WithMeasuredLatencies make.
+	noEffort *atomic.Bool
 }
 
 // New returns an Ollama Client. baseURL is the server's root (e.g.
@@ -117,12 +122,13 @@ func NewWithOptions(baseURL, model string, opts Options) *Client {
 		api = APIOllama
 	}
 	return &Client{
-		baseURL: strings.TrimRight(baseURL, "/"),
-		model:   model,
-		api:     api,
-		timeout: timeout,
-		opts:    opts,
-		http:    &http.Client{Timeout: timeout},
+		baseURL:  strings.TrimRight(baseURL, "/"),
+		model:    model,
+		api:      api,
+		timeout:  timeout,
+		opts:     opts,
+		http:     &http.Client{Timeout: timeout},
+		noEffort: &atomic.Bool{},
 	}
 }
 
@@ -381,6 +387,14 @@ type openAIResponse struct {
 	} `json:"usage"`
 }
 
+// reasoningEffort is "none" unless the server rejected it before.
+func (c *Client) reasoningEffort() string {
+	if c.noEffort != nil && c.noEffort.Load() {
+		return ""
+	}
+	return "none"
+}
+
 // endpoint returns the URL and JSON body of one call for the client's API.
 func (c *Client) endpoint(trace *Trace) (string, any) {
 	if c.api == APIOpenAI {
@@ -395,7 +409,7 @@ func (c *Client) endpoint(trace *Trace) (string, any) {
 				{Role: "user", Content: trace.UserPrompt},
 			},
 			ResponseFormat:     map[string]string{"type": "json_object"},
-			ReasoningEffort:    "none",
+			ReasoningEffort:    c.reasoningEffort(),
 			ChatTemplateKwargs: map[string]any{"enable_thinking": false},
 		}
 	}
@@ -440,6 +454,21 @@ func (c *Client) decode(body io.Reader) (*ollamaResponse, error) {
 // generate performs one LLM round trip for a prepared trace, with the
 // client's API (Ollama's /api/generate or the OpenAI-style chat completions).
 func (c *Client) generate(ctx context.Context, trace *Trace) (*ollamaResponse, *SelectError) {
+	envelope, serr := c.generateOnce(ctx, trace)
+	// An older Ollama rejects reasoning_effort "none" ("invalid think value");
+	// models that need it switched off are the newer ones it cannot run
+	// anyway. Retry without it, and leave it out from then on.
+	if serr != nil && c.api == APIOpenAI && c.noEffort != nil && !c.noEffort.Load() && trace.HTTPStatus == http.StatusBadRequest &&
+		(strings.Contains(trace.RawErrorBody, "think") || strings.Contains(trace.RawErrorBody, "reasoning")) {
+		c.noEffort.Store(true)
+		trace.RawErrorBody = ""
+		return c.generateOnce(ctx, trace)
+	}
+	return envelope, serr
+}
+
+// generateOnce is one HTTP round trip of generate.
+func (c *Client) generateOnce(ctx context.Context, trace *Trace) (*ollamaResponse, *SelectError) {
 	url, reqBody := c.endpoint(trace)
 	bodyBytes, err := json.Marshal(reqBody)
 	if err != nil {

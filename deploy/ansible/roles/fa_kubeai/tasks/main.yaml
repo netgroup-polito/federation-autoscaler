@@ -1,0 +1,43 @@
+---
+# Runs the consumer's AI on its own cluster with KubeAI (roadmap step 24), only
+# when fa_kubeai is true. The work is done by deploy/standalone/kubeai-up.sh,
+# the same script consumer-up.sh --kubeai uses, so both install paths size the
+# AI the same way: model, CPUs and memory per copy, engine (vLLM with a GPU,
+# Ollama on CPU) and the number of copies. fa_consumer then points the
+# consumer agent at http://kubeai.<namespace>.svc/openai/v1.
+
+- name: Install KubeAI and the AI model on {{ cluster_id }}
+  delegate_to: localhost
+  ansible.builtin.command:
+    argv:
+      - "{{ fa_repo_root }}/deploy/standalone/kubeai-up.sh"
+      - --kubeconfig
+      - "{{ cluster_kubeconfig }}"
+      - --namespace
+      - "{{ fa_kubeai_namespace }}"
+      - --name
+      - "{{ fa_kubeai_model_name }}"
+      - --model
+      - "{{ fa_kubeai_ollama_model }}"
+      - --hf-model
+      - "{{ fa_kubeai_hf_model }}"
+      - --engine
+      - "{{ fa_kubeai_engine }}"
+      - --cpus
+      - "{{ fa_kubeai_cpus }}"
+      - --memory
+      - "{{ fa_kubeai_memory }}"
+      - --gpus
+      - "{{ fa_kubeai_gpus }}"
+      - --replicas
+      - "{{ fa_kubeai_min_replicas }}:{{ fa_kubeai_max_replicas }}"
+      - --chart-version
+      - "{{ fa_kubeai_chart_version }}"
+      - --ollama-image
+      - "{{ fa_kubeai_ollama_image }}"
+  register: fa_kubeai_out
+  changed_when: true
+
+- name: Show what the AI install reported
+  ansible.builtin.debug:
+    msg: "{{ fa_kubeai_out.stdout_lines | select('search', 'room|free|Pending|AI_URL|AI_MODEL') | list }}"

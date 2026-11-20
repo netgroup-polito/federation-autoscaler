@@ -61,6 +61,14 @@
   roles:
     - fa_pki_mirror
 
+- name: Local AI on each consumer with KubeAI (only with fa_kubeai)
+  hosts: consumers
+  gather_facts: false
+  become: false
+  roles:
+    - role: fa_kubeai
+      when: fa_kubeai | bool
+
 - name: Deploy consumer agent + grpc-server
   hosts: consumers
   gather_facts: false

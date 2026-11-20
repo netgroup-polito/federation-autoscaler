@@ -49,6 +49,13 @@ if [[ -z "$SKIP_LIQO_DASHBOARD" ]] && command -v helm >/dev/null 2>&1; then
   kubectl delete namespace liqo-dashboard --ignore-not-found
 fi
 
+if helm status kubeai -n kubeai >/dev/null 2>&1; then
+  log "Uninstalling the AI (KubeAI and its model)"
+  kubectl -n kubeai delete models.kubeai.org --all --ignore-not-found >/dev/null 2>&1 || true
+  helm uninstall kubeai -n kubeai >/dev/null 2>&1 || true
+  kubectl delete namespace kubeai --ignore-not-found
+fi
+
 log "Deleting the gRPC server and consumer agent overlays"
 kubectl delete -k "${FA_REPO_ROOT}/config/standalone/grpc-server" --ignore-not-found
 kubectl delete -k "${FA_REPO_ROOT}/config/standalone/agent-consumer" --ignore-not-found

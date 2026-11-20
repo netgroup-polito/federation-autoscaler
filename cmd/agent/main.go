@@ -200,23 +200,23 @@ func main() {
 			"http://localhost:11434. When set alongside a ConsumerPolicy with placement "+
 			"type ConsumerChoice, provider selection is delegated to the LLM. "+
 			"Empty ⇒ ConsumerChoice falls back to a deterministic strategy.")
-	flag.StringVar(&ollamaModel, "ollama-model", "llama3.2",
+	flag.StringVar(&ollamaModel, "ollama-model", "phi4-mini:3.8b",
 		"(consumer role only) Ollama model name for ConsumerChoice selection. "+
 			"Ignored when --ollama-url is empty.")
 	flag.DurationVar(&ollamaTimeout, "ollama-timeout", 120*time.Second,
 		"(consumer role only) Upper bound on one ConsumerChoice LLM call. A call that "+
 			"exceeds it falls back to the deterministic strategy; a small model on CPU "+
 			"needs tens of seconds. Ignored when --ollama-url is empty.")
-	flag.StringVar(&llmAPI, "llm-api", ollama.APIOllama,
-		"(consumer role only) Which API the AI server speaks: \"ollama\" (Ollama's own "+
-			"/api/generate, the default) or \"openai\" (OpenAI-style /v1/chat/completions, "+
-			"served by Ollama, vLLM and KubeAI). With \"openai\", --ollama-url may be a "+
+	flag.StringVar(&llmAPI, "llm-api", ollama.APIOpenAI,
+		"(consumer role only) Which API the AI server speaks: \"openai\" (OpenAI-style "+
+			"/v1/chat/completions, served by Ollama, vLLM and KubeAI, the default) or \"ollama\" "+
+			"(Ollama's own /api/generate). With \"openai\", --ollama-url may be a "+
 			"base ending in /v1. Ignored when --ollama-url is empty.")
-	flag.StringVar(&aiJob, "ai-job", ollama.JobRank,
-		"(consumer role only) What the AI does for a plain-language request: \"rank\" "+
-			"(the model ranks the providers itself, the default) or \"fields\" (the model "+
-			"only turns the text into fields such as place, exclusions and preference, and "+
-			"the agent filters and ranks the providers in code; a smaller model is enough).")
+	flag.StringVar(&aiJob, "ai-job", ollama.JobFields,
+		"(consumer role only) What the AI does for a plain-language request: \"fields\" "+
+			"(the model only turns the text into fields such as place, exclusions and "+
+			"preference, and the agent filters and ranks the providers in code; a smaller "+
+			"model is enough; the default) or \"rank\" (the model ranks the providers itself).")
 	flag.StringVar(&brainMode, "brain", consumer.BrainCentral,
 		"(consumer role only) Who makes the placement decision: \"central\" asks the "+
 			"Broker (default); \"local\" decides on this consumer from the catalog. "+

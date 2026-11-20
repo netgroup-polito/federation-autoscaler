@@ -46,14 +46,41 @@ fa_mock_geo_url: "{{ ('http://' + fa_mock_address + ':' + (fa_mock_geo_node_port
 # ConsumerChoice policy ask the LLM; empty ⇒ ConsumerChoice uses its
 # deterministic fallback. fa_ollama_timeout bounds one LLM call.
 fa_ollama_url: ""
-fa_ollama_model: "llama3.2"
+fa_ollama_model: "phi4-mini:3.8b"
 fa_ollama_timeout: "120s"
 # The API the AI server speaks: "ollama" (Ollama's own API) or "openai"
 # (OpenAI-style, served by Ollama, vLLM and KubeAI; the URL may end in /v1).
-fa_llm_api: "ollama"
+fa_llm_api: "openai"
 # What the AI does for a plain-language request: "rank" (the model ranks the
 # providers) or "fields" (the model only reads the text; code ranks).
-fa_ai_job: "rank"
+fa_ai_job: "fields"
+
+# The consumer's AI on its own cluster (roadmap step 24): with fa_kubeai true,
+# the fa_kubeai role installs KubeAI and one model on each consumer and the
+# consumer agent uses it (this replaces fa_ollama_url / fa_ollama_model and
+# forces the OpenAI-style API). Engine: vLLM with a GPU, Ollama on CPU
+# (fa_kubeai_engine auto | ollama | vllm). Chosen on the lab benchmark
+# (federation-tests/aibench, 20 Nov 2026): phi4-mini, 2.5 GB; a smaller
+# alternative is granite4.2:3b. KubeAI caches model files only for vLLM, so an
+# Ollama pod downloads its model when it starts.
+fa_kubeai: false
+fa_kubeai_chart_version: "0.25.1"
+fa_kubeai_namespace: "kubeai"
+fa_kubeai_model_name: "phi4-mini"
+fa_kubeai_ollama_model: "phi4-mini:3.8b"
+fa_kubeai_hf_model: "microsoft/Phi-4-mini-instruct"
+fa_kubeai_engine: "auto"
+fa_kubeai_ollama_image: "ollama/ollama:0.40.15"
+# What each model copy reserves on CPU: fa_kubeai_cpus and fa_kubeai_memory,
+# set separately (the phi4-mini pod used about 4 GiB on the lab). One copy by default: a small consumer (the lab's
+# 4 vCPU, 8 GiB) has no room for a second one, and KubeAI also needs room for
+# a second pod to roll out a model change (otherwise delete the old pod).
+# Raise fa_kubeai_max_replicas on a bigger consumer to scale with load.
+fa_kubeai_cpus: 2
+fa_kubeai_memory: "4Gi"
+fa_kubeai_gpus: 1   # per copy, with vLLM only
+fa_kubeai_min_replicas: 1
+fa_kubeai_max_replicas: 1
 
 # Who makes each consumer's placement decision: "central" (the Broker, today's
 # behaviour) or "local" (the consumer's own brain, reading the Redis catalog at

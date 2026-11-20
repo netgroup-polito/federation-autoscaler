@@ -104,7 +104,9 @@ retry_liqo_install() {
 # Environment / tools
 # ----------------------------------------------------------------------------
 # use_kubeconfig <path> — export KUBECONFIG so every kubectl/liqoctl call honours it.
-use_kubeconfig() { [[ -n "${1:-}" ]] && export KUBECONFIG="$1"; }
+# (An `if`, not `[[ ]] &&`: with no path the latter returns 1, and under
+# `set -e` that silently ended every script run without --kubeconfig.)
+use_kubeconfig() { if [[ -n "${1:-}" ]]; then export KUBECONFIG="$1"; fi; }
 
 # Tool versions installed when missing (kept in lock-step with deploy/ansible).
 KUBECTL_VERSION="${KUBECTL_VERSION:-v1.32.5}"

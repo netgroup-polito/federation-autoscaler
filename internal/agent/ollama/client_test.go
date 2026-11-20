@@ -22,6 +22,7 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"reflect"
 	"testing"
 
 	corev1 "k8s.io/api/core/v1"
@@ -589,5 +590,32 @@ func TestSelect_OllamaAPI_ThinkingOff(t *testing.T) {
 	}
 	if think, ok := got["think"]; !ok || think != false {
 		t.Errorf("think = %v (present %v), want false", think, ok)
+	}
+}
+
+// An older Ollama rejects reasoning_effort "none": the client retries without
+// it once, and leaves it out from then on.
+func TestOpenAIAPI_RetriesWithoutReasoningEffort(t *testing.T) {
+	var calls []string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var req openAIRequest
+		_ = json.NewDecoder(r.Body).Decode(&req)
+		calls = append(calls, req.ReasoningEffort)
+		if req.ReasoningEffort != "" {
+			w.WriteHeader(http.StatusBadRequest)
+			_, _ = w.Write([]byte(`{"error":{"message":"invalid think value: \"none\""}}`))
+			return
+		}
+		_, _ = w.Write([]byte(`{"choices":[{"message":{"content":"{\"nodes\":2}"}}]}`))
+	}))
+	defer srv.Close()
+	c := NewWithOptions(srv.URL, "m", Options{API: APIOpenAI})
+	for range 2 {
+		if _, amt, err := c.ExtractAmount(context.Background(), "2 VMs"); err != nil || amt.Nodes != 2 {
+			t.Fatalf("amount %+v, err %v", amt, err)
+		}
+	}
+	if !reflect.DeepEqual(calls, []string{"none", "", ""}) {
+		t.Errorf("reasoning_effort per call = %q, want none, then left out", calls)
 	}
 }

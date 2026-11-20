@@ -256,7 +256,7 @@ func UnderstandAmount(ctx context.Context, c *Client, text string) AmountResult 
 			if !latencyNumberRe.MatchString(text) {
 				amount.MaxLatencyMs = 0
 			}
-			amount = preferTextAmount(amount, ParseAmount(text))
+			amount = preferTextAmount(amount, ParseAmount(text), text)
 			res.Amount = amount
 			res.Source = AmountSourceAI
 			if amount.IsZero() {
@@ -279,7 +279,18 @@ func UnderstandAmount(ctx context.Context, c *Client, text string) AmountResult 
 // which can slip (16 GB read as 16000 MiB, 3 ms as 3000 ms). The model's
 // value is kept only where the patterns found nothing, e.g. a phrasing they
 // do not know.
-func preferTextAmount(ai, text Amount) Amount {
+func preferTextAmount(ai, text Amount, raw string) Amount {
+	// A unit the text never mentions was not asked for: a small model tends
+	// to copy the node count into CPUs ("3 VMs" -> 3 CPU, 3 nodes).
+	if !cpuWordRe.MatchString(raw) {
+		ai.CPU = resource.Quantity{}
+	}
+	if !memWordRe.MatchString(raw) {
+		ai.Memory = resource.Quantity{}
+	}
+	if !gpuWordRe.MatchString(raw) {
+		ai.GPU = 0
+	}
 	if !text.CPU.IsZero() {
 		ai.CPU = text.CPU
 	}
@@ -297,6 +308,14 @@ func preferTextAmount(ai, text Amount) Amount {
 	}
 	return ai
 }
+
+// Unit words: an amount of a unit the text never mentions is not taken from
+// the model.
+var (
+	cpuWordRe = regexp.MustCompile(`(?i)\b(?:v?cpus?|v?cores?|processors?)\b`)
+	memWordRe = regexp.MustCompile(`(?i)\b(?:tib|tb|gib|gb|gigs?|mib|mb|ram|memory)\b|\d\s*g\b`)
+	gpuWordRe = regexp.MustCompile(`(?i)\bgpus?\b`)
+)
 
 // Patterns for ParseAmount. Numbers are digits ("4", "2.5", "2,5") or the
 // number words in numberWords; "a"/"an" counts as 1 only before "GPU".
