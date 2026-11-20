@@ -683,10 +683,13 @@ func deployControllableMockGeo(ctx context.Context, repoRoot string, centralSpec
 // ConsumerChoice policy: it writes ollamaUrl / ollamaModel / ollamaTimeout into
 // agent-config (the same keys consumer-up.sh --ollama-url sets), restarts the
 // agent so its flags pick them up, and waits for the rollout. url must be
-// reachable from inside the consumer cluster.
+// reachable from inside the consumer cluster. It pins the "rank" AI job and
+// Ollama's own API, which is what the ConsumerChoice experiments measure (the
+// agent's defaults are now the "fields" job and the OpenAI-style API).
 func SetConsumerOllama(ctx context.Context, kubeconfig, url, model string, timeout time.Duration) error {
 	patch, err := json.Marshal(map[string]map[string]string{"data": {
 		"ollamaUrl": url, "ollamaModel": model, "ollamaTimeout": timeout.String(),
+		"aiJob": "rank", "llmApi": "ollama",
 	}})
 	if err != nil {
 		return err

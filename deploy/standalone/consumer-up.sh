@@ -21,6 +21,9 @@
 #                  [--namespace <ns>] [--public-endpoint <ip|host>]
 #                  [--mock-geo-url <url>]
 #                  [--ollama-url <url>] [--ollama-model <name>] [--ollama-timeout <dur>]
+#                  [--llm-api <ollama|openai>] [--ai-job <rank|fields>]
+#                  [--kubeai [--ai-model <name>] [--ai-cpus <n>] [--ai-memory <qty>]
+#                   [--ai-engine auto|ollama|vllm] [--ai-gpus <n>] [--ai-replicas MIN[:MAX]]]
 #                  [--pod-cidr <cidr>] [--service-cidr <cidr>]
 #                  [--liqo-provider <k3s|kubeadm|…>] [--skip-liqo]
 #                  [--ca-image <img>] [--scale-down-unneeded-time <dur>]
@@ -36,8 +39,19 @@
 #                  http://10.0.0.5:11434). With it, a ConsumerChoice policy asks
 #                  that LLM to choose the provider; without it, ConsumerChoice
 #                  uses the deterministic fallback. --ollama-model (default
-#                  llama3.2) and --ollama-timeout (default 120s, per LLM call)
-#                  apply only when it is set.
+#                  phi4-mini:3.8b) and --ollama-timeout (default 120s, per LLM call)
+#                  apply only when it is set. --llm-api (default openai) picks
+#                  the server's API: "openai" for an OpenAI-style server (Ollama,
+#                  vLLM or KubeAI), whose URL may end in /v1; "ollama" for
+#                  Ollama's own API. --ai-job (default fields): the AI only reads
+#                  the request into fields and the agent ranks the providers in
+#                  code; "rank" makes the AI rank them itself.
+#   --kubeai       Run the AI on this cluster with KubeAI (kubeai-up.sh) and point
+#                  the agent at it; replaces --ollama-url/--ollama-model. Sizing:
+#                  --ai-model (Ollama model, default phi4-mini:3.8b), --ai-cpus and
+#                  --ai-memory per copy (default 2 and 4Gi), --ai-engine (auto: vLLM
+#                  with a GPU, else Ollama), --ai-gpus per copy with vLLM (default
+#                  1), --ai-replicas MIN[:MAX] (default 1). See kubeai-up.sh --help.
 #   --pod-cidr / --service-cidr  Passed to `liqoctl install`; MUST be globally
 #                  non-overlapping across the federation.
 #   --scale-down-unneeded-time  CA scale-down window (default 5m; use ~1m for a
@@ -67,8 +81,12 @@ KUBECONFIG_FLAG=""
 PUBLIC_ENDPOINT=""
 MOCK_GEO_URL=""
 OLLAMA_URL=""
-OLLAMA_MODEL="llama3.2"
+OLLAMA_MODEL="phi4-mini:3.8b"
 OLLAMA_TIMEOUT="120s"
+LLM_API="openai"
+AI_JOB="fields"
+KUBEAI=""
+KUBEAI_ARGS=()
 POD_CIDR=""
 SERVICE_CIDR=""
 LIQO_PROVIDER="k3s"
@@ -95,6 +113,15 @@ while [[ $# -gt 0 ]]; do
     --ollama-url)                OLLAMA_URL="$2"; shift 2 ;;
     --ollama-model)              OLLAMA_MODEL="$2"; shift 2 ;;
     --ollama-timeout)            OLLAMA_TIMEOUT="$2"; shift 2 ;;
+    --llm-api)                   LLM_API="$2"; shift 2 ;;
+    --ai-job)                    AI_JOB="$2"; shift 2 ;;
+    --kubeai)                    KUBEAI=1; shift ;;
+    --ai-model)                  KUBEAI_ARGS+=(--model "$2"); shift 2 ;;
+    --ai-cpus)                   KUBEAI_ARGS+=(--cpus "$2"); shift 2 ;;
+    --ai-memory)                 KUBEAI_ARGS+=(--memory "$2"); shift 2 ;;
+    --ai-engine)                 KUBEAI_ARGS+=(--engine "$2"); shift 2 ;;
+    --ai-gpus)                   KUBEAI_ARGS+=(--gpus "$2"); shift 2 ;;
+    --ai-replicas)               KUBEAI_ARGS+=(--replicas "$2"); shift 2 ;;
     --pod-cidr)                  POD_CIDR="$2"; shift 2 ;;
     --service-cidr)              SERVICE_CIDR="$2"; shift 2 ;;
     --liqo-provider)             LIQO_PROVIDER="$2"; shift 2 ;;
@@ -221,13 +248,23 @@ apply_overlay "${FA_REPO_ROOT}/config/standalone/agent-consumer" "agent"
 log "Applying gRPC server overlay"
 apply_overlay "${FA_REPO_ROOT}/config/standalone/grpc-server" "grpc-server"
 
+# 6b. Optionally, the AI on this cluster (KubeAI): it replaces --ollama-url.
+if [[ -n "$KUBEAI" ]]; then
+  log "Installing the AI on this cluster with KubeAI"
+  ai_out="$("${FA_REPO_ROOT}/deploy/standalone/kubeai-up.sh" "${KUBEAI_ARGS[@]}" | tee /dev/stderr)"
+  OLLAMA_URL="$(sed -n 's/^AI_URL=//p' <<<"$ai_out")"
+  OLLAMA_MODEL="$(sed -n 's/^AI_MODEL=//p' <<<"$ai_out")"
+  LLM_API="openai"
+  [[ -n "$OLLAMA_URL" && -n "$OLLAMA_MODEL" ]] || die "kubeai-up.sh did not report the AI address"
+fi
+
 # 7. Point the agent at the broker + mock-geo (consumers use mock-geo only) and,
 #    optionally, at the Ollama server ConsumerChoice asks (empty URL = no LLM).
 log "Configuring agent-config (broker + mock-geo URL$([[ -z "$OLLAMA_URL" ]] || echo ' + Ollama'))"
 kubectl -n "$NAMESPACE" patch configmap agent-config --type merge -p \
-  "$(printf '{"data":{"clusterId":"%s","liqoClusterId":"%s","brokerUrl":"%s","mockEcoUrl":"","mockGeoUrl":"%s","ollamaUrl":"%s","ollamaModel":"%s","ollamaTimeout":"%s"}}' \
+  "$(printf '{"data":{"clusterId":"%s","liqoClusterId":"%s","brokerUrl":"%s","mockEcoUrl":"","mockGeoUrl":"%s","ollamaUrl":"%s","ollamaModel":"%s","ollamaTimeout":"%s","llmApi":"%s","aiJob":"%s"}}' \
       "$CLUSTER_ID" "$CLUSTER_ID" "$BROKER_URL" "$MOCK_GEO_URL" \
-      "$OLLAMA_URL" "$OLLAMA_MODEL" "$OLLAMA_TIMEOUT")" >/dev/null
+      "$OLLAMA_URL" "$OLLAMA_MODEL" "$OLLAMA_TIMEOUT" "$LLM_API" "$AI_JOB")" >/dev/null
 
 # 8. Cluster Autoscaler (externalgrpc -> gRPC server) + Liqo NamespaceOffloading.
 if [[ -n "$SKIP_CLUSTER_AUTOSCALER" ]]; then

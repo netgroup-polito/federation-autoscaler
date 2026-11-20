@@ -53,7 +53,7 @@ const (
 	// defaultOllamaImage is pinned so a run is reproducible: "latest" would let
 	// the model runtime change underneath an otherwise identical experiment.
 	defaultOllamaImage = "ollama/ollama:0.34.0"
-	defaultModel       = "llama3.2" // the agent's own --ollama-model default
+	defaultModel       = "llama3.2" // the model these experiments were run with
 	// agentDefaultOllamaTimeout is the agent's --ollama-timeout default.
 	agentDefaultOllamaTimeout = 120 * time.Second
 

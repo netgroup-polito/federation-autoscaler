@@ -171,3 +171,33 @@ func TestNodeGroupsNoOffers(t *testing.T) {
 		t.Errorf("no offers must give no node groups, got %+v", resp.NodeGroups)
 	}
 }
+
+// The offer's validitySeconds reaches the view as GuaranteedSeconds, from the
+// provider's lead site (the one with the most free chunks); a provider whose
+// offer states nothing gets 0.
+func TestNodeGroupsGuaranteedTimeFromLeadSite(t *testing.T) {
+	small := siteOffer("p1", "alba", 2, 4)
+	small.ValiditySeconds = 600
+	big := siteOffer("p1", "cuneo", 8, 16)
+	big.ValiditySeconds = 7200
+	plain := siteOffer("p2", "default", 4, 8)
+
+	views := viewsByProvider(NodeGroups(Input{Offers: []catalog.Offer{small, big, plain}}))
+	if got := views["p1"].GuaranteedSeconds; got != 7200 {
+		t.Errorf("p1 GuaranteedSeconds = %d, want 7200 (the lead site's)", got)
+	}
+	if got := views["p2"].GuaranteedSeconds; got != 0 {
+		t.Errorf("p2 GuaranteedSeconds = %d, want 0 (not stated)", got)
+	}
+}
+
+func TestGuaranteedSecondsOutOfRange(t *testing.T) {
+	for _, v := range []int{-1, 0, catalog.MaxValiditySeconds + 1} {
+		if got := guaranteedSeconds(v); got != 0 {
+			t.Errorf("guaranteedSeconds(%d) = %d, want 0", v, got)
+		}
+	}
+	if got := guaranteedSeconds(catalog.MaxValiditySeconds); got != int32(catalog.MaxValiditySeconds) {
+		t.Errorf("guaranteedSeconds(max) = %d", got)
+	}
+}

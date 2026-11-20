@@ -65,7 +65,8 @@ func okEnvelope(response string) ollamaResponse {
 
 // The model decides on its own: the request is plain JSON mode with the
 // server's default sampling -- no schema, no temperature, no seed -- whatever
-// Options are set.
+// Options are set. The one extra field is think=false, which only stops a
+// thinking model from writing a hidden reasoning first (see ollamaRequest).
 func TestRequestShape_PlainJSONModeOnly(t *testing.T) {
 	for name, c := range map[string]func(url string) *Client{
 		"New":         func(url string) *Client { return New(url, "m") },
@@ -84,7 +85,7 @@ func TestRequestShape_PlainJSONModeOnly(t *testing.T) {
 			}
 			for key := range *body {
 				switch key {
-				case "model", "system", "prompt", "format", "stream":
+				case "model", "system", "prompt", "format", "stream", "think":
 				default:
 					t.Errorf("unexpected request field %q: only the model, prompts and JSON mode are sent", key)
 				}
@@ -431,5 +432,23 @@ func TestNodeGroupViewToProviderInfo_RicherOfferData(t *testing.T) {
 	plain, _ := json.Marshal(NodeGroupViewToProviderInfo(makeNodeGroup("provider-1", 3, 0, nil, nil, "")))
 	if !strings.Contains(string(plain), `"renewable":false`) || strings.Contains(string(plain), "pricePerCpuHour") {
 		t.Errorf("an unpriced, non-renewable provider: %s", plain)
+	}
+}
+
+// The guaranteed time reaches the AI in hours, and only when the offer
+// states it.
+func TestNodeGroupViewToProviderInfo_GuaranteedHours(t *testing.T) {
+	ng := makeNodeGroup("provider-1", 3, 0, nil, nil, "")
+	ng.GuaranteedSeconds = 9000
+	body, err := json.Marshal(NodeGroupViewToProviderInfo(ng))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(body), `"guaranteedHours":2.5`) {
+		t.Errorf("want guaranteedHours 2.5 in %s", body)
+	}
+	plain, _ := json.Marshal(NodeGroupViewToProviderInfo(makeNodeGroup("provider-2", 3, 0, nil, nil, "")))
+	if strings.Contains(string(plain), "guaranteedHours") {
+		t.Errorf("no guarantee stated, so no guaranteedHours: %s", plain)
 	}
 }

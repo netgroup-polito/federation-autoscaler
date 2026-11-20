@@ -19,8 +19,10 @@ package ollama
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
+	"reflect"
 	"testing"
 
 	corev1 "k8s.io/api/core/v1"
@@ -452,4 +454,168 @@ func searchString(s, substr string) bool {
 		}
 	}
 	return false
+}
+
+// --- OpenAI-style API ---
+
+// openAIServer answers /v1/chat/completions with content and records the
+// path and request it got.
+func openAIServer(t *testing.T, content string, gotPath *string, gotReq *openAIRequest) *httptest.Server {
+	t.Helper()
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		*gotPath = r.URL.Path
+		if err := json.NewDecoder(r.Body).Decode(gotReq); err != nil {
+			t.Errorf("decode request: %v", err)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"model":"qwen","choices":[{"message":{"role":"assistant","content":` +
+			mustJSON(t, content) + `},"finish_reason":"stop"}],"usage":{"prompt_tokens":120,"completion_tokens":30}}`))
+	}))
+	t.Cleanup(srv.Close)
+	return srv
+}
+
+func mustJSON(t *testing.T, v any) string {
+	t.Helper()
+	b, err := json.Marshal(v)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return string(b)
+}
+
+func TestSelect_OpenAIAPI(t *testing.T) {
+	var path string
+	var req openAIRequest
+	srv := openAIServer(t, `{"rankedList":["provider-2","provider-1"]}`, &path, &req)
+
+	c := NewWithOptions(srv.URL, "qwen", Options{API: APIOpenAI})
+	trace, err := c.SelectDetailed(context.Background(), "cheapest", []brokerapi.NodeGroupView{
+		makeNodeGroup(providerOne, 3, 0, nil, nil, ""),
+		makeNodeGroup(providerTwo, 3, 0, nil, nil, ""),
+	})
+	if err != nil {
+		t.Fatalf("SelectDetailed: %v", err)
+	}
+	if path != "/v1/chat/completions" {
+		t.Errorf("path = %q, want /v1/chat/completions", path)
+	}
+	if len(req.Messages) != 2 || req.Messages[0].Role != "system" || req.Messages[1].Role != "user" ||
+		req.Messages[0].Content != SystemPrompt || req.ResponseFormat["type"] != "json_object" || req.Model != "qwen" ||
+		req.ReasoningEffort != "none" || req.ChatTemplateKwargs["enable_thinking"] != false {
+		t.Errorf("unexpected request: %+v", req)
+	}
+	if len(trace.Ranked) != 2 || trace.Ranked[0] != providerTwo {
+		t.Errorf("ranked = %v, want provider-2 first", trace.Ranked)
+	}
+	if trace.API != APIOpenAI || trace.Envelope.EvalCount != 30 || trace.Envelope.DoneReason != "stop" {
+		t.Errorf("trace: api=%q envelope=%+v", trace.API, trace.Envelope)
+	}
+}
+
+// A base URL that already ends in /v1 (KubeAI's /openai/v1) is not doubled.
+func TestSelect_OpenAIAPI_BaseWithV1(t *testing.T) {
+	var path string
+	var req openAIRequest
+	srv := openAIServer(t, `{"rankedList":["provider-1","provider-2"]}`, &path, &req)
+
+	c := NewWithOptions(srv.URL+"/openai/v1/", "qwen", Options{API: APIOpenAI})
+	if _, err := c.Select(context.Background(), "any", []brokerapi.NodeGroupView{
+		makeNodeGroup(providerOne, 3, 0, nil, nil, ""),
+		makeNodeGroup(providerTwo, 3, 0, nil, nil, ""),
+	}); err != nil {
+		t.Fatalf("Select: %v", err)
+	}
+	if path != "/openai/v1/chat/completions" {
+		t.Errorf("path = %q, want /openai/v1/chat/completions", path)
+	}
+}
+
+func TestSelect_OpenAIAPI_NoChoices(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(`{"choices":[]}`))
+	}))
+	defer srv.Close()
+
+	c := NewWithOptions(srv.URL, "qwen", Options{API: APIOpenAI})
+	_, err := c.Select(context.Background(), "any", []brokerapi.NodeGroupView{
+		makeNodeGroup(providerOne, 3, 0, nil, nil, ""),
+		makeNodeGroup(providerTwo, 3, 0, nil, nil, ""),
+	})
+	var selErr *SelectError
+	if !errors.As(err, &selErr) || selErr.Kind != ErrKindEnvelopeDecode {
+		t.Errorf("err = %v, want kind envelope_decode", err)
+	}
+}
+
+// The amount reader goes through the same API.
+func TestExtractAmount_OpenAIAPI(t *testing.T) {
+	var path string
+	var req openAIRequest
+	srv := openAIServer(t, `{"nodes":3,"maxLatencyMs":3}`, &path, &req)
+
+	c := NewWithOptions(srv.URL, "qwen", Options{API: APIOpenAI})
+	_, amt, err := c.ExtractAmount(context.Background(), "3 VMs, at most 3 ms from us")
+	if err != nil {
+		t.Fatalf("ExtractAmount: %v", err)
+	}
+	if path != "/v1/chat/completions" || req.Messages[0].Content != AmountSystemPrompt {
+		t.Errorf("path=%q system=%q", path, req.Messages[0].Content)
+	}
+	if amt.Nodes != 3 {
+		t.Errorf("amount = %+v, want 3 nodes", amt)
+	}
+}
+
+func TestValidAPI(t *testing.T) {
+	for api, want := range map[string]bool{"": true, APIOllama: true, APIOpenAI: true, "vllm": false} {
+		if got := ValidAPI(api); got != want {
+			t.Errorf("ValidAPI(%q) = %v, want %v", api, got, want)
+		}
+	}
+}
+
+// Ollama's own API always asks the model not to think.
+func TestSelect_OllamaAPI_ThinkingOff(t *testing.T) {
+	var got map[string]any
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewDecoder(r.Body).Decode(&got)
+		_ = json.NewEncoder(w).Encode(ollamaResponse{Response: `{"rankedList":["provider-1","provider-2"]}`, Done: true})
+	}))
+	defer srv.Close()
+	if _, err := New(srv.URL, "qwen3:4b").Select(context.Background(), "any", []brokerapi.NodeGroupView{
+		makeNodeGroup(providerOne, 3, 0, nil, nil, ""), makeNodeGroup(providerTwo, 3, 0, nil, nil, ""),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if think, ok := got["think"]; !ok || think != false {
+		t.Errorf("think = %v (present %v), want false", think, ok)
+	}
+}
+
+// An older Ollama rejects reasoning_effort "none": the client retries without
+// it once, and leaves it out from then on.
+func TestOpenAIAPI_RetriesWithoutReasoningEffort(t *testing.T) {
+	var calls []string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var req openAIRequest
+		_ = json.NewDecoder(r.Body).Decode(&req)
+		calls = append(calls, req.ReasoningEffort)
+		if req.ReasoningEffort != "" {
+			w.WriteHeader(http.StatusBadRequest)
+			_, _ = w.Write([]byte(`{"error":{"message":"invalid think value: \"none\""}}`))
+			return
+		}
+		_, _ = w.Write([]byte(`{"choices":[{"message":{"content":"{\"nodes\":2}"}}]}`))
+	}))
+	defer srv.Close()
+	c := NewWithOptions(srv.URL, "m", Options{API: APIOpenAI})
+	for range 2 {
+		if _, amt, err := c.ExtractAmount(context.Background(), "2 VMs"); err != nil || amt.Nodes != 2 {
+			t.Fatalf("amount %+v, err %v", amt, err)
+		}
+	}
+	if !reflect.DeepEqual(calls, []string{"none", "", ""}) {
+		t.Errorf("reasoning_effort per call = %q, want none, then left out", calls)
+	}
 }

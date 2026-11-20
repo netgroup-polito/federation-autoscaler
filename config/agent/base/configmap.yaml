@@ -37,8 +37,16 @@ data:
   # uses its deterministic fallback. ollamaTimeout bounds one LLM call.
   # consumer-up.sh --ollama-url / the fa_consumer role set these.
   ollamaUrl: ""
-  ollamaModel: "llama3.2"
+  ollamaModel: "phi4-mini:3.8b"
   ollamaTimeout: "120s"
+  # Which API the AI server at ollamaUrl speaks: "ollama" (Ollama's own API,
+  # the default) or "openai" (OpenAI-style /v1/chat/completions, served by
+  # Ollama, vLLM and KubeAI; ollamaUrl may then end in /v1).
+  llmApi: "openai"
+  # What the AI does for a plain-language request: "fields" (the model only
+  # turns the text into fields; the agent filters and ranks in code, the
+  # default) or "rank" (the model ranks the providers itself).
+  aiJob: "fields"
   # Who makes the placement decision (consumer-only): "central" asks the
   # Broker, "local" decides on this consumer from the Redis catalog at
   # catalogAddr (host:port). Booking goes through the Broker in both modes.

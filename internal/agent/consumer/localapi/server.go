@@ -128,6 +128,12 @@ type Options struct {
 	// func: no location is sent.
 	ConsumerLocation func() *ollama.Location
 
+	// AIJob is what the AI does for a plain-language request: ollama.JobRank
+	// (the default when empty: the model ranks the providers) or
+	// ollama.JobFields (the model only turns the text into fields and the
+	// providers are filtered and ranked in code, see ollama.RankByIntent).
+	AIJob string
+
 	// Brain, when set, makes the placement decision locally (local mode):
 	// GET /local/nodegroups is built from the catalog by the brain instead of
 	// being fetched from the Broker. Booking still goes through the Broker.
@@ -158,6 +164,7 @@ type Server struct {
 	lastSel  *brokerapi.ConsumerChoiceReport
 	ollama   *ollama.Client
 	location func() *ollama.Location
+	aiJob    string
 
 	brain *brain.Brain // nil in central mode
 }
@@ -172,6 +179,8 @@ func New(opts Options) (*Server, error) {
 		return nil, errors.New("localapi: Client is required")
 	case opts.LocalClient == nil:
 		return nil, errors.New("localapi: LocalClient is required")
+	case !ollama.ValidJob(opts.AIJob):
+		return nil, fmt.Errorf("localapi: AIJob must be %q or %q, got %q", ollama.JobRank, ollama.JobFields, opts.AIJob)
 	}
 	logger := opts.Logger
 	if logger.GetSink() == nil {
@@ -191,6 +200,7 @@ func New(opts Options) (*Server, error) {
 		shutdown: shutdown,
 		ollama:   opts.OllamaClient,
 		location: opts.ConsumerLocation,
+		aiJob:    opts.AIJob,
 		brain:    opts.Brain,
 	}
 	s.srv = &http.Server{
@@ -413,18 +423,58 @@ func (s *Server) runSelection(
 	ctx, cancel := context.WithTimeout(context.Background(), client.Timeout()+30*time.Second)
 	defer cancel()
 
-	s.log.V(1).Info("AI selection background task started", "prompt", prompt, "perRequest", perRequest)
-	if rtts := s.measureNearest(ctx, groups); len(rtts) > 0 {
-		client = client.WithMeasuredLatencies(rtts)
-	}
-	trace, aiErr := client.SelectDetailed(ctx, prompt, groups)
+	s.log.V(1).Info("AI selection background task started", "prompt", prompt, "perRequest", perRequest, "job", s.job())
+	rtts := s.measureNearest(ctx, groups)
 
-	source, ranked := SelectionSourceAI, trace.Ranked
-	if aiErr != nil || len(ranked) == 0 {
-		source = SelectionSourceFallback
-		ranked, _ = ollama.DeterministicFallback(groups)
+	var (
+		trace      *ollama.Trace
+		aiErr      error
+		source     string
+		ranked     []string
+		understood string
+	)
+	if s.job() == ollama.JobFields {
+		// The AI only translates the text; the providers are filtered and
+		// ranked in code. The ranking is not completed with the other
+		// providers: a place, an exclusion or "renewable only" is a must, so
+		// a request whose providers are full waits instead of going elsewhere.
+		res := ollama.UnderstandIntent(ctx, client, prompt, ollama.KnownPlaces(groups))
+		trace = res.Trace
+		if res.AIError != "" {
+			aiErr = errors.New(res.AIError)
+		}
+		source = SelectionSourceAI
+		if res.Source != ollama.AmountSourceAI {
+			source = SelectionSourceFallback
+		}
+		var loc *ollama.Location
+		if s.location != nil {
+			loc = s.location()
+		}
+		ranked = ollama.RankByIntent(groups, res.Intent, rtts, loc)
+		understood = res.Intent.String()
+	} else {
+		if len(rtts) > 0 {
+			client = client.WithMeasuredLatencies(rtts)
+		}
+		// "not in X" is applied in code before the model sees the list: a
+		// small model ignores exclusions. Excluded providers are never
+		// ranked, so they are never grown for this request.
+		if excl := ollama.ParseIntent(prompt, ollama.KnownPlaces(groups)).Exclude; len(excl) > 0 {
+			groups = ollama.WithoutPlaces(groups, excl)
+			understood = "not in " + strings.Join(excl, ", ")
+		}
+		trace, aiErr = client.SelectDetailed(ctx, prompt, groups)
+		source, ranked = SelectionSourceAI, trace.Ranked
+		if aiErr != nil || len(ranked) == 0 {
+			source = SelectionSourceFallback
+			ranked, _ = ollama.DeterministicFallback(groups)
+		}
+		ranked = completeRanking(ranked, groups)
 	}
-	ranked = completeRanking(ranked, groups)
+	if trace == nil {
+		trace = &ollama.Trace{}
+	}
 	now := time.Now()
 
 	s.aiMutex.Lock()
@@ -440,6 +490,7 @@ func (s *Server) runSelection(
 		Source:     source,
 		DecidedAt:  metav1.NewTime(now),
 		PerRequest: perRequest,
+		Understood: understood,
 	}
 	if perRequest {
 		s.lastSel.Requested = requestedSize(need, bound)
@@ -458,10 +509,19 @@ func (s *Server) runSelection(
 		"prompt", prompt,
 		"perRequest", perRequest,
 		"ranked", ranked,
+		"understood", understood,
 		"rawResponse", trace.RawResponse,
 		"errorKind", string(trace.ErrorKind),
 		"error", errMsg,
 		"durationMs", trace.Duration().Milliseconds())
+}
+
+// job is the AI's job for plain-language requests (JobRank when unset).
+func (s *Server) job() string {
+	if s.aiJob == ollama.JobFields {
+		return ollama.JobFields
+	}
+	return ollama.JobRank
 }
 
 // requestedSize renders a request's size and latency limit for the

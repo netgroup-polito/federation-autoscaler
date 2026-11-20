@@ -31,6 +31,7 @@ import (
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
+	utilrand "k8s.io/apimachinery/pkg/util/rand"
 	ctrlclient "sigs.k8s.io/controller-runtime/pkg/client"
 
 	autoscalingv1alpha1 "github.com/netgroup-polito/federation-autoscaler/api/autoscaling/v1alpha1"
@@ -83,6 +84,8 @@ type requestBody struct {
 	GPU    string `json:"gpu,omitempty"`
 	// Name selects the request to release; empty releases all of them.
 	Name string `json:"name,omitempty"`
+	// Group releases every part of one split request (see annoGroupText).
+	Group string `json:"group,omitempty"`
 }
 
 // requestView is one placed request as the panel shows it: what was asked,
@@ -107,6 +110,13 @@ type requestView struct {
 	Provider string `json:"provider,omitempty"`
 	Ready    int32  `json:"ready,omitempty"`
 	SentAt   string `json:"sentAt,omitempty"`
+	// Group, GroupText and Part are set on each part of a request that was
+	// split by place: the group's ID, the whole request, and "1/2".
+	Group     string `json:"group,omitempty"`
+	GroupText string `json:"groupText,omitempty"`
+	Part      string `json:"part,omitempty"`
+	// Parts is how many requests a send created (more than 1 when split).
+	Parts int `json:"parts,omitempty"`
 }
 
 // requestList is the GET /api/request body: every placed request, oldest
@@ -124,6 +134,12 @@ const (
 	annoSource     = "federation-autoscaler.io/request-source"
 	annoNodes      = "federation-autoscaler.io/request-nodes"
 	annoMaxLatency = "federation-autoscaler.io/request-max-latency-ms"
+	// A request asking for several places ("2 VMs in Turin and 1 VM in
+	// Frankfurt") becomes one ResourceRequest per place, linked by the
+	// groupLabel; each part keeps the whole request and its position.
+	groupLabel    = "federation-autoscaler.io/request-group"
+	annoGroupText = "federation-autoscaler.io/request-group-text"
+	annoPart      = "federation-autoscaler.io/request-part"
 
 	// onDemandName names the On demand request in the panel's list.
 	onDemandName = "on-demand"
@@ -144,6 +160,15 @@ func (s *Server) handleRequest(w http.ResponseWriter, r *http.Request) {
 		}
 		s.writeJSON(w, http.StatusOK, view)
 	case "release":
+		if body.Group != "" {
+			status, err := s.releaseGroup(r.Context(), body.Group)
+			if err != nil {
+				s.writeError(w, status, err.Error())
+				return
+			}
+			s.ok(w)
+			return
+		}
 		status, err := s.releaseRequest(r.Context(), body.Name)
 		if err != nil {
 			s.writeError(w, status, err.Error())
@@ -188,63 +213,166 @@ func (s *Server) sendRequest(ctx context.Context, body requestBody) (*requestVie
 		}
 	}
 
-	amount, source, err := s.understandAmount(ctx, text, body)
-	if err != nil {
-		return nil, http.StatusBadRequest, err
-	}
-	resources, nodes, block, err := sizeRequest(amount)
-	if err != nil {
-		return nil, http.StatusBadRequest, err
-	}
-
-	var bound *autoscalingv1alpha1.LatencyBound
-	if amount.MaxLatencyMs > 0 {
-		bound = &autoscalingv1alpha1.LatencyBound{MaxLatencyMs: amount.MaxLatencyMs}
-	}
-	understood := amount.String()
-	if !amount.HasSize() {
-		understood = "1 node (no amount stated)"
-		if amount.MaxLatencyMs > 0 {
-			understood += fmt.Sprintf(", max %d ms", amount.MaxLatencyMs)
+	// Reserve now: a request asking for several places becomes one request
+	// per place. The amount fields describe one request, so with them filled
+	// the text is never split.
+	if body.Mode == RequestModeReserve && !formAmount(body) {
+		uctx, cancel := context.WithTimeout(ctx, understandTimeout)
+		split := ollama.UnderstandSplit(uctx, s.ollama, text)
+		cancel()
+		if split.AIError != "" {
+			s.log.Info("AI could not split the request; kept whole", "err", split.AIError)
+		}
+		if len(split.Parts) > 1 {
+			return s.sendSplit(ctx, text, split.Parts)
 		}
 	}
-	annos := map[string]string{
-		annoText:       text,
-		annoUnderstood: understood,
-		annoSource:     source,
-		annoNodes:      strconv.Itoa(int(nodes)),
-	}
-	if bound != nil {
-		annos[annoMaxLatency] = strconv.Itoa(int(bound.MaxLatencyMs))
+
+	p, err := s.prepare(ctx, text, body)
+	if err != nil {
+		return nil, http.StatusBadRequest, err
 	}
 
 	name := onDemandName
 	switch body.Mode {
 	case RequestModeReserve:
-		name, err = s.createRequestReservation(ctx, text, resources, bound, annos)
+		name, err = s.createRequestReservation(ctx, text, p.resources, p.bound, p.annos, nil)
 	case RequestModeOnDemand:
-		err = s.applyOnDemand(ctx, text, nodes, block, bound, annos)
+		err = s.applyOnDemand(ctx, text, p.nodes, p.block, p.bound, p.annos)
 	}
 	if err != nil {
 		return nil, http.StatusInternalServerError, err
 	}
 
-	view := &requestView{
+	view := p.view(name, text, body.Mode)
+	s.log.Info("plain-language request sent",
+		"name", name, "mode", body.Mode, "text", text, "understood", p.understood, "source", p.source, "nodes", p.nodes)
+	return view, 0, nil
+}
+
+// prepared is one request understood and sized, ready to be placed.
+type prepared struct {
+	amount     ollama.Amount
+	source     string
+	understood string
+	resources  corev1.ResourceList
+	nodes      int32
+	block      corev1.ResourceList
+	bound      *autoscalingv1alpha1.LatencyBound
+	annos      map[string]string
+}
+
+// prepare reads the amount and latency limit from text (and the panel's
+// amount fields), sizes it into nodes and builds its annotations.
+func (s *Server) prepare(ctx context.Context, text string, body requestBody) (*prepared, error) {
+	amount, source, err := s.understandAmount(ctx, text, body)
+	if err != nil {
+		return nil, err
+	}
+	resources, nodes, block, err := sizeRequest(amount)
+	if err != nil {
+		return nil, err
+	}
+	p := &prepared{amount: amount, source: source, resources: resources, nodes: nodes, block: block}
+	if amount.MaxLatencyMs > 0 {
+		p.bound = &autoscalingv1alpha1.LatencyBound{MaxLatencyMs: amount.MaxLatencyMs}
+	}
+	p.understood = amount.String()
+	if !amount.HasSize() {
+		p.understood = "1 node (no amount stated)"
+		if amount.MaxLatencyMs > 0 {
+			p.understood += fmt.Sprintf(", max %d ms", amount.MaxLatencyMs)
+		}
+	}
+	p.annos = map[string]string{
+		annoText:       text,
+		annoUnderstood: p.understood,
+		annoSource:     source,
+		annoNodes:      strconv.Itoa(int(nodes)),
+	}
+	if p.bound != nil {
+		p.annos[annoMaxLatency] = strconv.Itoa(int(p.bound.MaxLatencyMs))
+	}
+	return p, nil
+}
+
+// view is the panel's view of a request just placed.
+func (p *prepared) view(name, text, mode string) *requestView {
+	return &requestView{
 		Name:         name,
 		Active:       true,
 		Text:         text,
-		Mode:         body.Mode,
-		Understood:   understood,
-		Source:       source,
-		Nodes:        nodes,
-		Resources:    resourceListToMap(resources),
-		MaxLatencyMs: amount.MaxLatencyMs,
+		Mode:         mode,
+		Understood:   p.understood,
+		Source:       p.source,
+		Nodes:        p.nodes,
+		Resources:    resourceListToMap(p.resources),
+		MaxLatencyMs: p.amount.MaxLatencyMs,
 		Status:       "submitted",
 		SentAt:       time.Now().UTC().Format(time.RFC3339),
+		Parts:        1,
 	}
-	s.log.Info("plain-language request sent",
-		"name", name, "mode", body.Mode, "text", text, "understood", understood, "source", source, "nodes", nodes)
+}
+
+// formAmount reports whether any of the panel's amount fields is filled.
+func formAmount(body requestBody) bool {
+	return strings.TrimSpace(body.CPU) != "" || strings.TrimSpace(body.Memory) != "" || strings.TrimSpace(body.GPU) != ""
+}
+
+// sendSplit places one Reserve now request per part of a request split by
+// place, linked by one group. Every part is understood and sized first, so a
+// part that cannot be placed rejects the whole request before anything is
+// created; if creating a part fails, the parts already created are removed.
+func (s *Server) sendSplit(ctx context.Context, text string, parts []string) (*requestView, int, error) {
+	preps := make([]*prepared, len(parts))
+	for i, part := range parts {
+		p, err := s.prepare(ctx, part, requestBody{})
+		if err != nil {
+			return nil, http.StatusBadRequest, fmt.Errorf("part %q: %w", part, err)
+		}
+		preps[i] = p
+	}
+
+	group := "g-" + utilrand.String(8)
+	created := make([]string, 0, len(preps))
+	for i, p := range preps {
+		p.annos[annoGroupText] = text
+		p.annos[annoPart] = fmt.Sprintf("%d/%d", i+1, len(parts))
+		name, err := s.createRequestReservation(ctx, parts[i], p.resources, p.bound, p.annos,
+			map[string]string{groupLabel: group})
+		if err != nil {
+			if _, rerr := s.releaseGroup(ctx, group); rerr != nil {
+				s.log.Info("could not remove the parts already created", "group", group, "err", rerr)
+			}
+			return nil, http.StatusInternalServerError, err
+		}
+		created = append(created, name)
+	}
+
+	view := preps[0].view(created[0], parts[0], RequestModeReserve)
+	view.Group, view.GroupText, view.Part, view.Parts = group, text, fmt.Sprintf("1/%d", len(parts)), len(parts)
+	s.log.Info("plain-language request split by place and sent",
+		"text", text, "parts", parts, "names", created, "group", group)
 	return view, 0, nil
+}
+
+// releaseGroup removes every part of one split request.
+func (s *Server) releaseGroup(ctx context.Context, group string) (int, error) {
+	var list autoscalingv1alpha1.ResourceRequestList
+	if err := s.local.List(ctx, &list, ctrlclient.InNamespace(s.ns),
+		ctrlclient.MatchingLabels{consoleManagedLabel: requestLabelValue, groupLabel: group}); err != nil {
+		return http.StatusInternalServerError, fmt.Errorf("list requests: %w", err)
+	}
+	if len(list.Items) == 0 {
+		return http.StatusNotFound, fmt.Errorf("no request group %q", group)
+	}
+	for i := range list.Items {
+		if err := s.local.Delete(ctx, &list.Items[i]); err != nil && !apierrors.IsNotFound(err) {
+			return http.StatusInternalServerError, fmt.Errorf("release %s: %w", list.Items[i].Name, err)
+		}
+	}
+	s.log.Info("plain-language request group released", "group", group, "parts", len(list.Items))
+	return 0, nil
 }
 
 // understandAmount reads the amount from the text (AI, else fixed patterns)
@@ -351,13 +479,17 @@ func sizeRequest(a ollama.Amount) (corev1.ResourceList, int32, corev1.ResourceLi
 // as annotations, and returns its name.
 func (s *Server) createRequestReservation(
 	ctx context.Context, text string, res corev1.ResourceList,
-	bound *autoscalingv1alpha1.LatencyBound, annos map[string]string,
+	bound *autoscalingv1alpha1.LatencyBound, annos, extraLabels map[string]string,
 ) (string, error) {
+	labels := map[string]string{consoleManagedLabel: requestLabelValue}
+	for k, v := range extraLabels {
+		labels[k] = v
+	}
 	rr := &autoscalingv1alpha1.ResourceRequest{
 		ObjectMeta: metav1.ObjectMeta{
 			GenerateName: requestPrefix,
 			Namespace:    s.ns,
-			Labels:       map[string]string{consoleManagedLabel: requestLabelValue},
+			Labels:       labels,
 			Annotations:  annos,
 		},
 		Spec: autoscalingv1alpha1.ResourceRequestSpec{
@@ -535,9 +667,14 @@ func (s *Server) listRequests(ctx context.Context) (requestList, error) {
 		return out, fmt.Errorf("list requests: %w", err)
 	}
 	sort.Slice(list.Items, func(i, j int) bool {
-		a, b := list.Items[i].CreationTimestamp, list.Items[j].CreationTimestamp
+		x, y := &list.Items[i], &list.Items[j]
+		// The parts of one split request, in their order.
+		if g := x.Labels[groupLabel]; g != "" && g == y.Labels[groupLabel] {
+			return partIndex(x.Annotations[annoPart]) < partIndex(y.Annotations[annoPart])
+		}
+		a, b := x.CreationTimestamp, y.CreationTimestamp
 		if a.Equal(&b) {
-			return list.Items[i].Name < list.Items[j].Name
+			return x.Name < y.Name
 		}
 		return a.Before(&b)
 	})
@@ -565,6 +702,9 @@ func (s *Server) listRequests(ctx context.Context) (requestList, error) {
 			v.Status = "submitted"
 		}
 		v.SentAt = rr.CreationTimestamp.UTC().Format(time.RFC3339)
+		v.Group = rr.Labels[groupLabel]
+		v.GroupText = rr.Annotations[annoGroupText]
+		v.Part = rr.Annotations[annoPart]
 		out.Requests = append(out.Requests, v)
 	}
 	dep, err := s.onDemand(ctx)
@@ -586,6 +726,12 @@ func (s *Server) listRequests(ctx context.Context) (requestList, error) {
 		out.Requests = append(out.Requests, v)
 	}
 	return out, nil
+}
+
+// partIndex reads the position from a part annotation ("2/3" -> 2).
+func partIndex(part string) int {
+	n, _ := strconv.Atoi(strings.SplitN(part, "/", 2)[0])
+	return n
 }
 
 // viewFromAnnotations fills what a request understood from its annotations.

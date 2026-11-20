@@ -70,6 +70,7 @@ Provider fields (a field is omitted when the provider does not advertise it):
 - pricePerCpuHour, pricePerGiBHour: the provider's price for one CPU core, and for one GiB of memory, for one hour. Lower is cheaper.
 - renewable: true when the provider declares that it runs on renewable energy, false otherwise.
 - carbonForecast6hAvg: the average carbon intensity expected over the next 6 hours (gCO2eq/kWh). Lower is greener over the coming hours.
+- guaranteedHours: how many hours the provider guarantees a booking. A provider without guaranteedHours states no guarantee.
 - availableChunks: free capacity in chunks; availableCpuMillicores and availableMemoryMiB are the same capacity in CPU millicores and MiB.
 - city: the provider's city. region: its region code.
 - latitude, longitude: where the provider is, in decimal degrees. The closer a provider is to the consumer location, the better for proximity: the farther away, the worse. Coordinates within a few degrees of the consumer's are near; tens of degrees apart are far.
@@ -84,6 +85,7 @@ How words in the request map to fields:
 - cheapest per CPU, per core, per vCPU: pricePerCpuHour, lowest is best (NOT costPerChunk). Cheapest per GB, per GiB, per memory: pricePerGiBHour, lowest is best.
 - renewable, renewables, solar, wind, hydro, green energy: renewable true first, then lowest carbonIntensity.
 - next hours, later today, this afternoon, tonight, upcoming, forecast: carbonForecast6hAvg instead of carbonIntensity.
+- a time the resources are needed for ("for 3 hours", "for two days", "until tomorrow"), guaranteed, reserved for long: providers whose guaranteedHours is at least that time come first, then those with a shorter guarantee, then those without guaranteedHours.
 - a place named in the request ("in Turin", "at Frankfurt", "near Cuneo"): providers whose city (or region) is that place come FIRST, the others after.
 - a place to avoid ("not in X", "outside X", "except X", "no X"): X can be a city, a region or a country; use what you know about which country each city is in. Providers in X come LAST, below every other provider, even if they are cheaper or greener. Then rank the others by the rest of the request.
 - close, near, nearby, proximity: distance between the consumer location and the provider's latitude/longitude, shortest is best, farthest is worst.
@@ -147,6 +149,9 @@ type ProviderInfo struct {
 	// one CPU core and one GiB of memory per hour, when it advertises them.
 	PricePerCPUHour *float64 `json:"pricePerCpuHour,omitempty"`
 	PricePerGiBHour *float64 `json:"pricePerGiBHour,omitempty"`
+	// GuaranteedHours is how long the provider guarantees a booking, in
+	// hours, when its offer states it (omitted otherwise).
+	GuaranteedHours *float64 `json:"guaranteedHours,omitempty"`
 }
 
 // Location is where the requesting consumer is: coordinates in decimal degrees
@@ -237,6 +242,10 @@ func NodeGroupViewToProviderInfo(ng brokerapi.NodeGroupView) ProviderInfo {
 	info.CarbonForecast6hAvg = forecastAverage(ng.CarbonForecast, 6)
 	info.PricePerCPUHour = unitPrice(ng.UnitPrices, corev1.ResourceCPU)
 	info.PricePerGiBHour = unitPrice(ng.UnitPrices, corev1.ResourceMemory)
+	if ng.GuaranteedSeconds > 0 {
+		h := math.Round(float64(ng.GuaranteedSeconds)/3600*10) / 10
+		info.GuaranteedHours = &h
+	}
 
 	return info
 }

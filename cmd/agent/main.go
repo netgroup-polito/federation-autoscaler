@@ -45,6 +45,7 @@ import (
 	"github.com/netgroup-polito/federation-autoscaler/internal/agent/consumer"
 	"github.com/netgroup-polito/federation-autoscaler/internal/agent/consumer/heartbeat"
 	"github.com/netgroup-polito/federation-autoscaler/internal/agent/health"
+	"github.com/netgroup-polito/federation-autoscaler/internal/agent/ollama"
 	"github.com/netgroup-polito/federation-autoscaler/internal/agent/poller"
 	"github.com/netgroup-polito/federation-autoscaler/internal/agent/provider"
 	"github.com/netgroup-polito/federation-autoscaler/internal/agent/provider/advertise"
@@ -106,6 +107,8 @@ func main() {
 		ollamaURL             string
 		ollamaModel           string
 		ollamaTimeout         time.Duration
+		llmAPI                string
+		aiJob                 string
 		brainMode             string
 		catalogAddr           string
 	)
@@ -197,13 +200,23 @@ func main() {
 			"http://localhost:11434. When set alongside a ConsumerPolicy with placement "+
 			"type ConsumerChoice, provider selection is delegated to the LLM. "+
 			"Empty ⇒ ConsumerChoice falls back to a deterministic strategy.")
-	flag.StringVar(&ollamaModel, "ollama-model", "llama3.2",
+	flag.StringVar(&ollamaModel, "ollama-model", "phi4-mini:3.8b",
 		"(consumer role only) Ollama model name for ConsumerChoice selection. "+
 			"Ignored when --ollama-url is empty.")
 	flag.DurationVar(&ollamaTimeout, "ollama-timeout", 120*time.Second,
 		"(consumer role only) Upper bound on one ConsumerChoice LLM call. A call that "+
 			"exceeds it falls back to the deterministic strategy; a small model on CPU "+
 			"needs tens of seconds. Ignored when --ollama-url is empty.")
+	flag.StringVar(&llmAPI, "llm-api", ollama.APIOpenAI,
+		"(consumer role only) Which API the AI server speaks: \"openai\" (OpenAI-style "+
+			"/v1/chat/completions, served by Ollama, vLLM and KubeAI, the default) or \"ollama\" "+
+			"(Ollama's own /api/generate). With \"openai\", --ollama-url may be a "+
+			"base ending in /v1. Ignored when --ollama-url is empty.")
+	flag.StringVar(&aiJob, "ai-job", ollama.JobFields,
+		"(consumer role only) What the AI does for a plain-language request: \"fields\" "+
+			"(the model only turns the text into fields such as place, exclusions and "+
+			"preference, and the agent filters and ranks the providers in code; a smaller "+
+			"model is enough; the default) or \"rank\" (the model ranks the providers itself).")
 	flag.StringVar(&brainMode, "brain", consumer.BrainCentral,
 		"(consumer role only) Who makes the placement decision: \"central\" asks the "+
 			"Broker (default); \"local\" decides on this consumer from the catalog. "+
@@ -337,6 +350,8 @@ func main() {
 			OllamaURL:         ollamaURL,
 			OllamaModel:       ollamaModel,
 			OllamaTimeout:     ollamaTimeout,
+			LLMAPI:            llmAPI,
+			AIJob:             aiJob,
 			Namespace:         namespace,
 			NodeName:          nodeName,
 			AdvertisedIP:      advertisedIP,
