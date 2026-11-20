@@ -29,6 +29,7 @@ package poller
 
 import (
 	"context"
+	"sync"
 
 	autoscalingv1alpha1 "github.com/netgroup-polito/federation-autoscaler/api/autoscaling/v1alpha1"
 	brokerapi "github.com/netgroup-polito/federation-autoscaler/internal/broker/api"
@@ -51,6 +52,10 @@ type HandlerFunc func(ctx context.Context, instruction *brokerapi.InstructionVie
 // agent at startup so the overlap is invisible at runtime.
 type Registry struct {
 	handlers map[string]HandlerFunc
+
+	// mu guards reservedHook, which can be set while the Poller is running.
+	mu           sync.RWMutex
+	reservedHook func(reserved int32)
 }
 
 // NewRegistry returns an empty Registry. The agent's role-specific
@@ -92,3 +97,26 @@ func (r *Registry) Lookup(kind string) (HandlerFunc, bool) {
 // Len returns the number of registered handlers; primarily used by tests
 // and by the agent's start-up logging.
 func (r *Registry) Len() int { return len(r.handlers) }
+
+// OnReservedChunks registers fn to be called with the reserved chunk count
+// the Broker reports in a poll response. It is called only when the Broker
+// sends the value: an absent field means "unknown", not zero. It runs on the
+// poll goroutine, so fn must return quickly.
+func (r *Registry) OnReservedChunks(fn func(reserved int32)) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.reservedHook = fn
+}
+
+// reservedChunks calls the registered hook, if any. A panic in the hook must
+// not stop the polling loop.
+func (r *Registry) reservedChunks(reserved int32) {
+	r.mu.RLock()
+	fn := r.reservedHook
+	r.mu.RUnlock()
+	if fn == nil {
+		return
+	}
+	defer func() { _ = recover() }()
+	fn(reserved)
+}

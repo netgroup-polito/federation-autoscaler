@@ -168,6 +168,12 @@ func (p *Poller) tick(ctx context.Context) {
 	}
 	p.notifyPollResult(true)
 
+	// Tell the role about the reserved capacity before the handlers run: a
+	// handler can take a long time and the role should not wait for it.
+	if resp.ReservedChunks != nil {
+		p.registry.reservedChunks(*resp.ReservedChunks)
+	}
+
 	for i := range resp.Instructions {
 		// Re-check ctx between instructions so a cancellation mid-tick
 		// is honoured promptly without dispatching the rest of the batch.
