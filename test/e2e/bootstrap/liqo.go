@@ -19,6 +19,7 @@ package bootstrap
 import (
 	"context"
 	"fmt"
+	"time"
 
 	"github.com/netgroup-polito/federation-autoscaler/test/e2e/kind"
 )
@@ -72,11 +73,33 @@ func InstallLiqo(ctx context.Context, opts LiqoOptions) error {
 		"--cluster-id", opts.Identity.LiqoClusterID,
 		"--timeout", "10m",
 	)
-	if err := runCommand(ctx, liqoctl, args...); err != nil {
-		return fmt.Errorf("liqoctl install: %w", err)
+	// Retry a few times: right after a Kind cluster comes up, liqoctl's first
+	// call to its API server can time out ("Unable to connect to the server:
+	// context deadline exceeded") although the same install works seconds
+	// later (seen on the lab server, 23 Nov 2026). liqoctl install is
+	// idempotent, so a retry is safe. Same idea as retry_liqo_install in
+	// deploy/standalone/common.sh.
+	var lastErr error
+	for attempt := 1; attempt <= liqoInstallAttempts; attempt++ {
+		if lastErr = runCommand(ctx, liqoctl, args...); lastErr == nil {
+			return nil
+		}
+		if attempt < liqoInstallAttempts {
+			select {
+			case <-ctx.Done():
+				return fmt.Errorf("liqoctl install: %w (last error: %v)", ctx.Err(), lastErr)
+			case <-time.After(liqoInstallBackoff):
+			}
+		}
 	}
-	return nil
+	return fmt.Errorf("liqoctl install (%d attempts): %w", liqoInstallAttempts, lastErr)
 }
+
+// liqoInstallAttempts and liqoInstallBackoff bound the retry of InstallLiqo.
+const (
+	liqoInstallAttempts = 3
+	liqoInstallBackoff  = 20 * time.Second
+)
 
 // InstallLiqoForRole is a convenience wrapper that derives the
 // Identity + ClusterName from a kind.Role and delegates to InstallLiqo.

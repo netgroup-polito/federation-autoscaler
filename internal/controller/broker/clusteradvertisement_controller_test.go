@@ -75,13 +75,16 @@ var _ = Describe("ClusterAdvertisement Controller", func() {
 			Expect(k8sClient.Delete(ctx, res)).To(Succeed())
 		})
 
-		// reconcileOnce constructs the reconciler with a 1-second freshness
+		// reconcileOnce constructs the reconciler with a 10-second freshness
 		// window and runs a single Reconcile pass against the fixture.
+		// LastSeen is stored with whole-second precision, so a "fresh"
+		// timestamp can already read up to 1 s old: keep the window well
+		// above that.
 		reconcileOnce := func() reconcile.Result {
 			r := &ClusterAdvertisementReconciler{
 				Client:     k8sClient,
 				Scheme:     k8sClient.Scheme(),
-				StaleAfter: time.Second,
+				StaleAfter: 10 * time.Second,
 			}
 			res, err := r.Reconcile(ctx, reconcile.Request{NamespacedName: typeNamespacedName})
 			Expect(err).NotTo(HaveOccurred())
