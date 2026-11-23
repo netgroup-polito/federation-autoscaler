@@ -70,7 +70,7 @@ func catWantQty(t *testing.T, got corev1.ResourceList, name corev1.ResourceName,
 
 func TestOfferFromAdvertisement_SubtractsReservedChunks(t *testing.T) {
 	req := catReq()
-	o := offerFromAdvertisement(req, 2, catSized(t, req), time.Now())
+	o := OfferFromAdvertisement(req, 2, catSized(t, req).PerChunk, time.Now())
 
 	// 8 cpu / 16Gi minus 2 chunks of 2 cpu / 4Gi = 4 cpu / 8Gi.
 	catWantQty(t, o.Available, corev1.ResourceCPU, "4")
@@ -79,7 +79,7 @@ func TestOfferFromAdvertisement_SubtractsReservedChunks(t *testing.T) {
 
 func TestOfferFromAdvertisement_NoReservationKeepsFullCapacity(t *testing.T) {
 	req := catReq()
-	o := offerFromAdvertisement(req, 0, catSized(t, req), time.Now())
+	o := OfferFromAdvertisement(req, 0, catSized(t, req).PerChunk, time.Now())
 
 	catWantQty(t, o.Available, corev1.ResourceCPU, "8")
 	catWantQty(t, o.Available, corev1.ResourceMemory, "16Gi")
@@ -88,7 +88,7 @@ func TestOfferFromAdvertisement_NoReservationKeepsFullCapacity(t *testing.T) {
 func TestOfferFromAdvertisement_AvailableNeverNegative(t *testing.T) {
 	req := catReq()
 	// More reserved chunks than the advertisement holds.
-	o := offerFromAdvertisement(req, 10, catSized(t, req), time.Now())
+	o := OfferFromAdvertisement(req, 10, catSized(t, req).PerChunk, time.Now())
 
 	catWantQty(t, o.Available, corev1.ResourceCPU, "0")
 	catWantQty(t, o.Available, corev1.ResourceMemory, "0")
@@ -96,7 +96,7 @@ func TestOfferFromAdvertisement_AvailableNeverNegative(t *testing.T) {
 
 func TestOfferFromAdvertisement_DoesNotMutateRequest(t *testing.T) {
 	req := catReq()
-	_ = offerFromAdvertisement(req, 2, catSized(t, req), time.Now())
+	_ = OfferFromAdvertisement(req, 2, catSized(t, req).PerChunk, time.Now())
 
 	catWantQty(t, req.Resources, corev1.ResourceCPU, "8")
 	catWantQty(t, req.Resources, corev1.ResourceMemory, "16Gi")
@@ -153,7 +153,7 @@ func TestOfferFromAdvertisement_Location(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			req := catReq()
 			req.Topology = tc.topology
-			o := offerFromAdvertisement(req, 0, catSized(t, req), time.Now())
+			o := OfferFromAdvertisement(req, 0, catSized(t, req).PerChunk, time.Now())
 
 			if o.Location.Region != tc.region || o.Location.City != tc.city {
 				t.Errorf("region/city = %q/%q, want %q/%q",
@@ -189,7 +189,7 @@ func TestOfferFromAdvertisement_CopiesOtherFields(t *testing.T) {
 	}
 	now := time.Date(2026, 11, 10, 12, 0, 0, 0, time.FixedZone("CET", 3600))
 
-	o := offerFromAdvertisement(req, 1, catSized(t, req), now)
+	o := OfferFromAdvertisement(req, 1, catSized(t, req).PerChunk, now)
 
 	if o.SchemaVersion != 1 {
 		t.Errorf("SchemaVersion = %d, want 1", o.SchemaVersion)

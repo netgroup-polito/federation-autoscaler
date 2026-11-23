@@ -78,6 +78,10 @@ type RunnableOptions struct {
 
 	// Catalog is the optional offer catalog writer. Nil means the catalog is off.
 	Catalog catalog.Writer
+
+	// CatalogWriteDisabled stops the Server writing offers even when Catalog is
+	// set (see ServerOptions). The zero value means the Server writes.
+	CatalogWriteDisabled bool
 }
 
 // Runnable adapts the Broker's HTTP Server to the manager.Runnable interface
@@ -117,12 +121,13 @@ func NewRunnable(opts RunnableOptions) (*Runnable, error) {
 	}
 
 	srv := NewServer(ServerOptions{
-		Logger:             log,
-		Client:             opts.Client,
-		Namespace:          opts.Namespace,
-		Sizer:              opts.Sizer,
-		ReservationTimeout: opts.ReservationTimeout,
-		Catalog:            opts.Catalog,
+		Logger:               log,
+		Client:               opts.Client,
+		Namespace:            opts.Namespace,
+		Sizer:                opts.Sizer,
+		ReservationTimeout:   opts.ReservationTimeout,
+		Catalog:              opts.Catalog,
+		CatalogWriteDisabled: opts.CatalogWriteDisabled,
 	})
 
 	httpSrv := &http.Server{

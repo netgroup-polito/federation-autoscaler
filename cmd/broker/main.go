@@ -77,6 +77,7 @@ func main() {
 		gkResyncInterval     time.Duration
 		dashboardBindAddress string
 		catalogAddr          string
+		catalogWrite         bool
 	)
 	flag.StringVar(&apiBindAddress, "api-bind-address", ":8443",
 		"host:port for the Broker REST API HTTPS listener.")
@@ -105,6 +106,9 @@ func main() {
 	flag.StringVar(&catalogAddr, "catalog-addr", "",
 		"host:port of the Redis offer catalog. Empty (default) disables the catalog: "+
 			"each accepted advertisement is then not written as an offer.")
+	flag.BoolVar(&catalogWrite, "catalog-write", true,
+		"Whether the broker writes the offer of each accepted advertisement to the catalog "+
+			"(needs --catalog-addr). Set false when the providers write their own offers.")
 
 	flag.Parse()
 
@@ -160,7 +164,7 @@ func main() {
 			WriteTimeout: 2 * time.Second,
 		})
 		catalogWriter = catalog.NewRedisCatalog(rdb)
-		setupLog.Info("offer catalog enabled", "addr", catalogAddr)
+		setupLog.Info("offer catalog enabled", "addr", catalogAddr, "write", catalogWrite)
 	}
 
 	apiRunnable, err := brokerapi.NewRunnable(brokerapi.RunnableOptions{
@@ -170,11 +174,12 @@ func main() {
 			KeyFile:      apiTLSKeyFile,
 			ClientCAFile: apiTLSClientCAFile,
 		},
-		ShutdownTimeout:    apiShutdownTimeout,
-		Client:             mgr.GetClient(),
-		Namespace:          apiNamespace,
-		ReservationTimeout: reservationTimeout,
-		Catalog:            catalogWriter,
+		ShutdownTimeout:      apiShutdownTimeout,
+		Client:               mgr.GetClient(),
+		Namespace:            apiNamespace,
+		ReservationTimeout:   reservationTimeout,
+		Catalog:              catalogWriter,
+		CatalogWriteDisabled: !catalogWrite,
 	})
 	if err != nil {
 		setupLog.Error(err, "unable to build broker api server")

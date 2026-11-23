@@ -51,5 +51,7 @@ data:
   # Broker, "local" decides on this consumer from the Redis catalog at
   # catalogAddr (host:port). Booking goes through the Broker in both modes.
   # The fa_consumer role sets these from fa_brain / fa_catalog_addr.
+  # On a provider, a non-empty catalogAddr is the catalog it writes its own
+  # offer to (the fa_provider role sets it from fa_catalog_provider_write).
   brainMode: "central"
   catalogAddr: ""

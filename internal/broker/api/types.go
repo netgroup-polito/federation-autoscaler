@@ -193,6 +193,11 @@ type AdvertisementResponse struct {
 	// ChunkCount × chunk).
 	ChunkResources corev1.ResourceList `json:"chunkResources"`
 
+	// ReservedChunks is how many of this provider's chunks the Broker has
+	// reserved for consumers. The provider agent subtracts them (times
+	// ChunkResources) from its advertised resources to build its catalog offer.
+	ReservedChunks int32 `json:"reservedChunks"`
+
 	// NextReportIn hints the agent at the next advertisement deadline.
 	// Format follows time.Duration's String(), e.g. "30s".
 	NextReportIn string `json:"nextReportIn"`
@@ -529,6 +534,13 @@ type InstructionView struct {
 
 type InstructionsResponse struct {
 	Instructions []InstructionView `json:"instructions"`
+
+	// ReservedChunks is the number of chunks reserved on the ClusterAdvertisement of
+	// the caller. It is set only when the Broker knows it (a provider with an
+	// advertisement); absent means not known, which is different from 0. A provider
+	// uses it to refresh its catalog offer without waiting for the next
+	// advertisement. Older agents ignore it.
+	ReservedChunks *int32 `json:"reservedChunks,omitempty"`
 }
 
 // -----------------------------------------------------------------------------

@@ -52,6 +52,9 @@ type fakeBroker struct {
 	// failGetInstructions, if non-zero, makes the next N GetInstructions
 	// calls return 503 to exercise the failure path.
 	failGetInstructions int32
+
+	// reservedChunks, if set, is returned in every GetInstructions response.
+	reservedChunks *int32
 }
 
 type resultRecord struct {
@@ -85,10 +88,11 @@ func (fb *fakeBroker) handleGetInstructions(w http.ResponseWriter, r *http.Reque
 		batch = fb.pendingByPoll[0]
 		fb.pendingByPoll = fb.pendingByPoll[1:]
 	}
+	reserved := fb.reservedChunks
 	fb.mu.Unlock()
 
 	w.Header().Set("Content-Type", brokerapi.ContentTypeJSON)
-	_ = json.NewEncoder(w).Encode(brokerapi.InstructionsResponse{Instructions: batch})
+	_ = json.NewEncoder(w).Encode(brokerapi.InstructionsResponse{Instructions: batch, ReservedChunks: reserved})
 }
 
 func (fb *fakeBroker) handlePostResult(w http.ResponseWriter, r *http.Request) {
@@ -577,3 +581,81 @@ func TestPoller_ContextCancellation_StopsPromptly(t *testing.T) {
 type handlerErr struct{ msg string }
 
 func (e *handlerErr) Error() string { return e.msg }
+
+func (fb *fakeBroker) setReserved(n int32) {
+	fb.mu.Lock()
+	defer fb.mu.Unlock()
+	fb.reservedChunks = &n
+}
+
+// waitReserved waits until the hook has reported want.
+func waitReserved(t *testing.T, got <-chan int32, want int32) {
+	t.Helper()
+	deadline := time.After(2 * time.Second)
+	for {
+		select {
+		case n := <-got:
+			if n == want {
+				return
+			}
+		case <-deadline:
+			t.Fatalf("the hook never reported %d", want)
+		}
+	}
+}
+
+func TestPoller_ReservedChunksHook(t *testing.T) {
+	fb := newFakeBroker(t)
+	fb.setReserved(2)
+
+	r := NewRegistry()
+	got := make(chan int32, 8)
+	r.OnReservedChunks(func(n int32) {
+		select {
+		case got <- n:
+		default:
+		}
+	})
+	p, _ := New(Options{Client: fb.buildClient(t), Registry: r, Interval: 20 * time.Millisecond})
+
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() {
+		p.Run(ctx)
+		close(done)
+	}()
+	defer func() {
+		cancel()
+		<-done
+	}()
+
+	waitReserved(t, got, 2)
+	fb.setReserved(5)
+	waitReserved(t, got, 5)
+}
+
+func TestPoller_ReservedChunksHookNotCalledWhenAbsent(t *testing.T) {
+	fb := newFakeBroker(t) // reservedChunks stays nil: the Broker does not know it
+
+	r := NewRegistry()
+	var calls int32
+	r.OnReservedChunks(func(int32) { atomic.AddInt32(&calls, 1) })
+	p, _ := New(Options{Client: fb.buildClient(t), Registry: r, Interval: 20 * time.Millisecond})
+
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() {
+		p.Run(ctx)
+		close(done)
+	}()
+	time.Sleep(150 * time.Millisecond)
+	cancel()
+	<-done
+
+	if atomic.LoadInt32(&fb.getInstructionsCalls) == 0 {
+		t.Fatal("the poller never polled")
+	}
+	if n := atomic.LoadInt32(&calls); n != 0 {
+		t.Fatalf("the hook was called %d times, want 0 when the field is absent", n)
+	}
+}

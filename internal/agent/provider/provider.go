@@ -44,6 +44,7 @@ import (
 	"github.com/netgroup-polito/federation-autoscaler/internal/agent/poller"
 	"github.com/netgroup-polito/federation-autoscaler/internal/agent/provider/advertise"
 	"github.com/netgroup-polito/federation-autoscaler/internal/agent/provider/instructions"
+	"github.com/netgroup-polito/federation-autoscaler/internal/catalog"
 )
 
 // Options bundles the construction-time settings of the provider role.
@@ -93,6 +94,11 @@ type Options struct {
 	// advertised-capacity percentage file, re-read on every advertisement cycle
 	// (see advertise.Options). Empty ⇒ the provider advertises full allocatable.
 	CapacityFile string
+
+	// Catalog, if non-nil, is the catalog this provider writes its own offer to
+	// after every accepted advertisement (see advertise.Options). Optional: nil
+	// means the provider writes no offer.
+	Catalog catalog.Writer
 
 	// NodeName is the node this agent pod runs on (NODE_NAME downward API); its IP
 	// is auto-discovered and geolocated (see advertise.Options). AdvertisedIP
@@ -200,6 +206,7 @@ func Run(ctx context.Context, opts Options) error {
 		ProbeUDPPort:  opts.ProbeUDPPort,
 		Interval:      opts.AdvertisementInterval,
 		Logger:        logger.WithName("advertise"),
+		Catalog:       opts.Catalog,
 		// The probe's poll-staleness gate is a "broker reachability"
 		// signal in practice, so a successful advertisement also
 		// refreshes it — same semantics as the poller's hook.
@@ -208,6 +215,10 @@ func Run(ctx context.Context, opts Options) error {
 	if err != nil {
 		return fmt.Errorf("provider: build advertisement publisher: %w", err)
 	}
+	// Rewrite the offer at once when the Broker reports that the reserved
+	// chunk count changed, instead of waiting for the next advertisement.
+	opts.Registry.OnReservedChunks(publisher.NotifyReserved)
+
 	go publisher.Run(ctx)
 
 	// Optional config console (plain HTTP, no auth) — the provider role's only

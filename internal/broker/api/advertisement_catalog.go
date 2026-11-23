@@ -39,6 +39,9 @@ const catalogWriteTimeout = 2 * time.Second
 // configured. It is best effort: a failure is logged at Info and never fails
 // the advertisement, because the ClusterAdvertisement stays the source of
 // truth and the next advertisement rewrites the offer.
+//
+// It writes nothing when the catalog is off or when catalogWriteDisabled is set
+// (the providers then write their own offers).
 func (s *Server) publishOffer(
 	ctx context.Context,
 	req *AdvertisementRequest,
@@ -46,25 +49,26 @@ func (s *Server) publishOffer(
 	res chunk.Result,
 	requestID string,
 ) {
-	if s.catalog == nil {
+	if s.catalog == nil || s.catalogWriteDisabled {
 		return
 	}
 	ctx, cancel := context.WithTimeout(ctx, catalogWriteTimeout)
 	defer cancel()
-	offer := offerFromAdvertisement(req, cadv.Status.ReservedChunks, res, time.Now())
+	offer := OfferFromAdvertisement(req, cadv.Status.ReservedChunks, res.PerChunk, time.Now())
 	if err := s.catalog.UpsertOffer(ctx, offer); err != nil {
 		s.log.Info("catalog write failed (will retry next advertisement)",
 			"err", err.Error(), "clusterId", req.ClusterID, "requestId", requestID)
 	}
 }
 
-// offerFromAdvertisement maps an accepted advertisement to the catalog Offer.
+// OfferFromAdvertisement maps an accepted advertisement to the catalog Offer.
 // Available is the FREE capacity: the advertised resources minus
 // reserved x PerChunk, per resource, never below zero.
-func offerFromAdvertisement(
+// The broker and the provider agent both call it, so they build the same offer.
+func OfferFromAdvertisement(
 	req *AdvertisementRequest,
 	reserved int32,
-	res chunk.Result,
+	perChunk corev1.ResourceList,
 	now time.Time,
 ) catalog.Offer {
 	return catalog.Offer{
@@ -73,7 +77,7 @@ func offerFromAdvertisement(
 		LiqoClusterID:   req.LiqoClusterID,
 		SiteID:          catalogSiteID,
 		Location:        locationFromTopology(req),
-		Available:       freeCapacity(req.Resources, reserved, res.PerChunk),
+		Available:       freeCapacity(req.Resources, reserved, perChunk),
 		UnitPrices:      req.UnitPrices,
 		CarbonIntensity: req.CarbonIntensity,
 		CarbonForecast:  req.CarbonForecast,

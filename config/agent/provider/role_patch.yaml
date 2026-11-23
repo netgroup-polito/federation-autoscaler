@@ -11,6 +11,9 @@
 # 4. Append --mock-eco-url and --eco-cache-ttl (provider-only) for the eco
 #    strategy; the region file and --mock-geo-url come from the base. Empty
 #    URL ⇒ advertise no carbon.
+# 5. Append --catalog-addr from agent-config (key catalogAddr). When set, the
+#    agent writes this provider's own offer to that Redis catalog after every
+#    accepted advertisement; empty (the default) writes nothing.
 - op: add
   path: /spec/template/spec/containers/0/args/-
   value: --mock-eco-url=$(MOCK_ECO_URL)
@@ -86,3 +89,17 @@
     name: console
     containerPort: 9095
     protocol: TCP
+# Catalog write (optional): catalogAddr from agent-config is the Redis catalog
+# this provider writes its own offer to after every accepted advertisement.
+# Empty (the default) means the provider writes no offer, exactly as before.
+- op: add
+  path: /spec/template/spec/containers/0/env/-
+  value:
+    name: CATALOG_ADDR
+    valueFrom:
+      configMapKeyRef:
+        name: agent-config
+        key: catalogAddr
+- op: add
+  path: /spec/template/spec/containers/0/args/-
+  value: --catalog-addr=$(CATALOG_ADDR)

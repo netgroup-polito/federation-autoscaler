@@ -74,7 +74,10 @@ func (s *Server) handleInstructionsList(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 
-	writeJSON(w, http.StatusOK, InstructionsResponse{Instructions: views})
+	writeJSON(w, http.StatusOK, InstructionsResponse{
+		Instructions:   views,
+		ReservedChunks: s.reservedChunksFor(ctx, callerID),
+	})
 }
 
 // collectInstructionsForCaller is shared by GET /api/v1/instructions and

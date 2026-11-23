@@ -183,3 +183,88 @@ func TestAdvertisementHandler_NilCatalogDoesNothing(t *testing.T) {
 		t.Fatalf("status = %d, want 200, body = %s", w.Code, w.Body.String())
 	}
 }
+
+func TestAdvertisementHandler_ResponseCarriesReservedChunks(t *testing.T) {
+	existing := &brokerv1alpha1.ClusterAdvertisement{
+		ObjectMeta: metav1.ObjectMeta{Name: catProvider, Namespace: catTestNS},
+		Status:     brokerv1alpha1.ClusterAdvertisementStatus{ReservedChunks: 2},
+	}
+	s := catServer(t, nil, existing)
+
+	w := catPost(t, s, catReq())
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, body = %s", w.Code, w.Body.String())
+	}
+	var body AdvertisementResponse
+	if err := json.Unmarshal(w.Body.Bytes(), &body); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if body.ReservedChunks != 2 {
+		t.Errorf("ReservedChunks = %d, want 2", body.ReservedChunks)
+	}
+}
+
+func TestAdvertisementHandler_CatalogWriteDisabledWritesNothing(t *testing.T) {
+	mem := catalog.NewMemoryCatalog()
+	s := catServer(t, mem)
+	s.catalogWriteDisabled = true
+
+	w := catPost(t, s, catReq())
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, body = %s", w.Code, w.Body.String())
+	}
+	var body AdvertisementResponse
+	if err := json.Unmarshal(w.Body.Bytes(), &body); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if !body.Accepted {
+		t.Errorf("Accepted = false, want true: only the offer write is skipped")
+	}
+
+	all, err := mem.ListOffers(context.Background())
+	if err != nil {
+		t.Fatalf("ListOffers: %v", err)
+	}
+	if len(all) != 0 {
+		t.Errorf("offers = %d, want 0 when the broker does not write", len(all))
+	}
+}
+
+// catGetInstructions calls the poll handler as callerID.
+func catGetInstructions(t *testing.T, s *Server, callerID string) InstructionsResponse {
+	t.Helper()
+	r := httptest.NewRequest(http.MethodGet, "/api/v1/instructions", nil)
+	r = r.WithContext(NewContextWithClusterID(r.Context(), callerID))
+	w := httptest.NewRecorder()
+	s.handleInstructionsList(w, r)
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, body = %s", w.Code, w.Body.String())
+	}
+	var body InstructionsResponse
+	if err := json.Unmarshal(w.Body.Bytes(), &body); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	return body
+}
+
+func TestInstructionsList_CarriesReservedChunks(t *testing.T) {
+	existing := &brokerv1alpha1.ClusterAdvertisement{
+		ObjectMeta: metav1.ObjectMeta{Name: catProvider, Namespace: catTestNS},
+		Status:     brokerv1alpha1.ClusterAdvertisementStatus{ReservedChunks: 2},
+	}
+	s := catServer(t, nil, existing)
+
+	body := catGetInstructions(t, s, catProvider)
+	if body.ReservedChunks == nil || *body.ReservedChunks != 2 {
+		t.Fatalf("ReservedChunks = %v, want 2", body.ReservedChunks)
+	}
+}
+
+func TestInstructionsList_ReservedChunksUnknownWithoutAdvertisement(t *testing.T) {
+	s := catServer(t, nil)
+
+	body := catGetInstructions(t, s, "a-consumer")
+	if body.ReservedChunks != nil {
+		t.Fatalf("ReservedChunks = %d, want absent (not known) for a cluster without advertisement", *body.ReservedChunks)
+	}
+}

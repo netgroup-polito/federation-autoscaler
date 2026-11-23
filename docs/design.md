@@ -109,7 +109,7 @@ Three kinds of cluster take part, plus an optional fourth for demo mock services
 | Responsibility | Description |
 |---|---|
 | Advertisement ingestion | `POST /api/v1/advertisements` every 30 s from each provider; upserts a `ClusterAdvertisement`, computes chunk counts, updates `lastSeen`. Doubles as the provider heartbeat. |
-| Catalog (optional) | With `--catalog-addr`, each accepted advertisement is also written to the Redis offer catalog (`internal/catalog`) as one offer (site `default`, **free** capacity: advertised resources minus reserved chunks), expiring after 90 s, so a provider that stops advertising disappears by itself. An offer may carry two optional fields: `ttlSeconds` (its own expiry without a refresh, 60 to 3600 s; 0 or absent means the default 90 s; a value outside the range is rejected) and `validitySeconds` (how long a resource booked from it is guaranteed by the provider; 0 or absent means not stated, 0 to 2592000 s (30 days), anything else is rejected; informational, the catalog never enforces it). The Broker writes neither for now. Best effort: a catalog write is bounded to 2 s and a failed write is logged and the advertisement still returns 200; the `ClusterAdvertisement` stays the source of truth. Off by default, and without the flag the Broker behaves exactly as before. |
+| Catalog (optional) | With `--catalog-addr`, each accepted advertisement is also written to the Redis offer catalog (`internal/catalog`) as one offer (site `default`, **free** capacity: advertised resources minus reserved chunks), expiring after 90 s, so a provider that stops advertising disappears by itself. An offer may carry two optional fields: `ttlSeconds` (its own expiry without a refresh, 60 to 3600 s; 0 or absent means the default 90 s; a value outside the range is rejected) and `validitySeconds` (how long a resource booked from it is guaranteed by the provider; 0 or absent means not stated, 0 to 2592000 s (30 days), anything else is rejected; informational, the catalog never enforces it). The Broker writes neither for now. Best effort: a catalog write is bounded to 2 s and a failed write is logged and the advertisement still returns 200; the `ClusterAdvertisement` stays the source of truth. Off by default, and without the flag the Broker behaves exactly as before. With `--catalog-write=false` the Broker writes no offer at all, because the providers write their own (§4.4). |
 | Consumer registration | Implicit: consumers appear via `POST /api/v1/heartbeat` (every 15 s). Identity always comes from the mTLS client certificate CN. |
 | Chunking | Divides each provider's advertised allocatable into fixed-size chunks (standard 2 CPU / 4 GiB, GPU 4 CPU / 8 GiB / 1 GPU), floor division, leftovers unused (§7). |
 | Placement | Builds each consumer's node-group view and **masks** it according to the consumer's policy, so the Broker chooses the provider while CA stays metric-blind (see below). |
@@ -206,6 +206,8 @@ One replica, `strategy: Recreate`. **Outbound only**: no local listener at all (
 
 **Advertisement loop (every 30 s, doubles as heartbeat):** snapshots the allocatable of Ready, non-cordoned nodes; applies the optional capacity cap from `--capacity-file` (percentages or fixed quantities, it can only lower what is advertised); re-reads `--price-file` and `--renewable-file` (so repricing and the renewable flag are live, no restart; the deploy tooling creates these ConfigMaps, and the capacity one, only when missing, via the `federation-autoscaler.io/operator-settings` label, so a re-deploy keeps what the operator or the console set); resolves its node IP and geolocates it via mock-geo (`--advertised-ip`, when set, replaces the IP for geolocation only); fetches the carbon forecast for the discovered region via mock-eco (cached 1 h, forecast preferred, single current value as fallback); and advertises everything, including the UDP probe endpoint `<nodeIP>:<--probe-udp-port>` that latency-policy consumers will probe (always the node's own IP, so it stays reachable when `--advertised-ip` steers the location; the override is used only if the node IP cannot be discovered) (a stock `udpecho` responder runs behind a UDP NodePort, 30100 in the overlays). Every optional input is best-effort: a missing file or failed lookup just omits that field, which makes the provider rank last for the corresponding policy.
 
+**Own offer (with `--catalog-addr`, off by default):** after every accepted advertisement the provider writes its own offer to the Redis catalog (site `default`, **free** capacity: the advertised resources minus the reserved chunks, which the Broker returns in the advertisement response), expiring after 90 s unless refreshed, so an agent that stops disappears by itself. The Broker also returns the provider's current reserved chunk count (`reservedChunks`, absent when unknown) in every instruction poll response (every second by default). When it differs from the count in the offer written last, the provider rewrites the offer at once from its last advertisement, instead of waiting for the next 30 s cycle. A write is best effort and bounded to 2 s: a failure is logged, never stops the loop, and is retried by the next poll or advertisement; an advertisement the Broker rejected is not published. The poller only wakes the publisher and never waits for Redis, but it runs the instruction handlers one after another, so a long `liqoctl` call delays the rewrite. An older Broker does not send the count, so only the 30 s refresh applies there: update the Broker first. Ansible sets this up with `fa_catalog_provider_write` (default false): it points the providers at `fa_catalog_addr` and starts the Broker with `--catalog-write=false`, so that only the providers write.
+
 **Instruction handlers:**
 
 | Instruction | What the handler does |
@@ -214,7 +216,7 @@ One replica, `strategy: Recreate`. **Outbound only**: no local listener at all (
 | `Cleanup` | Run `liqoctl delete peering-user --consumer-cluster-id <id>` (30 s timeout); "not found" counts as success. Emitted only when the last reservation between that consumer and this provider ends. |
 | `Reconcile` | Return a capacity snapshot: cluster IDs plus summed allocatable (prices, location, and carbon are not included). Defined and handled; not emitted by the Broker yet (§11). |
 
-> **Implemented in:** `internal/agent/provider/` (+ `advertise/publisher.go`, `snapshot/`, `instructions/`), shared `internal/agent/{client,poller,health,nodeip,geo,eco}/`. Deployed via `config/agent/provider/` (`--role=provider`, price/capacity/renewable ConfigMaps, `udpecho.yaml`). `liqoctl` (pinned by `LIQOCTL_VERSION` in the Makefile, currently v1.1.2) is prefetched on the build host and copied into the agent image.
+> **Implemented in:** `internal/agent/provider/` (+ `advertise/publisher.go` (own offer: `publishOffer`, `NotifyReserved`), `snapshot/`, `instructions/`), shared `internal/agent/{client,poller,health,nodeip,geo,eco}/`. Deployed via `config/agent/provider/` (`--role=provider`, price/capacity/renewable ConfigMaps, `udpecho.yaml`). `liqoctl` (pinned by `LIQOCTL_VERSION` in the Makefile, currently v1.1.2) is prefetched on the build host and copied into the agent image.
 
 ---
 
@@ -443,7 +445,7 @@ Three wire surfaces exist. There is no Broker-to-agent surface; see the [communi
 | Method & path | Caller | Purpose |
 |---|---|---|
 | `GET /healthz` | any agent | liveness; like every route on this listener it sits behind the mTLS handshake (the unauthenticated health endpoint lives on the dashboard listener) |
-| `POST /api/v1/advertisements` | provider, 30 s | upsert advertisement; response piggybacks pending instructions (currently unused by the agent) |
+| `POST /api/v1/advertisements` | provider, 30 s | upsert advertisement; response carries `reservedChunks` (the chunks reserved on this provider, used in its own offer, §4.4) and piggybacks pending instructions (currently unused by the agent) |
 | `GET /api/v1/advertisements/{clusterId}` | provider | read back own advertisement (403 for others) |
 | `POST /api/v1/heartbeat` | consumer, 15 s | liveness + policy + location + measured RTTs + chosen provider (`decidedBy: "local"` in local mode) + the latest ConsumerChoice request and ranking (`consumerChoice`) |
 | `GET /api/v1/nodegroups` | consumer | the policy-masked node-group view (the placement decision point) |
@@ -451,7 +453,7 @@ Three wire surfaces exist. There is no Broker-to-agent surface; see the [communi
 | `GET /api/v1/reservations/{id}` | participant | reservation lookup (consumer or provider of that reservation) |
 | `DELETE /api/v1/reservations/{id}` | consumer | release; 202, phase → `Unpeering` |
 | `GET /api/v1/reservations` | consumer | the caller's own reservations (as consumer), every phase, sorted by ID; lets a consumer-side brain rebuild its in-flight and reserved counts |
-| `GET /api/v1/instructions` | both, 5 s | pending un-enforced instructions for the caller; `Peer` carries the kubeconfig inlined |
+| `GET /api/v1/instructions` | both, 1 s | pending un-enforced instructions for the caller; `Peer` carries the kubeconfig inlined; a provider also gets its current `reservedChunks` (absent when the Broker does not know it) |
 | `POST /api/v1/instructions/{id}/result` | both | report outcome; advances the reservation phase machine |
 
 Representative bodies (field names as on the wire):
@@ -465,7 +467,7 @@ Representative bodies (field names as on the wire):
   "carbonIntensity": 25.0, "carbonForecast": [25.0, 28.5, 31.2],
   "capacityScalePercent": {"memory": 50}, "capacityFixed": {"memory": "8Gi"},
   "renewable": true, "probeEndpoint": "172.23.7.10:30100" }
-// → 200 { "accepted": true, "chunkCount": 4, "chunkResources": {...}, "nextReportIn": "30s", "instructions": [...] }
+// → 200 { "accepted": true, "chunkCount": 4, "reservedChunks": 2, "chunkResources": {...}, "nextReportIn": "30s", "instructions": [...] }
 
 // POST /api/v1/heartbeat (consumer → broker)
 { "clusterId": "consumer-1", "liqoClusterId": "consumer-1",
@@ -490,7 +492,8 @@ Representative bodies (field names as on the wire):
     "providerClusterId": "provider-1", "providerLiqoClusterId": "provider-1",
     "kubeconfig": "<kubeconfig YAML, inlined verbatim>", "resourceSliceResources": {"cpu": "2", "memory": "4Gi"},
     "namespaces": ["default"], "chunkCount": 1, "lastChunk": false,
-    "issuedAt": "…", "expiresAt": "…" } ] }
+    "issuedAt": "…", "expiresAt": "…" } ],
+  "reservedChunks": 2 }  // providers only; absent when the Broker does not know it
 ```
 
 Redelivery: an instruction keeps appearing in polls until a result is posted (`enforced` flips true). Handlers are idempotent, so redelivery is safe; there is no separate response cache. Polls are answered from the informer cache, which can still hold the un-enforced copy for a few milliseconds after a result is recorded; the Broker remembers the resourceVersion it just replaced and skips exactly that stale copy, so a finished instruction is not run a second time (a re-armed one has a new version and is delivered as usual). The consumer's `Peer` reuses an existing ResourceSlice for its reservation (Liqo's webhook rejects a duplicate name before the API server's AlreadyExists).
