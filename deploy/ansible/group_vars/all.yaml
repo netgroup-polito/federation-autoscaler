@@ -146,6 +146,13 @@ fa_region_orchestrator: false
 # NodePort of a region orchestrator on its provider host.
 fa_region_node_port: 30443
 
+# Edge sites of a region orchestrator, per provider host: node name -> site ID,
+# written as the node label federation-autoscaler.io/site. Each booking is
+# placed on one site with enough room; nodes without a site are never chosen.
+# Use neutral IDs (the consumer's virtual node carries the value), e.g.
+#   fa_edge_sites: { provider-3: s1, provider-3-edge: s2 }
+fa_edge_sites: {}
+
 # Where to drop the fetched kubeconfigs on the control host. Each cluster
 # gets ~/.kube/<cluster_id>.yaml. These are what `kubectl --kubeconfig`
 # expects during the demo's scale-up / scale-down narration.

@@ -61,6 +61,10 @@ var (
 	// API. Tests construct requests against httpServer.URL.
 	httpServer *httptest.Server
 
+	// testServer is the Server behind httpServer, for specs that switch an
+	// option on (e.g. edge sites) and back off.
+	testServer *Server
+
 	// authClusterID is the cluster ID injected on every request via the
 	// test middleware. Tests reset it per case to simulate different
 	// callers without spinning up multiple servers.
@@ -106,11 +110,11 @@ var _ = BeforeSuite(func() {
 		ObjectMeta: metav1.ObjectMeta{Name: testNamespace},
 	})).To(Succeed())
 
-	srv := NewServer(ServerOptions{
+	testServer = NewServer(ServerOptions{
 		Client:    k8sClient,
 		Namespace: testNamespace,
 	})
-	httpServer = httptest.NewServer(testAuthMiddleware(srv.Handler()))
+	httpServer = httptest.NewServer(testAuthMiddleware(testServer.Handler()))
 })
 
 var _ = AfterSuite(func() {

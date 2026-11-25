@@ -20,6 +20,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"sync"
 	"time"
 
 	"github.com/go-logr/logr"
@@ -27,6 +28,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	"github.com/netgroup-polito/federation-autoscaler/internal/broker/chunk"
+	"github.com/netgroup-polito/federation-autoscaler/internal/broker/sites"
 	"github.com/netgroup-polito/federation-autoscaler/internal/catalog"
 )
 
@@ -55,6 +57,11 @@ type Server struct {
 	// catalogWriteDisabled, when true, makes publishOffer write nothing (the
 	// providers write their own offers).
 	catalogWriteDisabled bool
+	// sites, when non-nil (region orchestrator, --site-label), places every
+	// booking on one edge site; siteMu serialises the pick with the create so
+	// two bookings never count the same free room.
+	sites  *sites.Picker
+	siteMu sync.Mutex
 }
 
 // ServerOptions bundles the construction-time settings of a Server. Empty
@@ -99,6 +106,10 @@ type ServerOptions struct {
 	// set (--catalog-write=false, used when the providers write their own
 	// offers). The zero value means the Server writes, as before.
 	CatalogWriteDisabled bool
+
+	// Sites, when set, makes this Server a region orchestrator that places
+	// every booking on one edge site (M3). Nil: no site choice (central broker).
+	Sites *sites.Picker
 }
 
 // NewServer returns a Server ready to serve traffic via Handler(). Panics if
@@ -133,6 +144,7 @@ func NewServer(opts ServerOptions) *Server {
 		justEnforced:         newStaleEnforced(),
 		catalog:              opts.Catalog,
 		catalogWriteDisabled: opts.CatalogWriteDisabled,
+		sites:                opts.Sites,
 	}
 }
 

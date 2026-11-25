@@ -134,6 +134,13 @@ spec:
                   templates. Each value is one chunk's worth (not ChunkCount × chunk).
                   For an Amount reservation it is the requested amount itself.
                 type: object
+              site:
+                description: |-
+                  Site is the edge site a region orchestrator chose for this booking (the
+                  value of its --site-label on the site's nodes). The consumer's Liqo
+                  ResourceSlice is pinned to it. Private: never returned to the consumer.
+                  Empty outside region mode.
+                type: string
             required:
             - chunkCount
             - chunkType

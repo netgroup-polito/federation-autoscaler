@@ -79,6 +79,13 @@ type ReservationSpec struct {
 	// +optional
 	Amount bool `json:"amount,omitempty"`
 
+	// Site is the edge site a region orchestrator chose for this booking (the
+	// value of its --site-label on the site's nodes). The consumer's Liqo
+	// ResourceSlice is pinned to it. Private: never returned to the consumer.
+	// Empty outside region mode.
+	// +optional
+	Site string `json:"site,omitempty"`
+
 	// Namespaces is the set of namespaces the consumer wants to offload on the
 	// reserved virtual nodes. Used by the Consumer Agent to create or update
 	// the Liqo NamespaceOffloading CR during the Peer instruction.

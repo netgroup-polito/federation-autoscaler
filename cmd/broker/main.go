@@ -43,6 +43,7 @@ import (
 	autoscalingv1alpha1 "github.com/netgroup-polito/federation-autoscaler/api/autoscaling/v1alpha1"
 	brokerv1alpha1 "github.com/netgroup-polito/federation-autoscaler/api/broker/v1alpha1"
 	brokerapi "github.com/netgroup-polito/federation-autoscaler/internal/broker/api"
+	"github.com/netgroup-polito/federation-autoscaler/internal/broker/sites"
 	"github.com/netgroup-polito/federation-autoscaler/internal/catalog"
 	autoscalingcontroller "github.com/netgroup-polito/federation-autoscaler/internal/controller/autoscaling"
 	brokercontroller "github.com/netgroup-polito/federation-autoscaler/internal/controller/broker"
@@ -78,6 +79,7 @@ func main() {
 		dashboardBindAddress string
 		catalogAddr          string
 		catalogWrite         bool
+		siteLabel            string
 	)
 	flag.StringVar(&apiBindAddress, "api-bind-address", ":8443",
 		"host:port for the Broker REST API HTTPS listener.")
@@ -106,6 +108,10 @@ func main() {
 	flag.StringVar(&catalogAddr, "catalog-addr", "",
 		"host:port of the Redis offer catalog. Empty (default) disables the catalog: "+
 			"each accepted advertisement is then not written as an offer.")
+	flag.StringVar(&siteLabel, "site-label", "",
+		"Region orchestrator (M3): the node label naming each node's edge site. When set, every "+
+			"booking is placed on one edge site with enough room (refused with 409 otherwise) and the "+
+			"consumer's Liqo ResourceSlice is pinned to it. Empty (default): off, as on the central broker.")
 	flag.BoolVar(&catalogWrite, "catalog-write", true,
 		"Whether the broker writes the offer of each accepted advertisement to the catalog "+
 			"(needs --catalog-addr). Set false when the providers write their own offers.")
@@ -167,6 +173,22 @@ func main() {
 		setupLog.Info("offer catalog enabled", "addr", catalogAddr, "write", catalogWrite)
 	}
 
+	// Region orchestrator (M3): place each booking on one edge site and pin
+	// the consumer's slice to it. Off unless --site-label is set.
+	var sitePicker *sites.Picker
+	if siteLabel != "" {
+		sitePicker = &sites.Picker{Reader: mgr.GetAPIReader(), Label: siteLabel, Namespace: apiNamespace}
+		if err := (&brokercontroller.SitePinReconciler{
+			Client:    mgr.GetClient(),
+			Label:     siteLabel,
+			Namespace: apiNamespace,
+		}).SetupWithManager(mgr); err != nil {
+			setupLog.Error(err, "unable to create controller", "controller", "SitePin")
+			os.Exit(1)
+		}
+		setupLog.Info("edge-site placement enabled", "siteLabel", siteLabel)
+	}
+
 	apiRunnable, err := brokerapi.NewRunnable(brokerapi.RunnableOptions{
 		BindAddress: apiBindAddress,
 		TLS: brokerapi.TLSConfig{
@@ -180,6 +202,7 @@ func main() {
 		ReservationTimeout:   reservationTimeout,
 		Catalog:              catalogWriter,
 		CatalogWriteDisabled: !catalogWrite,
+		Sites:                sitePicker,
 	})
 	if err != nil {
 		setupLog.Error(err, "unable to build broker api server")

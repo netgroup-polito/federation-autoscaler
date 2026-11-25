@@ -65,6 +65,7 @@ all:
           # broker's logic for its own region in its own cluster. Point a
           # consumer at it with fa_broker_url: "https://10.0.0.13:30443".
           # fa_region_orchestrator: true
+          # fa_edge_sites: { provider-2: s1 }   # node name -> edge site ID
 
     # Dedicated mock cluster for the eco/latency strategies (option A). Its
     # address is auto-wired into every agent as --mock-*-url. Delete this group

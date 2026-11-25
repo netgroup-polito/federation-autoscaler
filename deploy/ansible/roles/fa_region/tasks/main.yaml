@@ -76,3 +76,13 @@
           kubectl --kubeconfig {{ cluster_kubeconfig }} -n {{ fa_namespace }} \
             wait deploy broker --for=condition=Available --timeout=5m
       changed_when: false
+
+    # Each booking is placed on one edge site, named by this label on the
+    # region's nodes; a node without it is never chosen.
+    - name: Label the region's nodes with their edge site
+      loop: "{{ fa_edge_sites | dict2items }}"
+      ansible.builtin.shell:
+        cmd: |
+          kubectl --kubeconfig {{ cluster_kubeconfig }} label node {{ item.key }} \
+            federation-autoscaler.io/site={{ item.value }} --overwrite
+      changed_when: true

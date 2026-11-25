@@ -146,6 +146,36 @@ func (s *Server) handleReservationCreate(w http.ResponseWriter, r *http.Request)
 		return
 	}
 
+	// Region orchestrator: the whole booking must fit in one edge site. The
+	// pick and the create run under one lock so two bookings never count the
+	// same free room; the site is stored on the Reservation and never returned.
+	var site string
+	if s.sites != nil {
+		s.siteMu.Lock()
+		defer s.siteMu.Unlock()
+		want := req.Resources
+		if !req.IsAmount() {
+			want = s.perChunkResources(cadv)
+		}
+		site, err = s.sites.Pick(ctx, want)
+		if err != nil {
+			s.log.Error(err, "edge site pick failed", "requestId", requestID)
+			writeError(w, http.StatusInternalServerError, ErrorResponse{
+				Code: ErrCodeInternalError, Message: "edge site lookup failed", RequestID: requestID,
+			})
+			return
+		}
+		if site == "" {
+			writeError(w, http.StatusConflict, ErrorResponse{
+				Code: ErrCodeInsufficientCapacity,
+				Message: fmt.Sprintf("no edge site of provider %q can hold %s",
+					req.ProviderClusterID, chunk.Format(want)),
+				RequestID: requestID,
+			})
+			return
+		}
+	}
+
 	// Atomically check-and-reserve the requested chunks, or the requested
 	// amount. Must happen before creating the Reservation object: this is the
 	// sole capacity gate (see reserveChunks's doc comment for why it replaced a
@@ -209,6 +239,7 @@ func (s *Server) handleReservationCreate(w http.ResponseWriter, r *http.Request)
 
 	resv := buildReservation(resName, s.namespace, &req, consumerID,
 		consumerEntry.LiqoClusterID, cadv.Spec.LiqoClusterID, perChunk)
+	resv.Spec.Site = site
 	if err := s.client.Create(ctx, resv); err != nil {
 		s.log.Error(err, "create Reservation failed", "name", resName, "requestId", requestID)
 		// Roll back the chunks we just reserved — otherwise they stay marked

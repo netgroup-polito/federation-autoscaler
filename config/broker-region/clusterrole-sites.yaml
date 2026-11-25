@@ -1,0 +1,30 @@
+# Edge-site placement (region orchestrator only): read the region's nodes to
+# find each site's free room, and pin a booking's Liqo ResourceSlice to its
+# site (status.nodeSelector). The central broker never needs this.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: broker-sites
+rules:
+- apiGroups: [""]
+  resources: ["nodes"]
+  verbs: ["get", "list", "watch"]
+- apiGroups: ["authentication.liqo.io"]
+  resources: ["resourceslices"]
+  verbs: ["get", "list", "watch"]
+- apiGroups: ["authentication.liqo.io"]
+  resources: ["resourceslices/status"]
+  verbs: ["get", "patch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: broker-sites
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: broker-sites
+subjects:
+- kind: ServiceAccount
+  name: broker
+  namespace: federation-autoscaler-system

@@ -8,11 +8,18 @@
 # the federation CA mirrored from the central cluster (Ansible role
 # fa_pki_mirror), so consumers and the provider agent trust it, and it trusts
 # their client certificates.
+#
+# Edge sites: the broker places each booking on one edge site, named by the
+# node label federation-autoscaler.io/site, and pins the consumer's slice to it
+# (--site-label). Label the region's nodes with their site (Ansible:
+# fa_edge_sites). Use neutral site IDs (e.g. "s1"): the consumer's virtual node
+# carries the selector, so its value is visible to the consumer's cluster.
 apiVersion: kustomize.config.k8s.io/v1beta1
 kind: Kustomization
 
 resources:
 - ../broker
+- clusterrole-sites.yaml
 
 patches:
 - patch: |-
@@ -36,3 +43,10 @@ patches:
     metadata:
       name: federation-autoscaler-ca-issuer
       namespace: federation-autoscaler-system
+- target:
+    kind: Deployment
+    name: broker
+  patch: |-
+    - op: add
+      path: /spec/template/spec/containers/0/args/-
+      value: --site-label=federation-autoscaler.io/site

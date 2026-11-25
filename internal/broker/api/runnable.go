@@ -29,6 +29,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/manager"
 
 	"github.com/netgroup-polito/federation-autoscaler/internal/broker/chunk"
+	"github.com/netgroup-polito/federation-autoscaler/internal/broker/sites"
 	"github.com/netgroup-polito/federation-autoscaler/internal/catalog"
 )
 
@@ -82,6 +83,10 @@ type RunnableOptions struct {
 	// CatalogWriteDisabled stops the Server writing offers even when Catalog is
 	// set (see ServerOptions). The zero value means the Server writes.
 	CatalogWriteDisabled bool
+
+	// Sites places every booking on one edge site (region orchestrator, see
+	// ServerOptions). Nil: off.
+	Sites *sites.Picker
 }
 
 // Runnable adapts the Broker's HTTP Server to the manager.Runnable interface
@@ -128,6 +133,7 @@ func NewRunnable(opts RunnableOptions) (*Runnable, error) {
 		ReservationTimeout:   opts.ReservationTimeout,
 		Catalog:              opts.Catalog,
 		CatalogWriteDisabled: opts.CatalogWriteDisabled,
+		Sites:                opts.Sites,
 	})
 
 	httpSrv := &http.Server{
