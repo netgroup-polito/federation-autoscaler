@@ -37,7 +37,7 @@
     cmd: |
       kubectl --kubeconfig {{ cluster_kubeconfig }} -n {{ fa_namespace }} \
         patch configmap agent-config --type merge -p \
-        '{"data":{"brokerUrl":"https://{{ broker_address }}:{{ broker_node_port }}","clusterId":"{{ cluster_id }}","liqoClusterId":"{{ cluster_id }}","mockEcoUrl":"{{ fa_mock_eco_url }}","mockGeoUrl":"{{ fa_mock_geo_url }}"}}'
+        '{"data":{"brokerUrl":"{{ ('https://' + ansible_host + ':' + (fa_region_node_port | string)) if fa_region_orchestrator | bool else fa_broker_url }}","clusterId":"{{ cluster_id }}","liqoClusterId":"{{ cluster_id }}","mockEcoUrl":"{{ fa_mock_eco_url }}","mockGeoUrl":"{{ fa_mock_geo_url }}"}}'
   changed_when: true
 
 # Provider-side offer writing (optional, demo): with fa_catalog_provider_write

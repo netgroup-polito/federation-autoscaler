@@ -1,0 +1,78 @@
+---
+# Region orchestrator (M3): deploys the broker's logic for ONE region in this
+# provider's own cluster (config/broker-region), when the provider host sets
+# fa_region_orchestrator: true. Runs after fa_pki_mirror (its server
+# certificate is issued by the mirrored federation CA) and before fa_provider
+# (whose agent then advertises to this broker instead of the central one).
+#
+# Same steps as fa_central, on the provider's host IP and fa_region_node_port.
+
+- name: Region orchestrator
+  when: fa_region_orchestrator | bool
+  delegate_to: localhost
+  block:
+
+    # Stream edit for the image (like fa_provider): never touches the repo,
+    # so parallel hosts are safe.
+    - name: Apply the region broker overlay (image pinned via stream edit)
+      ansible.builtin.shell:
+        executable: /bin/bash
+        cmd: |
+          set -o pipefail
+          kustomize build {{ fa_repo_root }}/config/broker-region \
+            | sed 's#image: federation-autoscaler/broker:latest#image: {{ fa_image_broker }}#' \
+            | kubectl --kubeconfig {{ cluster_kubeconfig }} apply -f -
+      changed_when: true
+
+    - name: Add this host's IP to the region broker's certificate
+      ansible.builtin.shell:
+        cmd: |
+          kubectl --kubeconfig {{ cluster_kubeconfig }} -n {{ fa_namespace }} \
+            patch certificate broker-server --type merge -p \
+            '{"spec":{"ipAddresses":["{{ ansible_host }}"]}}'
+      changed_when: true
+
+    # cert-manager does not re-issue a Ready certificate when SANs change:
+    # delete the Secret unless it already carries this IP.
+    - name: Force a re-issue of the certificate with the IP
+      ansible.builtin.shell:
+        cmd: |
+          kubectl --kubeconfig {{ cluster_kubeconfig }} -n {{ fa_namespace }} \
+            get secret broker-server-cert -o jsonpath='{.data.tls\.crt}' \
+            | base64 -d | openssl x509 -noout -text 2>/dev/null \
+            | grep -q "IP Address:{{ ansible_host }}" || \
+          kubectl --kubeconfig {{ cluster_kubeconfig }} -n {{ fa_namespace }} \
+            delete secret broker-server-cert --ignore-not-found
+      changed_when: true
+
+    - name: Wait for the certificate
+      ansible.builtin.shell:
+        cmd: |
+          kubectl --kubeconfig {{ cluster_kubeconfig }} -n {{ fa_namespace }} \
+            wait certificate broker-server --for=condition=Ready --timeout=3m
+      changed_when: false
+
+    - name: Restart the region broker so it loads the certificate
+      ansible.builtin.shell:
+        cmd: |
+          kubectl --kubeconfig {{ cluster_kubeconfig }} -n {{ fa_namespace }} \
+            rollout restart deploy/broker
+          kubectl --kubeconfig {{ cluster_kubeconfig }} -n {{ fa_namespace }} \
+            rollout status deploy/broker --timeout=3m
+      changed_when: true
+
+    # Both ports listed: a strategic merge replaces ports by name.
+    - name: Expose the region broker on NodePort {{ fa_region_node_port }} (api) and {{ dashboard_node_port }} (dashboard)
+      ansible.builtin.shell:
+        cmd: |
+          kubectl --kubeconfig {{ cluster_kubeconfig }} -n {{ fa_namespace }} \
+            patch service broker --type strategic --patch \
+            '{"spec":{"type":"NodePort","ports":[{"name":"api","port":9443,"nodePort":{{ fa_region_node_port }}},{"name":"dashboard","port":9444,"nodePort":{{ dashboard_node_port }}}]}}'
+      changed_when: true
+
+    - name: Wait for the region broker
+      ansible.builtin.shell:
+        cmd: |
+          kubectl --kubeconfig {{ cluster_kubeconfig }} -n {{ fa_namespace }} \
+            wait deploy broker --for=condition=Available --timeout=5m
+      changed_when: false

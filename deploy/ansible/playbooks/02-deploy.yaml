@@ -76,6 +76,13 @@
   roles:
     - fa_consumer
 
+- name: Deploy the region orchestrator (M3) on providers with fa_region_orchestrator
+  hosts: providers
+  gather_facts: false
+  become: false
+  roles:
+    - fa_region
+
 - name: Deploy provider agent
   hosts: providers
   gather_facts: false

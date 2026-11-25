@@ -90,8 +90,9 @@ func TotalFor(sizer Sizer, cadv *brokerv1alpha1.ClusterAdvertisement) int32 {
 }
 
 // FreeForAmount returns what an amount may still use on the provider: the
-// advertised capacity minus the reserved chunks and the reserved amounts,
-// never negative.
+// advertised CPU, memory and GPUs minus the reserved chunks and the reserved
+// amounts, never negative. Other advertised resources (pods, storage) are
+// left out: an amount cannot ask for them.
 func FreeForAmount(sizer Sizer, cadv *brokerv1alpha1.ClusterAdvertisement) corev1.ResourceList {
 	used := corev1.ResourceList{}
 	perChunk := PerChunkFor(sizer, cadv)
@@ -101,7 +102,13 @@ func FreeForAmount(sizer Sizer, cadv *brokerv1alpha1.ClusterAdvertisement) corev
 		used[name] = total
 	}
 	add(used, cadv.Status.ReservedResources)
-	return subtract(cadv.Spec.Resources.Allocatable, used)
+	advertised := corev1.ResourceList{}
+	for name, q := range cadv.Spec.Resources.Allocatable {
+		if amountResources[name] {
+			advertised[name] = q
+		}
+	}
+	return subtract(advertised, used)
 }
 
 // Fits reports whether every resource of amount is within free.

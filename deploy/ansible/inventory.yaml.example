@@ -61,6 +61,10 @@ all:
           cluster_id: provider-2
           pod_cidr: 10.71.0.0/16
           service_cidr: 10.171.0.0/16
+          # M3 (optional): run this provider as a region orchestrator, the
+          # broker's logic for its own region in its own cluster. Point a
+          # consumer at it with fa_broker_url: "https://10.0.0.13:30443".
+          # fa_region_orchestrator: true
 
     # Dedicated mock cluster for the eco/latency strategies (option A). Its
     # address is auto-wired into every agent as --mock-*-url. Delete this group

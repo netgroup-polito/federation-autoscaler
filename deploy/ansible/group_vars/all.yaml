@@ -128,6 +128,24 @@ dashboard_node_port: 30444
 # dial https://{{ broker_address }}:{{ broker_node_port }}/.
 broker_address: "{{ hostvars[groups['central'][0]].ansible_host }}"
 
+# The broker an agent talks to. Default: the central broker. Override per
+# consumer host to point it at a region orchestrator (M3) instead, e.g.
+#   consumer-2: { ..., fa_broker_url: "https://<region host IP>:30443" }
+fa_broker_url: "https://{{ broker_address }}:{{ broker_node_port }}"
+
+# -----------------------------------------------------------------------------
+# Region orchestrator (M3, optional)
+# -----------------------------------------------------------------------------
+
+# Set per provider host: fa_region_orchestrator: true deploys the broker's
+# logic for that region (config/broker-region) in the provider's own cluster,
+# reachable at https://<its host IP>:{{ fa_region_node_port }}; its provider
+# agent then advertises there, not to the central broker. Off by default.
+fa_region_orchestrator: false
+
+# NodePort of a region orchestrator on its provider host.
+fa_region_node_port: 30443
+
 # Where to drop the fetched kubeconfigs on the control host. Each cluster
 # gets ~/.kube/<cluster_id>.yaml. These are what `kubectl --kubeconfig`
 # expects during the demo's scale-up / scale-down narration.

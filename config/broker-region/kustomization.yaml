@@ -1,0 +1,38 @@
+# Region orchestrator overlay (M3): the broker's logic for ONE region, deployed
+# in that region's (provider) cluster, next to its provider agent. Consumers
+# book here directly; the provider agent advertises here and writes the
+# region's offer to the shared catalog.
+#
+# Same broker as ../broker, minus its own PKI: a region must not mint a new
+# root CA. Its server certificate is issued by federation-autoscaler-ca-issuer,
+# the federation CA mirrored from the central cluster (Ansible role
+# fa_pki_mirror), so consumers and the provider agent trust it, and it trusts
+# their client certificates.
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+resources:
+- ../broker
+
+patches:
+- patch: |-
+    $patch: delete
+    apiVersion: cert-manager.io/v1
+    kind: Issuer
+    metadata:
+      name: selfsigned-root
+      namespace: federation-autoscaler-system
+- patch: |-
+    $patch: delete
+    apiVersion: cert-manager.io/v1
+    kind: Certificate
+    metadata:
+      name: federation-autoscaler-ca
+      namespace: federation-autoscaler-system
+- patch: |-
+    $patch: delete
+    apiVersion: cert-manager.io/v1
+    kind: Issuer
+    metadata:
+      name: federation-autoscaler-ca-issuer
+      namespace: federation-autoscaler-system

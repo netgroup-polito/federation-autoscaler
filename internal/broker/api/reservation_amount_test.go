@@ -27,6 +27,7 @@ import (
 	. "github.com/onsi/gomega"
 
 	corev1 "k8s.io/api/core/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
@@ -176,6 +177,33 @@ var _ = Describe("Amount reservations", Ordered, func() {
 			Resources:         amount("2", "6Gi"),
 		})
 		Expect(resp.Status).To(Equal(http.StatusConflict), resp.Describe())
+	})
+
+	It("only accepts or rejects: an unavailable provider refuses with 503 and nothing changes", func() {
+		cadv := &brokerv1alpha1.ClusterAdvertisement{}
+		key := types.NamespacedName{Name: amtProvider, Namespace: testNamespace}
+		Expect(k8sClient.Get(suiteCtx, key, cadv)).To(Succeed())
+		cadv.Status.Available = false
+		Expect(k8sClient.Status().Update(suiteCtx, cadv)).To(Succeed())
+		DeferCleanup(func() {
+			Expect(k8sClient.Get(suiteCtx, key, cadv)).To(Succeed())
+			cadv.Status.Available = true
+			Expect(k8sClient.Status().Update(suiteCtx, cadv)).To(Succeed())
+		})
+
+		before := cadvStatus()
+		resp := reserve("amt-unavailable", ReservationRequest{
+			ProviderClusterID: amtProvider,
+			Resources:         amount("1", "1Gi"),
+		})
+		Expect(resp.Status).To(Equal(http.StatusServiceUnavailable), resp.Describe())
+
+		after := cadvStatus()
+		Expect(after.ReservedResources).To(Equal(before.ReservedResources))
+		Expect(after.ReservedChunks).To(Equal(before.ReservedChunks))
+		Expect(apierrors.IsNotFound(k8sClient.Get(suiteCtx,
+			types.NamespacedName{Name: "amt-unavailable", Namespace: testNamespace},
+			&brokerv1alpha1.Reservation{}))).To(BeTrue())
 	})
 
 	It("keeps an amount out of the consumer's node groups", func() {
