@@ -68,8 +68,16 @@ type ReservationSpec struct {
 	// Resources is the per-chunk capacity at the moment the reservation was
 	// made. Surfaced to Cluster Autoscaler so it can build correct node
 	// templates. Each value is one chunk's worth (not ChunkCount × chunk).
+	// For an Amount reservation it is the requested amount itself.
 	// +required
 	Resources corev1.ResourceList `json:"resources"`
+
+	// Amount marks a reservation of any CPU and memory amount: one virtual
+	// node of exactly Resources, instead of one fixed-size chunk. The
+	// provider's Status.ReservedResources accounts for it, not ReservedChunks,
+	// and it never appears in a Cluster Autoscaler node group.
+	// +optional
+	Amount bool `json:"amount,omitempty"`
 
 	// Namespaces is the set of namespaces the consumer wants to offload on the
 	// reserved virtual nodes. Used by the Consumer Agent to create or update

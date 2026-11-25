@@ -556,6 +556,60 @@ var _ = Describe("Reservation Controller", func() {
 		Expect(updatedCA.Status.ReservedChunks).To(Equal(int32(5)))
 	})
 
+	It("hard delete of an Amount reservation gives its amount back and recomputes the chunks", func() {
+		By("seeding the provider with a 3 cpu / 6Gi amount reserved (8 cpu / 16Gi advertised)")
+		cadv := &brokerv1alpha1.ClusterAdvertisement{}
+		Expect(k8sClient.Get(ctx, cadvKey, cadv)).To(Succeed())
+		amount := corev1.ResourceList{
+			corev1.ResourceCPU:    resource.MustParse("3"),
+			corev1.ResourceMemory: resource.MustParse("6Gi"),
+		}
+		cadv.Status.ReservedResources = amount
+		cadv.Status.TotalChunks = 2 // 5 cpu / 10Gi left
+		cadv.Status.ReservedChunks = 0
+		cadv.Status.AvailableChunks = 2
+		Expect(k8sClient.Status().Update(ctx, cadv)).To(Succeed())
+
+		amtKey := types.NamespacedName{Name: "resv-amount", Namespace: "default"}
+		amt := &brokerv1alpha1.Reservation{
+			ObjectMeta: metav1.ObjectMeta{Name: amtKey.Name, Namespace: amtKey.Namespace},
+			Spec: brokerv1alpha1.ReservationSpec{
+				ConsumerClusterID:     "consumer-test",
+				ConsumerLiqoClusterID: "liqo-consumer-test",
+				ProviderClusterID:     providerName,
+				ProviderLiqoClusterID: "liqo-provider-test",
+				ChunkCount:            1,
+				ChunkType:             brokerv1alpha1.ChunkTypeStandard,
+				Resources:             amount,
+				Amount:                true,
+			},
+		}
+		Expect(k8sClient.Create(ctx, amt)).To(Succeed())
+		amt.Status.Phase = brokerv1alpha1.ReservationPhasePending
+		Expect(k8sClient.Status().Update(ctx, amt)).To(Succeed())
+
+		r := &ReservationReconciler{Client: k8sClient, Scheme: k8sClient.Scheme()}
+		_, err := r.Reconcile(ctx, reconcile.Request{NamespacedName: amtKey})
+		Expect(err).NotTo(HaveOccurred())
+
+		By("hard-deleting it, then reconciling the deletion")
+		Expect(k8sClient.Get(ctx, amtKey, amt)).To(Succeed())
+		Expect(k8sClient.Delete(ctx, amt)).To(Succeed())
+		_, err = r.Reconcile(ctx, reconcile.Request{NamespacedName: amtKey})
+		Expect(err).NotTo(HaveOccurred())
+		Eventually(func() bool {
+			return apierrors.IsNotFound(k8sClient.Get(ctx, amtKey, &brokerv1alpha1.Reservation{}))
+		}).Should(BeTrue())
+
+		By("the amount is back and the chunks count the full advertisement again")
+		updatedCA := &brokerv1alpha1.ClusterAdvertisement{}
+		Expect(k8sClient.Get(ctx, cadvKey, updatedCA)).To(Succeed())
+		Expect(updatedCA.Status.ReservedResources).To(BeEmpty())
+		Expect(updatedCA.Status.TotalChunks).To(Equal(int32(4)))
+		Expect(updatedCA.Status.ReservedChunks).To(Equal(int32(0)))
+		Expect(updatedCA.Status.AvailableChunks).To(Equal(int32(4)))
+	})
+
 	// ---------------------------------------------------------------------
 	// bug #5 — (consumer, provider)-scoped GenerateKubeconfig de-duplication
 	// ---------------------------------------------------------------------

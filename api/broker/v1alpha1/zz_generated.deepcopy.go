@@ -166,6 +166,13 @@ func (in *ClusterAdvertisementStatus) DeepCopyInto(out *ClusterAdvertisementStat
 		in, out := &in.LastSeen, &out.LastSeen
 		*out = (*in).DeepCopy()
 	}
+	if in.ReservedResources != nil {
+		in, out := &in.ReservedResources, &out.ReservedResources
+		*out = make(v1.ResourceList, len(*in))
+		for key, val := range *in {
+			(*out)[key] = val.DeepCopy()
+		}
+	}
 	if in.Conditions != nil {
 		in, out := &in.Conditions, &out.Conditions
 		*out = make([]metav1.Condition, len(*in))

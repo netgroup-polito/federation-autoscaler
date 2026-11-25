@@ -201,9 +201,15 @@ func (s *Server) touchClusterAdvertisementStatus(
 	patch.Status.ObservedGeneration = cadv.Generation
 	patch.Status.LastSeen = &now
 	patch.Status.Available = true
-	patch.Status.TotalChunks = chunkResult.Count
+	// Amounts already reserved (Amount reservations) are not available to
+	// chunks: count the chunks in what they leave.
+	total := chunkResult.Count
+	if len(patch.Status.ReservedResources) > 0 {
+		total = chunk.TotalFor(s.sizer, patch)
+	}
+	patch.Status.TotalChunks = total
 
-	available := chunkResult.Count - patch.Status.ReservedChunks
+	available := total - patch.Status.ReservedChunks
 	if available < 0 {
 		available = 0
 	}

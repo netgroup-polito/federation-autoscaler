@@ -328,6 +328,19 @@ spec:
                 format: int32
                 minimum: 0
                 type: integer
+              reservedResources:
+                additionalProperties:
+                  anyOf:
+                  - type: integer
+                  - type: string
+                  pattern: ^(\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))(([KMGTPE]i)|[numkMGTPE]|([eE](\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))))?$
+                  x-kubernetes-int-or-string: true
+                description: |-
+                  ReservedResources is the sum of the amounts bound to active Amount
+                  Reservations (spec.amount=true). TotalChunks is computed from the
+                  advertised capacity minus ReservedResources, so fixed-size chunks and
+                  amounts never sell the same capacity twice.
+                type: object
               totalChunks:
                 description: |-
                   TotalChunks is the number of chunks computed from the latest advertisement

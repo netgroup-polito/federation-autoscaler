@@ -166,6 +166,13 @@ type ClusterAdvertisementStatus struct {
 	// +kubebuilder:validation:Minimum=0
 	ReservedChunks int32 `json:"reservedChunks"`
 
+	// ReservedResources is the sum of the amounts bound to active Amount
+	// Reservations (spec.amount=true). TotalChunks is computed from the
+	// advertised capacity minus ReservedResources, so fixed-size chunks and
+	// amounts never sell the same capacity twice.
+	// +optional
+	ReservedResources corev1.ResourceList `json:"reservedResources,omitempty"`
+
 	// AvailableChunks is TotalChunks minus ReservedChunks. Consumers see this
 	// value as the maxSize of the corresponding node group.
 	// +optional

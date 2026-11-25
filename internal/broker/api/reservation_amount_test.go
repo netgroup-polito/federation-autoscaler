@@ -1,0 +1,249 @@
+/*
+Copyright 2026 Politecnico di Torino - NetGroup.
+
+Licensed under the Apache License, Version 2.0 (the "License");
+you may not use this file except in compliance with the License.
+You may obtain a copy of the License at
+
+    http://www.apache.org/licenses/LICENSE-2.0
+
+Unless required by applicable law or agreed to in writing, software
+distributed under the License is distributed on an "AS IS" BASIS,
+WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+See the License for the specific language governing permissions and
+limitations under the License.
+*/
+
+package api
+
+import (
+	"bytes"
+	"context"
+	"encoding/json"
+	"io"
+	"net/http"
+
+	. "github.com/onsi/ginkgo/v2"
+	. "github.com/onsi/gomega"
+
+	corev1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/api/resource"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/types"
+	"sigs.k8s.io/controller-runtime/pkg/client"
+
+	brokerv1alpha1 "github.com/netgroup-polito/federation-autoscaler/api/broker/v1alpha1"
+)
+
+// Amount reservations: any CPU and memory amount as one virtual node, sharing
+// the provider's capacity with fixed-size chunks. A provider and a consumer of
+// their own keep these specs apart from the rest of the suite.
+var _ = Describe("Amount reservations", Ordered, func() {
+	const (
+		amtProvider = "provider-amt"
+		amtConsumer = "consumer-amt"
+	)
+	var amountID string
+
+	amount := func(cpu, mem string) corev1.ResourceList {
+		return corev1.ResourceList{
+			corev1.ResourceCPU:    resource.MustParse(cpu),
+			corev1.ResourceMemory: resource.MustParse(mem),
+		}
+	}
+	cadvStatus := func() brokerv1alpha1.ClusterAdvertisementStatus {
+		cadv := &brokerv1alpha1.ClusterAdvertisement{}
+		Expect(k8sClient.Get(suiteCtx,
+			types.NamespacedName{Name: amtProvider, Namespace: testNamespace}, cadv)).To(Succeed())
+		return cadv.Status
+	}
+	reserve := func(id string, req ReservationRequest) recordedResponse {
+		authClusterID = amtConsumer
+		return doJSONWithReservationID(http.MethodPost, "/api/v1/reservations", id, req)
+	}
+
+	BeforeAll(func() {
+		authClusterID = amtProvider
+		resp := doJSON(http.MethodPost, "/api/v1/advertisements", AdvertisementRequest{
+			ClusterID:     amtProvider,
+			LiqoClusterID: "liqo-" + amtProvider,
+			Resources:     amount("8", "16Gi"), // 4 standard chunks
+		})
+		Expect(resp.Status).To(Equal(http.StatusOK), resp.Describe())
+
+		authClusterID = amtConsumer
+		resp = doJSON(http.MethodPost, "/api/v1/heartbeat", HeartbeatRequest{
+			ClusterID:     amtConsumer,
+			LiqoClusterID: "liqo-" + amtConsumer,
+		})
+		Expect(resp.Status).To(Equal(http.StatusOK), resp.Describe())
+	})
+
+	AfterAll(func() {
+		authClusterID = ""
+		var list brokerv1alpha1.ReservationList
+		Expect(k8sClient.List(suiteCtx, &list, client.InNamespace(testNamespace))).To(Succeed())
+		for i := range list.Items {
+			if list.Items[i].Spec.ConsumerClusterID == amtConsumer {
+				Expect(client.IgnoreNotFound(k8sClient.Delete(suiteCtx, &list.Items[i]))).To(Succeed())
+			}
+		}
+		Expect(k8sClient.Delete(suiteCtx, &brokerv1alpha1.ClusterAdvertisement{
+			ObjectMeta: metav1.ObjectMeta{Name: amtProvider, Namespace: testNamespace},
+		})).To(Succeed())
+	})
+
+	It("reserves an amount as one node and leaves fewer chunks", func() {
+		resp := reserve("amt-1", ReservationRequest{
+			ProviderClusterID: amtProvider,
+			Resources:         amount("3", "6Gi"),
+		})
+		Expect(resp.Status).To(Equal(http.StatusCreated), resp.Describe())
+
+		var body ReservationResponse
+		Expect(resp.DecodeInto(&body)).To(Succeed())
+		amountID = body.ReservationID
+		Expect(body.Amount).To(BeTrue())
+		Expect(body.ChunkCount).To(Equal(int32(1)))
+		Expect(body.ChunkType).To(Equal(brokerv1alpha1.ChunkTypeStandard))
+		Expect(body.Resources.Cpu().String()).To(Equal("3"))
+		Expect(body.Resources.Memory().String()).To(Equal("6Gi"))
+
+		st := cadvStatus()
+		Expect(st.ReservedResources.Cpu().String()).To(Equal("3"))
+		Expect(st.ReservedChunks).To(Equal(int32(0)))
+		Expect(st.TotalChunks).To(Equal(int32(2))) // 5 cpu / 10Gi left → 2 chunks
+		Expect(st.AvailableChunks).To(Equal(int32(2)))
+	})
+
+	It("lets a fixed-size chunk use only what the amount left", func() {
+		resp := reserve("amt-chunk", ReservationRequest{
+			ProviderClusterID: amtProvider,
+			ChunkCount:        1,
+			ChunkType:         brokerv1alpha1.ChunkTypeStandard,
+		})
+		Expect(resp.Status).To(Equal(http.StatusCreated), resp.Describe())
+
+		st := cadvStatus()
+		Expect(st.ReservedChunks).To(Equal(int32(1)))
+		Expect(st.AvailableChunks).To(Equal(int32(1)))
+	})
+
+	It("refuses an amount larger than what is free, and changes nothing", func() {
+		// Free: 8 cpu - 2 (chunk) - 3 (amount) = 3 cpu.
+		resp := reserve("amt-too-big", ReservationRequest{
+			ProviderClusterID: amtProvider,
+			Resources:         amount("4", "4Gi"),
+		})
+		Expect(resp.Status).To(Equal(http.StatusConflict), resp.Describe())
+		Expect(string(resp.Body)).To(ContainSubstring(string(ErrCodeInsufficientCapacity)))
+
+		st := cadvStatus()
+		Expect(st.ReservedResources.Cpu().String()).To(Equal("3"))
+		Expect(st.ReservedChunks).To(Equal(int32(1)))
+	})
+
+	DescribeTable("rejects a malformed amount with 400",
+		func(req ReservationRequest) {
+			req.ProviderClusterID = amtProvider
+			resp := reserve("", req)
+			Expect(resp.Status).To(Equal(http.StatusBadRequest), resp.Describe())
+		},
+		Entry("memory missing", ReservationRequest{
+			Resources: corev1.ResourceList{corev1.ResourceCPU: resource.MustParse("1")},
+		}),
+		Entry("negative cpu", ReservationRequest{Resources: amount("-1", "1Gi")}),
+		Entry("unsupported resource", ReservationRequest{Resources: corev1.ResourceList{
+			corev1.ResourceCPU:              resource.MustParse("1"),
+			corev1.ResourceMemory:           resource.MustParse("1Gi"),
+			corev1.ResourceEphemeralStorage: resource.MustParse("1Gi"),
+		}}),
+		Entry("a node group", ReservationRequest{
+			Resources: amount("1", "1Gi"), NodeGroupID: "ng-" + amtProvider + "-standard",
+		}),
+		Entry("two nodes", ReservationRequest{Resources: amount("1", "1Gi"), ChunkCount: 2}),
+	)
+
+	It("answers a retry with the same id, and refuses the same id with another amount", func() {
+		resp := reserve(amountID, ReservationRequest{
+			ProviderClusterID: amtProvider,
+			Resources:         amount("3", "6Gi"),
+		})
+		Expect(resp.Status).To(Equal(http.StatusOK), resp.Describe())
+
+		resp = reserve(amountID, ReservationRequest{
+			ProviderClusterID: amtProvider,
+			Resources:         amount("2", "6Gi"),
+		})
+		Expect(resp.Status).To(Equal(http.StatusConflict), resp.Describe())
+	})
+
+	It("keeps an amount out of the consumer's node groups", func() {
+		authClusterID = amtConsumer
+		resp := doJSON(http.MethodGet, "/api/v1/nodegroups", nil)
+		Expect(resp.Status).To(Equal(http.StatusOK), resp.Describe())
+		var body NodeGroupListResponse
+		Expect(resp.DecodeInto(&body)).To(Succeed())
+		for _, ng := range body.NodeGroups {
+			if ng.ProviderClusterID == amtProvider {
+				Expect(ng.CurrentReserved).To(Equal(int32(1)), "only the fixed-size chunk")
+			}
+		}
+	})
+
+	It("gives the amount back on release", func() {
+		authClusterID = amtConsumer
+		resp := doJSON(http.MethodDelete, "/api/v1/reservations/"+amountID, nil)
+		Expect(resp.Status).To(Equal(http.StatusAccepted), resp.Describe())
+
+		st := cadvStatus()
+		Expect(st.ReservedResources).To(BeEmpty())
+		Expect(st.TotalChunks).To(Equal(int32(4)))
+		Expect(st.ReservedChunks).To(Equal(int32(1)))
+		Expect(st.AvailableChunks).To(Equal(int32(3)))
+
+		resv := &brokerv1alpha1.Reservation{}
+		Expect(k8sClient.Get(suiteCtx,
+			types.NamespacedName{Name: amountID, Namespace: testNamespace}, resv)).To(Succeed())
+		Expect(brokerv1alpha1.IsChunksReleased(resv)).To(BeTrue())
+	})
+
+	It("counts amounts when a new advertisement refreshes the chunk total", func() {
+		resp := reserve("amt-2", ReservationRequest{
+			ProviderClusterID: amtProvider,
+			Resources:         amount("2", "4Gi"),
+		})
+		Expect(resp.Status).To(Equal(http.StatusCreated), resp.Describe())
+
+		authClusterID = amtProvider
+		resp = doJSON(http.MethodPost, "/api/v1/advertisements", AdvertisementRequest{
+			ClusterID:     amtProvider,
+			LiqoClusterID: "liqo-" + amtProvider,
+			Resources:     amount("8", "16Gi"),
+		})
+		Expect(resp.Status).To(Equal(http.StatusOK), resp.Describe())
+
+		st := cadvStatus()
+		Expect(st.TotalChunks).To(Equal(int32(3))) // 6 cpu / 12Gi left → 3 chunks
+		Expect(st.AvailableChunks).To(Equal(int32(2)))
+	})
+})
+
+// doJSONWithReservationID is doJSON with the X-Reservation-Id idempotency
+// header set (left out when id is empty).
+func doJSONWithReservationID(method, path, id string, body any) recordedResponse {
+	var buf bytes.Buffer
+	Expect(json.NewEncoder(&buf).Encode(body)).To(Succeed())
+	req, err := http.NewRequestWithContext(context.Background(), method, httpServer.URL+path, &buf)
+	Expect(err).NotTo(HaveOccurred())
+	req.Header.Set("Content-Type", ContentTypeJSON)
+	if id != "" {
+		req.Header.Set(HeaderReservationID, id)
+	}
+	resp, err := http.DefaultClient.Do(req)
+	Expect(err).NotTo(HaveOccurred())
+	defer func() { _ = resp.Body.Close() }()
+	raw, err := io.ReadAll(resp.Body)
+	Expect(err).NotTo(HaveOccurred())
+	return recordedResponse{Status: resp.StatusCode, Body: raw}
+}

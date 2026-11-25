@@ -327,14 +327,21 @@ spec:
 status:
   lastSeen: "2026-07-22T10:30:00Z"
   available: true                  # flipped false after 90 s of silence
-  totalChunks: 4
+  totalChunks: 4                   # chunks in allocatable minus reservedResources
   reservedChunks: 1
+  reservedResources: { cpu: "3", memory: "6Gi" }   # sum of active Amount reservations; omitted when none
   availableChunks: 3
 ```
 
+Fixed-size chunks and Amount reservations (§6.2) share the provider's capacity: `totalChunks` counts the chunks in the advertised capacity minus `reservedResources`, and an amount fits only in what is left after the reserved chunks and the other amounts, so the same CPU is never sold twice.
+
 ### 6.2 Reservation (central)
 
-One per borrowed chunk. `chunkCount` is always 1; the API rejects anything larger.
+One per borrowed node. `chunkCount` is always 1; the API rejects anything larger.
+
+Two kinds:
+- **Chunk** (the default): one fixed-size chunk; `resources` is the chunk's size. Counted in the provider's `reservedChunks`. This is what Cluster Autoscaler books.
+- **Amount** (`amount: true`): any CPU and memory amount, one virtual node of exactly `resources` (the consumer agent sizes the Liqo slice from it). Counted in the provider's `reservedResources`, never part of a node group, so Cluster Autoscaler never sees it. Meant for direct bookings in M3; nothing in M1 and M2 sends it yet.
 
 ```yaml
 apiVersion: broker.federation-autoscaler.io/v1alpha1
@@ -349,7 +356,8 @@ spec:                              # immutable once written
   providerLiqoClusterId: "provider-1"
   chunkCount: 1
   chunkType: "standard"
-  resources: { cpu: "2", memory: "4Gi" }
+  resources: { cpu: "2", memory: "4Gi" }   # one chunk, or the requested amount
+  amount: false                    # true for an Amount reservation
   namespaces: ["default"]
 status:
   phase: Peered      # Pending | GeneratingKubeconfig | KubeconfigReady | Peering | Peered
@@ -449,7 +457,7 @@ Three wire surfaces exist. There is no Broker-to-agent surface; see the [communi
 | `GET /api/v1/advertisements/{clusterId}` | provider | read back own advertisement (403 for others) |
 | `POST /api/v1/heartbeat` | consumer, 15 s | liveness + policy + location + measured RTTs + chosen provider (`decidedBy: "local"` in local mode) + the latest ConsumerChoice request and ranking (`consumerChoice`) |
 | `GET /api/v1/nodegroups` | consumer | the policy-masked node-group view (the placement decision point) |
-| `POST /api/v1/reservations` | consumer | synchronous reserve, one chunk; 201 (or 200 on idempotent replay) |
+| `POST /api/v1/reservations` | consumer | synchronous reserve of one chunk, or of any amount with `resources` (`{cpu, memory[, nvidia.com/gpu]}`, then `chunkCount` 0 or 1, `chunkType` optional, no `nodeGroupId`); 201 (or 200 on idempotent replay), 409 `InsufficientCapacity` when it does not fit |
 | `GET /api/v1/reservations/{id}` | participant | reservation lookup (consumer or provider of that reservation) |
 | `DELETE /api/v1/reservations/{id}` | consumer | release; 202, phase → `Unpeering` |
 | `GET /api/v1/reservations` | consumer | the caller's own reservations (as consumer), every phase, sorted by ID; lets a consumer-side brain rebuild its in-flight and reserved counts |
@@ -559,7 +567,7 @@ Note that tuning the poll interval does **not** materially change end-to-end sca
 
 Measured on the demo: about **84 s** from workload delete to node gone, dominated by CA's unneeded window; the unpeer itself takes a few seconds.
 
-> **Chunk-release invariant.** `ClusterAdvertisement.status.reservedChunks` is decremented by exactly one path per reservation, gated by the `federation-autoscaler.io/chunks-released` annotation on the Reservation (`IsChunksReleased` / `MarkChunksReleased` in `api/broker/v1alpha1/common_types.go`). The DELETE handler is the normal path; the controller's terminal handler is the safety net for reservations that die mid-flight. Without the marker the counter drifts and a provider's free chunks stick at zero. Do not add a third release path.
+> **Chunk-release invariant.** `ClusterAdvertisement.status.reservedChunks` (or, for an Amount reservation, `reservedResources`) is decremented by exactly one path per reservation, gated by the `federation-autoscaler.io/chunks-released` annotation on the Reservation (`IsChunksReleased` / `MarkChunksReleased` in `api/broker/v1alpha1/common_types.go`). The DELETE handler is the normal path; the controller's terminal handler is the safety net for reservations that die mid-flight. Without the marker the counter drifts and a provider's free chunks stick at zero. Do not add a third release path.
 
 ### 9.4 Failure Handling
 

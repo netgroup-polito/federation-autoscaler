@@ -469,7 +469,16 @@ type ReservationRequest struct {
 	ChunkCount        int32                    `json:"chunkCount"`
 	ChunkType         brokerv1alpha1.ChunkType `json:"chunkType"`
 	Namespaces        []string                 `json:"namespaces,omitempty"`
+
+	// Resources, when set, asks for any CPU and memory amount (one virtual
+	// node of exactly this size) instead of one fixed-size chunk: an Amount
+	// reservation. ChunkCount is then 0 or 1, ChunkType is optional (the
+	// provider's type is used) and NodeGroupID must be empty.
+	Resources corev1.ResourceList `json:"resources,omitempty"`
 }
+
+// IsAmount reports whether the request asks for an amount, not a chunk.
+func (r *ReservationRequest) IsAmount() bool { return len(r.Resources) > 0 }
 
 // ReservationResponse is returned by both POST /api/v1/reservations
 // (HTTP 201) and GET /api/v1/reservations/{id} (HTTP 200). Some optional
@@ -484,6 +493,7 @@ type ReservationResponse struct {
 	ChunkCount            int32                           `json:"chunkCount"`
 	ChunkType             brokerv1alpha1.ChunkType        `json:"chunkType,omitempty"`
 	Resources             corev1.ResourceList             `json:"resources,omitempty"`
+	Amount                bool                            `json:"amount,omitempty"`
 	VirtualNodeNames      []string                        `json:"virtualNodeNames,omitempty"`
 	CreatedAt             metav1.Time                     `json:"createdAt"`
 	ActivatedAt           *metav1.Time                    `json:"activatedAt,omitempty"`

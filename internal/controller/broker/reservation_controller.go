@@ -36,6 +36,7 @@ import (
 
 	autoscalingv1alpha1 "github.com/netgroup-polito/federation-autoscaler/api/autoscaling/v1alpha1"
 	brokerv1alpha1 "github.com/netgroup-polito/federation-autoscaler/api/broker/v1alpha1"
+	"github.com/netgroup-polito/federation-autoscaler/internal/broker/chunk"
 )
 
 // ReservationFinalizer guards a Reservation so its reserved chunks are
@@ -88,6 +89,11 @@ type ReservationReconciler struct {
 	// the reservation immortal. The reconciler uses this value to backfill a
 	// missing ExpiresAt. Zero falls back to DefaultReservationTimeout.
 	ReservationTimeout time.Duration
+
+	// Sizer splits an advertisement into chunks; needed to recompute a
+	// provider's TotalChunks when an Amount reservation gives its amount back.
+	// Nil means chunk.DefaultSizer, the one the Broker API uses.
+	Sizer chunk.Sizer
 }
 
 // DefaultTerminalReservationTTL is how long a terminal Reservation lingers
@@ -596,16 +602,24 @@ func (r *ReservationReconciler) releaseChunks(
 			}
 			return fmt.Errorf("get ClusterAdvertisement: %w", err)
 		}
-		next := cadv.Status.ReservedChunks - resv.Spec.ChunkCount
-		if next < 0 {
-			next = 0
+		if resv.Spec.Amount {
+			sizer := r.Sizer
+			if sizer == nil {
+				sizer = chunk.NewDefaultSizer()
+			}
+			chunk.ApplyAmount(sizer, cadv, resv.Spec.Resources, -1)
+		} else {
+			next := cadv.Status.ReservedChunks - resv.Spec.ChunkCount
+			if next < 0 {
+				next = 0
+			}
+			cadv.Status.ReservedChunks = next
+			avail := cadv.Status.TotalChunks - next
+			if avail < 0 {
+				avail = 0
+			}
+			cadv.Status.AvailableChunks = avail
 		}
-		cadv.Status.ReservedChunks = next
-		avail := cadv.Status.TotalChunks - next
-		if avail < 0 {
-			avail = 0
-		}
-		cadv.Status.AvailableChunks = avail
 		if err := r.Status().Update(ctx, cadv); err != nil {
 			if apierrors.IsConflict(err) {
 				continue

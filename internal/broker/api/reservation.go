@@ -35,6 +35,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	brokerv1alpha1 "github.com/netgroup-polito/federation-autoscaler/api/broker/v1alpha1"
+	"github.com/netgroup-polito/federation-autoscaler/internal/broker/chunk"
 )
 
 // defaultReservationTimeout is the fallback deadline stamped on a new
@@ -105,6 +106,9 @@ func (s *Server) handleReservationCreate(w http.ResponseWriter, r *http.Request)
 		writeError(w, status, *errResp)
 		return
 	}
+	if req.IsAmount() {
+		req.ChunkType = cadv.Spec.ClusterType
+	}
 
 	// Idempotency key from header. Clients SHOULD send it; if they don't,
 	// the Broker mints one and the call becomes effectively non-idempotent.
@@ -142,31 +146,56 @@ func (s *Server) handleReservationCreate(w http.ResponseWriter, r *http.Request)
 		return
 	}
 
-	// Atomically check-and-reserve the requested chunks. Must happen before
-	// creating the Reservation object: this is the sole capacity gate now
-	// (see reserveChunks's doc comment for why it replaced a plain read
-	// followed by a later, separate increment).
-	reserved, available, err := s.reserveChunks(ctx, cadv.Name, req.ChunkCount)
-	if err != nil {
-		s.log.Error(err, "reserve chunks failed", "clusterId", cadv.Name, "requestId", requestID)
-		writeError(w, http.StatusInternalServerError, ErrorResponse{
-			Code: ErrCodeInternalError, Message: "reservation capacity update failed",
-			RequestID: requestID,
-		})
-		return
-	}
-	if !reserved {
-		writeError(w, http.StatusConflict, ErrorResponse{
-			Code: ErrCodeInsufficientCapacity,
-			Message: fmt.Sprintf("provider %q has %d chunks available; %d requested",
-				req.ProviderClusterID, available, req.ChunkCount),
-			Details: map[string]any{
-				"available": available,
-				"requested": req.ChunkCount,
-			},
-			RequestID: requestID,
-		})
-		return
+	// Atomically check-and-reserve the requested chunks, or the requested
+	// amount. Must happen before creating the Reservation object: this is the
+	// sole capacity gate (see reserveChunks's doc comment for why it replaced a
+	// plain read followed by a later, separate increment).
+	if req.IsAmount() {
+		ok, free, err := s.reserveAmount(ctx, cadv.Name, req.Resources)
+		if err != nil {
+			s.log.Error(err, "reserve amount failed", "clusterId", cadv.Name, "requestId", requestID)
+			writeError(w, http.StatusInternalServerError, ErrorResponse{
+				Code: ErrCodeInternalError, Message: "reservation capacity update failed",
+				RequestID: requestID,
+			})
+			return
+		}
+		if !ok {
+			writeError(w, http.StatusConflict, ErrorResponse{
+				Code: ErrCodeInsufficientCapacity,
+				Message: fmt.Sprintf("provider %q has %s free; %s requested",
+					req.ProviderClusterID, chunk.Format(free), chunk.Format(req.Resources)),
+				Details: map[string]any{
+					"available": free,
+					"requested": req.Resources,
+				},
+				RequestID: requestID,
+			})
+			return
+		}
+	} else {
+		reserved, available, err := s.reserveChunks(ctx, cadv.Name, req.ChunkCount)
+		if err != nil {
+			s.log.Error(err, "reserve chunks failed", "clusterId", cadv.Name, "requestId", requestID)
+			writeError(w, http.StatusInternalServerError, ErrorResponse{
+				Code: ErrCodeInternalError, Message: "reservation capacity update failed",
+				RequestID: requestID,
+			})
+			return
+		}
+		if !reserved {
+			writeError(w, http.StatusConflict, ErrorResponse{
+				Code: ErrCodeInsufficientCapacity,
+				Message: fmt.Sprintf("provider %q has %d chunks available; %d requested",
+					req.ProviderClusterID, available, req.ChunkCount),
+				Details: map[string]any{
+					"available": available,
+					"requested": req.ChunkCount,
+				},
+				RequestID: requestID,
+			})
+			return
+		}
 	}
 
 	// Re-run the sizer over the provider's advertised capacity to recover
@@ -174,6 +203,9 @@ func (s *Server) handleReservationCreate(w http.ResponseWriter, r *http.Request)
 	// so we cannot leave it nil — it is also exactly the value Cluster
 	// Autoscaler needs to build node templates.
 	perChunk := s.perChunkResources(cadv)
+	if req.IsAmount() {
+		perChunk = req.Resources
+	}
 
 	resv := buildReservation(resName, s.namespace, &req, consumerID,
 		consumerEntry.LiqoClusterID, cadv.Spec.LiqoClusterID, perChunk)
@@ -182,8 +214,8 @@ func (s *Server) handleReservationCreate(w http.ResponseWriter, r *http.Request)
 		// Roll back the chunks we just reserved — otherwise they stay marked
 		// reserved with no Reservation object behind them, permanently
 		// shrinking this provider's real availability.
-		if rbErr := s.adjustReservedChunks(ctx, cadv.Name, -req.ChunkCount); rbErr != nil {
-			s.log.Error(rbErr, "rollback reservedChunks after failed create also failed",
+		if rbErr := s.giveBack(ctx, cadv.Name, &resv.Spec); rbErr != nil {
+			s.log.Error(rbErr, "rollback reserved capacity after failed create also failed",
 				"clusterId", cadv.Name, "requestId", requestID)
 		}
 		writeError(w, http.StatusInternalServerError, ErrorResponse{
@@ -207,6 +239,9 @@ func (s *Server) handleReservationCreate(w http.ResponseWriter, r *http.Request)
 // validators would also catch. Surfaced as 400s so misuse is visible
 // without an etcd round trip.
 func validateReservationRequest(req *ReservationRequest) error {
+	if req.IsAmount() {
+		return validateAmountRequest(req)
+	}
 	switch {
 	case req.ProviderClusterID == "":
 		return errors.New("providerClusterId is required")
@@ -232,6 +267,27 @@ func validateReservationRequest(req *ReservationRequest) error {
 				req.NodeGroupID, want)
 		}
 	}
+	return nil
+}
+
+// validateAmountRequest checks an Amount request and normalises ChunkCount to
+// 1: an amount is always one virtual node.
+func validateAmountRequest(req *ReservationRequest) error {
+	switch {
+	case req.ProviderClusterID == "":
+		return errors.New("providerClusterId is required")
+	case req.ChunkCount < 0 || req.ChunkCount > 1:
+		return fmt.Errorf("chunkCount must be 0 or 1 with resources (an amount is one node), got %d", req.ChunkCount)
+	case req.NodeGroupID != "":
+		return errors.New("nodeGroupId must be empty with resources: an amount is not part of a node group")
+	}
+	if req.ChunkType != "" && req.ChunkType != brokerv1alpha1.ChunkTypeStandard && req.ChunkType != brokerv1alpha1.ChunkTypeGPU {
+		return fmt.Errorf("unknown chunkType %q", req.ChunkType)
+	}
+	if err := chunk.ValidateAmount(req.Resources); err != nil {
+		return err
+	}
+	req.ChunkCount = 1
 	return nil
 }
 
@@ -268,7 +324,7 @@ func (s *Server) findAdvertisement(
 			Message: "advertisement read failed",
 		}, http.StatusInternalServerError
 	}
-	if cadv.Spec.ClusterType != chunkType {
+	if chunkType != "" && cadv.Spec.ClusterType != chunkType {
 		return nil, &ErrorResponse{
 			Code: ErrCodeNotFound,
 			Message: fmt.Sprintf("provider %q advertises chunkType %q, requested %q",
@@ -305,6 +361,7 @@ func buildReservation(
 			ChunkCount:            req.ChunkCount,
 			ChunkType:             req.ChunkType,
 			Resources:             perChunk,
+			Amount:                req.IsAmount(),
 			Namespaces:            req.Namespaces,
 		},
 	}
@@ -317,6 +374,63 @@ func buildReservation(
 // should validate against zero before calling Create on the CR.
 func (s *Server) perChunkResources(cadv *brokerv1alpha1.ClusterAdvertisement) corev1.ResourceList {
 	return perChunkResourcesWith(s.sizer, cadv)
+}
+
+// reserveAmount atomically checks and reserves an amount against the named
+// ClusterAdvertisement, retrying on optimistic-concurrency conflicts like
+// reserveChunks. ok=false returns what was free when the check committed.
+func (s *Server) reserveAmount(
+	ctx context.Context, clusterID string, amount corev1.ResourceList,
+) (ok bool, free corev1.ResourceList, err error) {
+	for attempt := 0; attempt < 3; attempt++ {
+		cadv := &brokerv1alpha1.ClusterAdvertisement{}
+		if err := s.client.Get(ctx, types.NamespacedName{Name: clusterID, Namespace: s.namespace}, cadv); err != nil {
+			return false, nil, err
+		}
+		free := chunk.FreeForAmount(s.sizer, cadv)
+		if !chunk.Fits(free, amount) {
+			return false, free, nil
+		}
+		chunk.ApplyAmount(s.sizer, cadv, amount, +1)
+		if err := s.client.Status().Update(ctx, cadv); err != nil {
+			if apierrors.IsConflict(err) {
+				continue
+			}
+			return false, nil, err
+		}
+		return true, nil, nil
+	}
+	return false, nil, errors.New("exhausted conflict retries reserving an amount")
+}
+
+// adjustReservedAmount removes amount from the provider's ReservedResources
+// (release or rollback), recomputing TotalChunks and AvailableChunks.
+// Conflict-retry up to 3 times like adjustReservedChunks.
+func (s *Server) adjustReservedAmount(ctx context.Context, clusterID string, amount corev1.ResourceList) error {
+	for attempt := 0; attempt < 3; attempt++ {
+		cadv := &brokerv1alpha1.ClusterAdvertisement{}
+		if err := s.client.Get(ctx, types.NamespacedName{Name: clusterID, Namespace: s.namespace}, cadv); err != nil {
+			return err
+		}
+		chunk.ApplyAmount(s.sizer, cadv, amount, -1)
+		if err := s.client.Status().Update(ctx, cadv); err != nil {
+			if apierrors.IsConflict(err) {
+				continue
+			}
+			return err
+		}
+		return nil
+	}
+	return errors.New("exhausted conflict retries releasing an amount")
+}
+
+// giveBack returns a reservation's capacity to its provider: its amount for an
+// Amount reservation, its chunks otherwise.
+func (s *Server) giveBack(ctx context.Context, clusterID string, spec *brokerv1alpha1.ReservationSpec) error {
+	if spec.Amount {
+		return s.adjustReservedAmount(ctx, clusterID, spec.Resources)
+	}
+	return s.adjustReservedChunks(ctx, clusterID, -spec.ChunkCount)
 }
 
 // initReservationStatus stamps Phase=Pending plus CreatedAt/ExpiresAt so
@@ -413,7 +527,11 @@ func sameReservationRequest(
 		spec.ProviderClusterID != req.ProviderClusterID ||
 		spec.ProviderLiqoClusterID != providerLiqoID ||
 		spec.ChunkCount != req.ChunkCount ||
-		spec.ChunkType != req.ChunkType {
+		spec.ChunkType != req.ChunkType ||
+		spec.Amount != req.IsAmount() {
+		return false
+	}
+	if spec.Amount && !sameResources(spec.Resources, req.Resources) {
 		return false
 	}
 	if len(spec.Namespaces) != len(req.Namespaces) {
@@ -421,6 +539,20 @@ func sameReservationRequest(
 	}
 	for i := range spec.Namespaces {
 		if spec.Namespaces[i] != req.Namespaces[i] {
+			return false
+		}
+	}
+	return true
+}
+
+// sameResources reports whether two resource lists hold the same quantities.
+func sameResources(a, b corev1.ResourceList) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for name, qa := range a {
+		qb, ok := b[name]
+		if !ok || qa.Cmp(qb) != 0 {
 			return false
 		}
 	}
@@ -598,9 +730,9 @@ func (s *Server) handleReservationRelease(w http.ResponseWriter, r *http.Request
 		return
 	}
 
-	if err := s.adjustReservedChunks(ctx, resv.Spec.ProviderClusterID, -resv.Spec.ChunkCount); err != nil {
-		s.log.Error(err, "decrement reservedChunks failed",
-			"clusterId", resv.Spec.ProviderClusterID,
+	if err := s.giveBack(ctx, resv.Spec.ProviderClusterID, &resv.Spec); err != nil {
+		s.log.Error(err, "give back reserved capacity failed",
+			"clusterId", resv.Spec.ProviderClusterID, "amount", resv.Spec.Amount,
 			"delta", -resv.Spec.ChunkCount, "requestId", requestID)
 	} else {
 		// Stamp the idempotency marker so the reconciler's handleTerminal
@@ -678,6 +810,7 @@ func reservationResponseFromCR(r *brokerv1alpha1.Reservation) ReservationRespons
 		ChunkCount:            r.Spec.ChunkCount,
 		ChunkType:             r.Spec.ChunkType,
 		Resources:             r.Spec.Resources,
+		Amount:                r.Spec.Amount,
 		VirtualNodeNames:      r.Status.VirtualNodeNames,
 		Message:               r.Status.Message,
 	}

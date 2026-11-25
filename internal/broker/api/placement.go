@@ -208,14 +208,5 @@ func nodeGroupView(
 // ClusterType as computed by sizer, falling back to the first group the sizer
 // produced, or an empty list when it produced none.
 func perChunkResourcesWith(sizer chunk.Sizer, cadv *brokerv1alpha1.ClusterAdvertisement) corev1.ResourceList {
-	results := sizer.Size(cadv.Spec.Resources.Allocatable)
-	for _, r := range results {
-		if r.Type == cadv.Spec.ClusterType {
-			return r.PerChunk
-		}
-	}
-	if len(results) > 0 {
-		return results[0].PerChunk
-	}
-	return corev1.ResourceList{}
+	return chunk.PerChunkFor(sizer, cadv)
 }

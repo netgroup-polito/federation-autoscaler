@@ -34,7 +34,8 @@ func FromReservations(list []brokerapi.ReservationResponse) (map[string]int32, m
 	own := map[string]int32{}
 	inFlight := map[string]bool{}
 	for _, r := range list {
-		if r.ProviderClusterID == "" {
+		if r.ProviderClusterID == "" || r.Amount {
+			// An Amount reservation is not part of a node group.
 			continue
 		}
 		if brokerapi.ReservationHoldsChunk(r.Status) {

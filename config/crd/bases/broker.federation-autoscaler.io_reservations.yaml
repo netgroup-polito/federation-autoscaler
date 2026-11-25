@@ -66,6 +66,13 @@ spec:
           spec:
             description: spec is the requested reservation (written once by the Broker).
             properties:
+              amount:
+                description: |-
+                  Amount marks a reservation of any CPU and memory amount: one virtual
+                  node of exactly Resources, instead of one fixed-size chunk. The
+                  provider's Status.ReservedResources accounts for it, not ReservedChunks,
+                  and it never appears in a Cluster Autoscaler node group.
+                type: boolean
               chunkCount:
                 description: |-
                   ChunkCount is the number of chunks reserved. A Reservation may span
@@ -125,6 +132,7 @@ spec:
                   Resources is the per-chunk capacity at the moment the reservation was
                   made. Surfaced to Cluster Autoscaler so it can build correct node
                   templates. Each value is one chunk's worth (not ChunkCount × chunk).
+                  For an Amount reservation it is the requested amount itself.
                 type: object
             required:
             - chunkCount

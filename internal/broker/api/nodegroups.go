@@ -467,7 +467,9 @@ func (s *Server) ownByProvider(ctx context.Context, consumerID string) (map[stri
 	inFlight := map[string]bool{}
 	for i := range list.Items {
 		r := &list.Items[i]
-		if r.Spec.ConsumerClusterID != consumerID {
+		if r.Spec.ConsumerClusterID != consumerID || r.Spec.Amount {
+			// An Amount reservation is not part of a node group: Cluster
+			// Autoscaler never sees it.
 			continue
 		}
 		if ReservationHoldsChunk(r.Status.Phase) {
