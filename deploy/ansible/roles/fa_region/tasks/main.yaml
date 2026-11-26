@@ -86,3 +86,15 @@
           kubectl --kubeconfig {{ cluster_kubeconfig }} label node {{ item.key }} \
             federation-autoscaler.io/site={{ item.value }} --overwrite
       changed_when: true
+
+    # A booking with a latency limit only goes to a site with coordinates
+    # within that limit (estimated from the distance to the consumer).
+    - name: Annotate the region's nodes with their site's coordinates
+      loop: "{{ fa_edge_sites | dict2items }}"
+      when: item.value in fa_edge_site_coordinates
+      ansible.builtin.shell:
+        cmd: |
+          kubectl --kubeconfig {{ cluster_kubeconfig }} annotate node {{ item.key }} --overwrite \
+            federation-autoscaler.io/latitude={{ fa_edge_site_coordinates[item.value].split(',')[0] | trim }} \
+            federation-autoscaler.io/longitude={{ fa_edge_site_coordinates[item.value].split(',')[1] | trim }}
+      changed_when: true

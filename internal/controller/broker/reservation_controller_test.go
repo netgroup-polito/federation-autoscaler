@@ -485,6 +485,47 @@ var _ = Describe("Reservation Controller", func() {
 		Expect(again.Status.ExpiresAt.Time).To(BeTemporally("==", stamped.Time))
 	})
 
+	It("keeps a booking without a duration forever when there is no default expiry, and never expires it", func() {
+		r := &ReservationReconciler{Client: k8sClient, Scheme: k8sClient.Scheme(), NoDefaultExpiry: true}
+		for range 2 { // the second pass must change nothing
+			_, err := r.Reconcile(ctx, reconcile.Request{NamespacedName: key})
+			Expect(err).NotTo(HaveOccurred())
+		}
+		updated := &brokerv1alpha1.Reservation{}
+		Expect(k8sClient.Get(ctx, key, updated)).To(Succeed())
+		Expect(updated.Status.CreatedAt).NotTo(BeNil())
+		Expect(updated.Status.ExpiresAt).To(BeNil())
+		Expect(updated.Status.Phase).NotTo(Equal(brokerv1alpha1.ReservationPhaseExpired))
+	})
+
+	It("backfills ExpiresAt from the booking's own duration, ahead of the default", func() {
+		amtKey := types.NamespacedName{Name: "resv-duration", Namespace: "default"}
+		resv := &brokerv1alpha1.Reservation{
+			ObjectMeta: metav1.ObjectMeta{Name: amtKey.Name, Namespace: amtKey.Namespace},
+			Spec: brokerv1alpha1.ReservationSpec{
+				ConsumerClusterID: "consumer-test", ConsumerLiqoClusterID: "liqo-consumer-test",
+				ProviderClusterID: providerName, ProviderLiqoClusterID: "liqo-provider-test",
+				ChunkCount: 1, ChunkType: brokerv1alpha1.ChunkTypeStandard,
+				Resources: corev1.ResourceList{
+					corev1.ResourceCPU:    resource.MustParse("1"),
+					corev1.ResourceMemory: resource.MustParse("1Gi"),
+				},
+				Amount: true, DurationSeconds: 7200,
+			},
+		}
+		Expect(k8sClient.Create(ctx, resv)).To(Succeed())
+
+		r := &ReservationReconciler{Client: k8sClient, Scheme: k8sClient.Scheme(), NoDefaultExpiry: true}
+		_, err := r.Reconcile(ctx, reconcile.Request{NamespacedName: amtKey})
+		Expect(err).NotTo(HaveOccurred())
+
+		updated := &brokerv1alpha1.Reservation{}
+		Expect(k8sClient.Get(ctx, amtKey, updated)).To(Succeed())
+		Expect(updated.Status.ExpiresAt).NotTo(BeNil())
+		want := updated.CreationTimestamp.Add(2 * time.Hour)
+		Expect(updated.Status.ExpiresAt.Time).To(BeTemporally("~", want, 2*time.Second))
+	})
+
 	It("hard delete (kubectl delete reservation) credits reserved chunks back via the finalizer", func() {
 		By("seeding the provider's ReservedChunks budget")
 		cadv := &brokerv1alpha1.ClusterAdvertisement{}

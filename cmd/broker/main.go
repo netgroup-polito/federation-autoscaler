@@ -96,7 +96,9 @@ func main() {
 	flag.DurationVar(&reservationTimeout, "reservation-timeout", 24*time.Hour,
 		"Deadline stamped on a new Reservation's ExpiresAt. A non-renewed reservation past this "+
 			"is moved to Expired. v1 has no renewal, so keep this longer than any workload that "+
-			"holds borrowed capacity (the old 15m value force-expired active reservations).")
+			"holds borrowed capacity (the old 15m value force-expired active reservations). "+
+			"A booking's own durationSeconds overrides it. 0 means a booking without a duration "+
+			"never expires (region orchestrator).")
 	flag.DurationVar(&gkResyncInterval, "gk-resync-interval", brokercontroller.DefaultGKResyncInterval,
 		"How often a Reservation parked in GeneratingKubeconfig re-checks for the shared "+
 			"peering-user Secret. Only affects FAN-OUT: the reservation that issued the "+
@@ -140,6 +142,7 @@ func main() {
 		Client:             mgr.GetClient(),
 		Scheme:             mgr.GetScheme(),
 		ReservationTimeout: reservationTimeout,
+		NoDefaultExpiry:    reservationTimeout == 0,
 		GKResyncInterval:   gkResyncInterval,
 	}).SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "unable to create controller", "controller", "Reservation")
@@ -203,6 +206,7 @@ func main() {
 		Catalog:              catalogWriter,
 		CatalogWriteDisabled: !catalogWrite,
 		Sites:                sitePicker,
+		NoDefaultExpiry:      reservationTimeout == 0,
 	})
 	if err != nil {
 		setupLog.Error(err, "unable to build broker api server")

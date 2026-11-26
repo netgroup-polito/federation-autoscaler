@@ -68,11 +68,17 @@ const (
 	ErrCodeConflict             ErrorCode = "Conflict"
 	ErrCodeReservationExpired   ErrorCode = "ReservationExpired"
 	ErrCodeInsufficientCapacity ErrorCode = "InsufficientCapacity"
-	ErrCodeTooManyRequests      ErrorCode = "TooManyRequests"
-	ErrCodeInternalError        ErrorCode = "InternalError"
-	ErrCodeUpstreamError        ErrorCode = "UpstreamError"
-	ErrCodeServiceUnavailable   ErrorCode = "ServiceUnavailable"
-	ErrCodeTimeout              ErrorCode = "Timeout"
+	// ErrCodeLatencyLimitNotMet: a region orchestrator has room, but no edge
+	// site within the booking's latency limit.
+	ErrCodeLatencyLimitNotMet ErrorCode = "LatencyLimitNotMet"
+	// ErrCodeOfferExpired: the booking was made on an offer that has expired
+	// (its offerExpiresAt has passed); read the catalog again.
+	ErrCodeOfferExpired       ErrorCode = "OfferExpired"
+	ErrCodeTooManyRequests    ErrorCode = "TooManyRequests"
+	ErrCodeInternalError      ErrorCode = "InternalError"
+	ErrCodeUpstreamError      ErrorCode = "UpstreamError"
+	ErrCodeServiceUnavailable ErrorCode = "ServiceUnavailable"
+	ErrCodeTimeout            ErrorCode = "Timeout"
 )
 
 // ErrorResponse is the body returned with every 4xx/5xx response.
@@ -475,6 +481,34 @@ type ReservationRequest struct {
 	// reservation. ChunkCount is then 0 or 1, ChunkType is optional (the
 	// provider's type is used) and NodeGroupID must be empty.
 	Resources corev1.ResourceList `json:"resources,omitempty"`
+
+	// MaxLatencyMs, when > 0, is a hard limit on the estimated round-trip
+	// latency between the consumer and the edge site that serves the booking.
+	// Checked by a region orchestrator (edge sites on), from ConsumerLocation
+	// and each site's coordinates; refused with LatencyLimitNotMet when no site
+	// is close enough. Requires ConsumerLocation. Ignored by the central broker,
+	// whose placement already handles latency.
+	MaxLatencyMs float64 `json:"maxLatencyMs,omitempty"`
+
+	// ConsumerLocation is where the consumer is. Required with MaxLatencyMs.
+	ConsumerLocation *Coordinates `json:"consumerLocation,omitempty"`
+
+	// DurationSeconds, when > 0, is how long the booking is kept: it expires
+	// that long after creation (the answer's expiresAt). 0: the Broker's
+	// default (24 h on the central broker; never on a region orchestrator).
+	DurationSeconds int64 `json:"durationSeconds,omitempty"`
+
+	// OfferExpiresAt, when set, is when the catalog offer this booking was
+	// chosen from expires (its updatedAt plus its ttlSeconds). Past it, the
+	// booking is refused with OfferExpired so the consumer reads the catalog
+	// again instead of booking on stale terms.
+	OfferExpiresAt *metav1.Time `json:"offerExpiresAt,omitempty"`
+}
+
+// Coordinates is a point in decimal degrees.
+type Coordinates struct {
+	Latitude  float64 `json:"latitude"`
+	Longitude float64 `json:"longitude"`
 }
 
 // IsAmount reports whether the request asks for an amount, not a chunk.

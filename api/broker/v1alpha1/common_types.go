@@ -21,6 +21,12 @@ limitations under the License.
 
 package v1alpha1
 
+import (
+	"time"
+
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+)
+
 // ChunksReleasedAnnotation marks a Reservation whose ReservedChunks
 // contribution has already been credited back to the provider's
 // ClusterAdvertisement.Status.ReservedChunks. Set by whichever code
@@ -57,6 +63,21 @@ func MarkChunksReleased(resv *Reservation) {
 		resv.Annotations = map[string]string{}
 	}
 	resv.Annotations[ChunksReleasedAnnotation] = chunksReleasedAnnotationValue
+}
+
+// ExpiryOf returns when a Reservation created at created expires: after its
+// own DurationSeconds when set, otherwise after defaultTimeout. It returns nil
+// (never expires) when neither is set, i.e. defaultTimeout <= 0.
+func ExpiryOf(created time.Time, spec *ReservationSpec, defaultTimeout time.Duration) *metav1.Time {
+	d := defaultTimeout
+	if spec.DurationSeconds > 0 {
+		d = time.Duration(spec.DurationSeconds) * time.Second
+	}
+	if d <= 0 {
+		return nil
+	}
+	t := metav1.NewTime(created.Add(d))
+	return &t
 }
 
 // ChunkType identifies the category of a capacity chunk.

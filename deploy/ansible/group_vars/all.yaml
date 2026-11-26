@@ -153,6 +153,12 @@ fa_region_node_port: 30443
 #   fa_edge_sites: { provider-3: s1, provider-3-edge: s2 }
 fa_edge_sites: {}
 
+# Coordinates of each edge site, per provider host: site ID -> "lat,lon"
+# (decimal degrees), written as node annotations. A booking with a latency
+# limit only goes to a site with coordinates within it, e.g.
+#   fa_edge_site_coordinates: { s1: "44.39,7.55" }
+fa_edge_site_coordinates: {}
+
 # Where to drop the fetched kubeconfigs on the control host. Each cluster
 # gets ~/.kube/<cluster_id>.yaml. These are what `kubectl --kubeconfig`
 # expects during the demo's scale-up / scale-down narration.

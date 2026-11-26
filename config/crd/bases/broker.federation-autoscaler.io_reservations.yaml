@@ -101,6 +101,14 @@ spec:
                   used when generating the peering-user kubeconfig on the provider side.
                 minLength: 1
                 type: string
+              durationSeconds:
+                description: |-
+                  DurationSeconds is how long the consumer asked to keep the booking.
+                  When > 0 the booking expires DurationSeconds after creation; 0 means the
+                  Broker's default (--reservation-timeout; 0 there means never).
+                format: int64
+                minimum: 0
+                type: integer
               namespaces:
                 description: |-
                   Namespaces is the set of namespaces the consumer wants to offload on the

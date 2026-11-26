@@ -107,6 +107,11 @@ type ServerOptions struct {
 	// offers). The zero value means the Server writes, as before.
 	CatalogWriteDisabled bool
 
+	// NoDefaultExpiry makes a booking without its own duration permanent
+	// (--reservation-timeout=0, set by the region orchestrator overlay). The
+	// zero value keeps ReservationTimeout as the default deadline.
+	NoDefaultExpiry bool
+
 	// Sites, when set, makes this Server a region orchestrator that places
 	// every booking on one edge site (M3). Nil: no site choice (central broker).
 	Sites *sites.Picker
@@ -133,6 +138,9 @@ func NewServer(opts ServerOptions) *Server {
 	resvTimeout := opts.ReservationTimeout
 	if resvTimeout <= 0 {
 		resvTimeout = defaultReservationTimeout
+	}
+	if opts.NoDefaultExpiry {
+		resvTimeout = 0 // a booking without its own duration never expires
 	}
 	return &Server{
 		log:                  log,

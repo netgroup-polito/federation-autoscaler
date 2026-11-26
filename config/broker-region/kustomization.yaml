@@ -14,6 +14,10 @@
 # (--site-label). Label the region's nodes with their site (Ansible:
 # fa_edge_sites). Use neutral site IDs (e.g. "s1"): the consumer's virtual node
 # carries the selector, so its value is visible to the consumer's cluster.
+#
+# Duration: a booking lasts its own durationSeconds; without one it is
+# permanent here (--reservation-timeout=0, appended after the base's 24h; the
+# last value wins).
 apiVersion: kustomize.config.k8s.io/v1beta1
 kind: Kustomization
 
@@ -50,3 +54,10 @@ patches:
     - op: add
       path: /spec/template/spec/containers/0/args/-
       value: --site-label=federation-autoscaler.io/site
+- target:
+    kind: Deployment
+    name: broker
+  patch: |-
+    - op: add
+      path: /spec/template/spec/containers/0/args/-
+      value: --reservation-timeout=0

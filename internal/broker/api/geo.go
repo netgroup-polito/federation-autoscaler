@@ -16,32 +16,16 @@ limitations under the License.
 
 package api
 
-import "math"
-
-// earthRadiusKm is the mean Earth radius used by the Haversine formula.
-const earthRadiusKm = 6371.0
+import "github.com/netgroup-polito/federation-autoscaler/internal/broker/geo"
 
 // HaversineKm returns the great-circle distance, in kilometres, between two
-// points given in decimal degrees. For the latency strategy the Broker ranks
-// providers by this distance to build the top-N nearest SHORTLIST (it can be
-// computed from advertised coordinates alone — no probing, no Broker dial-out).
-// The Consumer Agent then UDP-probes the shortlist to make the final,
-// measured-RTT choice (applyLatencyTopN + internal/agent/consumer/latency);
-// distance is the coarse pre-filter, real RTT is the tiebreak.
+// points given in decimal degrees (see internal/broker/geo). For the latency
+// strategy the Broker ranks providers by this distance to build the top-N
+// nearest SHORTLIST (computed from advertised coordinates alone, no probing,
+// no Broker dial-out); the Consumer Agent then UDP-probes the shortlist.
 //
-// Exported for the ConsumerChoice end-to-end suite (federation-tests/consumerchoice), which
-// judges proximity requests afterwards with the same figure the Latency policy
-// ranks on rather than a second implementation of it. The LLM itself is never
-// given a distance: it receives raw coordinates and works proximity out itself.
+// Exported for the ConsumerChoice end-to-end suite (federation-tests/consumerchoice),
+// which judges proximity requests with the same figure the Latency policy ranks on.
 func HaversineKm(lat1, lon1, lat2, lon2 float64) float64 {
-	toRad := func(deg float64) float64 { return deg * math.Pi / 180.0 }
-
-	phi1, phi2 := toRad(lat1), toRad(lat2)
-	dPhi := toRad(lat2 - lat1)
-	dLambda := toRad(lon2 - lon1)
-
-	a := math.Sin(dPhi/2)*math.Sin(dPhi/2) +
-		math.Cos(phi1)*math.Cos(phi2)*math.Sin(dLambda/2)*math.Sin(dLambda/2)
-	c := 2 * math.Atan2(math.Sqrt(a), math.Sqrt(1-a))
-	return earthRadiusKm * c
+	return geo.HaversineKm(lat1, lon1, lat2, lon2)
 }

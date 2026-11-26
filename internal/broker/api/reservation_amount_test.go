@@ -22,6 +22,7 @@ import (
 	"encoding/json"
 	"io"
 	"net/http"
+	"time"
 
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
@@ -204,6 +205,69 @@ var _ = Describe("Amount reservations", Ordered, func() {
 		Expect(apierrors.IsNotFound(k8sClient.Get(suiteCtx,
 			types.NamespacedName{Name: "amt-unavailable", Namespace: testNamespace},
 			&brokerv1alpha1.Reservation{}))).To(BeTrue())
+	})
+
+	It("keeps a booking for its own duration, and refuses a negative one", func() {
+		resp := reserve("amt-duration", ReservationRequest{
+			ProviderClusterID: amtProvider, Resources: amount("1", "1Gi"), DurationSeconds: 3600,
+		})
+		Expect(resp.Status).To(Equal(http.StatusCreated), resp.Describe())
+		var body ReservationResponse
+		Expect(resp.DecodeInto(&body)).To(Succeed())
+		Expect(body.ExpiresAt).NotTo(BeNil())
+		Expect(body.ExpiresAt.Sub(body.CreatedAt.Time)).To(Equal(time.Hour))
+		authClusterID = amtConsumer
+		Expect(doJSON(http.MethodDelete, "/api/v1/reservations/amt-duration", nil).Status).To(Equal(http.StatusAccepted))
+
+		resp = reserve("amt-negative", ReservationRequest{
+			ProviderClusterID: amtProvider, Resources: amount("1", "1Gi"), DurationSeconds: -1,
+		})
+		Expect(resp.Status).To(Equal(http.StatusBadRequest), resp.Describe())
+	})
+
+	It("keeps a booking without a duration forever when the broker has no default", func() {
+		saved := testServer.reservationTimeout
+		testServer.reservationTimeout = 0 // --reservation-timeout=0 (region orchestrator)
+		DeferCleanup(func() { testServer.reservationTimeout = saved })
+
+		resp := reserve("amt-forever", ReservationRequest{
+			ProviderClusterID: amtProvider, Resources: amount("1", "1Gi"),
+		})
+		Expect(resp.Status).To(Equal(http.StatusCreated), resp.Describe())
+		var body ReservationResponse
+		Expect(resp.DecodeInto(&body)).To(Succeed())
+		Expect(body.ExpiresAt).To(BeNil())
+		authClusterID = amtConsumer
+		Expect(doJSON(http.MethodDelete, "/api/v1/reservations/amt-forever", nil).Status).To(Equal(http.StatusAccepted))
+	})
+
+	It("refuses a new booking on an expired offer, but still answers a retry of an existing one", func() {
+		past := metav1.NewTime(time.Now().Add(-time.Minute))
+		future := metav1.NewTime(time.Now().Add(time.Minute))
+
+		By("an expired offer: OfferExpired, nothing reserved")
+		before := cadvStatus()
+		resp := reserve("amt-stale", ReservationRequest{
+			ProviderClusterID: amtProvider, Resources: amount("1", "1Gi"), OfferExpiresAt: &past,
+		})
+		Expect(resp.Status).To(Equal(http.StatusConflict), resp.Describe())
+		Expect(string(resp.Body)).To(ContainSubstring(string(ErrCodeOfferExpired)))
+		Expect(cadvStatus().ReservedResources).To(Equal(before.ReservedResources))
+
+		By("a fresh offer: accepted")
+		resp = reserve("amt-fresh", ReservationRequest{
+			ProviderClusterID: amtProvider, Resources: amount("1", "1Gi"), OfferExpiresAt: &future,
+		})
+		Expect(resp.Status).To(Equal(http.StatusCreated), resp.Describe())
+
+		By("the same booking retried after its offer expired: the existing booking, not a refusal")
+		resp = reserve("amt-fresh", ReservationRequest{
+			ProviderClusterID: amtProvider, Resources: amount("1", "1Gi"), OfferExpiresAt: &past,
+		})
+		Expect(resp.Status).To(Equal(http.StatusOK), resp.Describe())
+
+		authClusterID = amtConsumer
+		Expect(doJSON(http.MethodDelete, "/api/v1/reservations/amt-fresh", nil).Status).To(Equal(http.StatusAccepted))
 	})
 
 	It("keeps an amount out of the consumer's node groups", func() {

@@ -86,7 +86,7 @@ func TestPickPrefersTheSiteWithMostFreeCPU(t *testing.T) {
 		node("a1", "asti", "8", "16Gi", true, true),
 		booking("r1", "asti", "6", "4Gi", brokerv1alpha1.ReservationPhasePeered), // asti: 2 cpu left
 	)
-	site, err := p.Pick(context.Background(), rl("1", "1Gi"))
+	site, _, err := p.Pick(context.Background(), rl("1", "1Gi"), nil)
 	if err != nil || site != "cuneo" {
 		t.Fatalf("Pick = %q, %v; want cuneo", site, err)
 	}
@@ -98,8 +98,8 @@ func TestPickNeedsTheWholeBookingInOneSite(t *testing.T) {
 		node("a1", "asti", "2", "4Gi", true, true),
 	)
 	// 3 cpu fit in the region (4 cpu) but in no single site.
-	site, err := p.Pick(context.Background(), rl("3", "1Gi"))
-	if err != nil || site != "" {
+	site, reason, err := p.Pick(context.Background(), rl("3", "1Gi"), nil)
+	if err != nil || site != "" || reason != NoRoom {
 		t.Fatalf("Pick = %q, %v; want no site", site, err)
 	}
 }
@@ -120,7 +120,41 @@ func TestPickSkipsUnusableNodesAndCountsOnlyActiveBookings(t *testing.T) {
 	if len(free) != 1 || cuneo.Cpu().String() != "4" {
 		t.Fatalf("free = %v; want only cuneo with 4 cpu", free)
 	}
-	if site, _ := p.Pick(context.Background(), rl("5", "1Gi")); site != "" {
+	if site, _, _ := p.Pick(context.Background(), rl("5", "1Gi"), nil); site != "" {
 		t.Fatalf("Pick(5 cpu) = %q; want no site", site)
+	}
+}
+
+// located adds site coordinates to a node.
+func located(n *corev1.Node, lat, lon string) *corev1.Node {
+	n.Annotations = map[string]string{LatitudeAnnotation: lat, LongitudeAnnotation: lon}
+	return n
+}
+
+func TestPickHonoursTheLatencyLimit(t *testing.T) {
+	// Consumer in Turin. Cuneo is about 75 km away (about 0.75 ms
+	// estimated), Bari about 800 km (about 8 ms).
+	turin := &LatencyLimit{Latitude: 45.07, Longitude: 7.69, MaxMs: 2}
+	p := picker(t,
+		located(node("c1", "cuneo", "2", "4Gi", true, true), "44.39", "7.55"),
+		located(node("b1", "bari", "8", "16Gi", true, true), "41.12", "16.87"),
+		node("x1", "nowhere", "16", "32Gi", true, true), // no coordinates
+	)
+	ctx := context.Background()
+
+	// Without a limit the roomiest site wins; with it, only Cuneo qualifies.
+	if site, _, _ := p.Pick(ctx, rl("1", "1Gi"), nil); site != "nowhere" {
+		t.Fatalf("no limit: Pick = %q; want nowhere", site)
+	}
+	if site, reason, _ := p.Pick(ctx, rl("1", "1Gi"), turin); site != "cuneo" || reason != Found {
+		t.Fatalf("with limit: Pick = %q (%v); want cuneo", site, reason)
+	}
+	// Room only far away: TooFar, not NoRoom.
+	if site, reason, _ := p.Pick(ctx, rl("4", "1Gi"), turin); site != "" || reason != TooFar {
+		t.Fatalf("room only far away: Pick = %q (%v); want TooFar", site, reason)
+	}
+	// No room anywhere: NoRoom.
+	if _, reason, _ := p.Pick(ctx, rl("64", "1Gi"), turin); reason != NoRoom {
+		t.Fatalf("no room: reason = %v; want NoRoom", reason)
 	}
 }

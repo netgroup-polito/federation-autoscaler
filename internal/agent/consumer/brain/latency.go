@@ -21,19 +21,14 @@ import (
 
 	autoscalingv1alpha1 "github.com/netgroup-polito/federation-autoscaler/api/autoscaling/v1alpha1"
 	brokerapi "github.com/netgroup-polito/federation-autoscaler/internal/broker/api"
+	"github.com/netgroup-polito/federation-autoscaler/internal/broker/geo"
 	"github.com/netgroup-polito/federation-autoscaler/internal/catalog"
 )
 
-// fibreKmPerMs is how many kilometres of straight-line distance add one
-// millisecond of round-trip time over fibre (light in glass covers about
-// 200 km per ms, there and back). Real paths are longer than a straight line,
-// so the estimate is optimistic: a site it rejects is surely out of the bound.
-const fibreKmPerMs = 100.0
-
 // EstimateLatencyMs is the estimated round-trip latency, in milliseconds,
-// between two points distanceKm apart.
+// between two points distanceKm apart (see internal/broker/geo).
 func EstimateLatencyMs(distanceKm float64) float64 {
-	return distanceKm / fibreKmPerMs
+	return geo.EstimateLatencyMs(distanceKm)
 }
 
 // EffectiveBound returns the latency bound that applies to one decision: the

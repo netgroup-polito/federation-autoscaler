@@ -61,9 +61,14 @@ var _ = Describe("Edge-site placement", Ordered, func() {
 	}
 
 	BeforeAll(func() {
+		coords := [][2]string{{"44.39", "7.55"}, {"44.90", "8.21"}} // Cuneo, Asti
 		for i, site := range []string{"cuneo", "asti"} {
 			n := &corev1.Node{ObjectMeta: metav1.ObjectMeta{
 				Name: nodes[i], Labels: map[string]string{siteLabel: site},
+				Annotations: map[string]string{
+					sites.LatitudeAnnotation:  coords[i][0],
+					sites.LongitudeAnnotation: coords[i][1],
+				},
 			}}
 			Expect(k8sClient.Create(suiteCtx, n)).To(Succeed())
 			n.Status.Allocatable = rl("4", "8Gi")
@@ -138,5 +143,32 @@ var _ = Describe("Edge-site placement", Ordered, func() {
 		resp = reserve("site-4", ReservationRequest{ProviderClusterID: siteProvider, Resources: rl("2", "1Gi")})
 		Expect(resp.Status).To(Equal(http.StatusCreated), resp.Describe())
 		Expect(siteOf("site-4")).To(Equal("cuneo"))
+	})
+
+	It("needs the consumer's location with a latency limit", func() {
+		resp := reserve("site-5", ReservationRequest{
+			ProviderClusterID: siteProvider, Resources: rl("1", "1Gi"), MaxLatencyMs: 2,
+		})
+		Expect(resp.Status).To(Equal(http.StatusBadRequest), resp.Describe())
+	})
+
+	It("refuses with LatencyLimitNotMet when sites have room but none is close enough", func() {
+		// A consumer in Bari: about 8 ms from both sites.
+		resp := reserve("site-6", ReservationRequest{
+			ProviderClusterID: siteProvider, Resources: rl("1", "1Gi"),
+			MaxLatencyMs: 2, ConsumerLocation: &Coordinates{Latitude: 41.12, Longitude: 16.87},
+		})
+		Expect(resp.Status).To(Equal(http.StatusConflict), resp.Describe())
+		Expect(string(resp.Body)).To(ContainSubstring(string(ErrCodeLatencyLimitNotMet)))
+	})
+
+	It("picks only a site within the limit", func() {
+		// A consumer in Cuneo with a 0.3 ms limit: Asti (about 0.85 ms) is too far.
+		resp := reserve("site-7", ReservationRequest{
+			ProviderClusterID: siteProvider, Resources: rl("1", "1Gi"),
+			MaxLatencyMs: 0.3, ConsumerLocation: &Coordinates{Latitude: 44.39, Longitude: 7.55},
+		})
+		Expect(resp.Status).To(Equal(http.StatusCreated), resp.Describe())
+		Expect(siteOf("site-7")).To(Equal("cuneo"))
 	})
 })

@@ -36,6 +36,7 @@ import (
 
 	brokerv1alpha1 "github.com/netgroup-polito/federation-autoscaler/api/broker/v1alpha1"
 	"github.com/netgroup-polito/federation-autoscaler/internal/broker/chunk"
+	"github.com/netgroup-polito/federation-autoscaler/internal/broker/sites"
 )
 
 // defaultReservationTimeout is the fallback deadline stamped on a new
@@ -146,6 +147,18 @@ func (s *Server) handleReservationCreate(w http.ResponseWriter, r *http.Request)
 		return
 	}
 
+	// A NEW booking made on an expired offer is refused (a retry of an existing
+	// one was answered above): the consumer should read the catalog again.
+	if req.OfferExpiresAt != nil && !time.Now().Before(req.OfferExpiresAt.Time) {
+		writeError(w, http.StatusConflict, ErrorResponse{
+			Code: ErrCodeOfferExpired,
+			Message: fmt.Sprintf("the offer of provider %q this booking was made on expired at %s",
+				req.ProviderClusterID, req.OfferExpiresAt.UTC().Format(time.RFC3339)),
+			RequestID: requestID,
+		})
+		return
+	}
+
 	// Region orchestrator: the whole booking must fit in one edge site. The
 	// pick and the create run under one lock so two bookings never count the
 	// same free room; the site is stored on the Reservation and never returned.
@@ -157,7 +170,16 @@ func (s *Server) handleReservationCreate(w http.ResponseWriter, r *http.Request)
 		if !req.IsAmount() {
 			want = s.perChunkResources(cadv)
 		}
-		site, err = s.sites.Pick(ctx, want)
+		var limit *sites.LatencyLimit
+		if req.MaxLatencyMs > 0 {
+			limit = &sites.LatencyLimit{
+				Latitude:  req.ConsumerLocation.Latitude,
+				Longitude: req.ConsumerLocation.Longitude,
+				MaxMs:     req.MaxLatencyMs,
+			}
+		}
+		var reason sites.Reason
+		site, reason, err = s.sites.Pick(ctx, want, limit)
 		if err != nil {
 			s.log.Error(err, "edge site pick failed", "requestId", requestID)
 			writeError(w, http.StatusInternalServerError, ErrorResponse{
@@ -165,11 +187,20 @@ func (s *Server) handleReservationCreate(w http.ResponseWriter, r *http.Request)
 			})
 			return
 		}
-		if site == "" {
+		switch reason {
+		case sites.NoRoom:
 			writeError(w, http.StatusConflict, ErrorResponse{
 				Code: ErrCodeInsufficientCapacity,
 				Message: fmt.Sprintf("no edge site of provider %q can hold %s",
 					req.ProviderClusterID, chunk.Format(want)),
+				RequestID: requestID,
+			})
+			return
+		case sites.TooFar:
+			writeError(w, http.StatusConflict, ErrorResponse{
+				Code: ErrCodeLatencyLimitNotMet,
+				Message: fmt.Sprintf("no edge site of provider %q with room for %s is within %v ms",
+					req.ProviderClusterID, chunk.Format(want), req.MaxLatencyMs),
 				RequestID: requestID,
 			})
 			return
@@ -270,6 +301,9 @@ func (s *Server) handleReservationCreate(w http.ResponseWriter, r *http.Request)
 // validators would also catch. Surfaced as 400s so misuse is visible
 // without an etcd round trip.
 func validateReservationRequest(req *ReservationRequest) error {
+	if err := validateLatencyLimit(req); err != nil {
+		return err
+	}
 	if req.IsAmount() {
 		return validateAmountRequest(req)
 	}
@@ -296,6 +330,24 @@ func validateReservationRequest(req *ReservationRequest) error {
 		if req.NodeGroupID != want {
 			return fmt.Errorf("nodeGroupId %q does not match (provider, chunkType) — want %q",
 				req.NodeGroupID, want)
+		}
+	}
+	return nil
+}
+
+// validateLatencyLimit checks MaxLatencyMs and ConsumerLocation.
+func validateLatencyLimit(req *ReservationRequest) error {
+	switch {
+	case req.MaxLatencyMs < 0:
+		return fmt.Errorf("maxLatencyMs must be >= 0, got %v", req.MaxLatencyMs)
+	case req.MaxLatencyMs > 0 && req.ConsumerLocation == nil:
+		return errors.New("consumerLocation is required with maxLatencyMs")
+	case req.DurationSeconds < 0:
+		return fmt.Errorf("durationSeconds must be >= 0, got %d", req.DurationSeconds)
+	}
+	if loc := req.ConsumerLocation; loc != nil {
+		if loc.Latitude < -90 || loc.Latitude > 90 || loc.Longitude < -180 || loc.Longitude > 180 {
+			return fmt.Errorf("consumerLocation out of range: %v, %v", loc.Latitude, loc.Longitude)
 		}
 	}
 	return nil
@@ -393,6 +445,7 @@ func buildReservation(
 			ChunkType:             req.ChunkType,
 			Resources:             perChunk,
 			Amount:                req.IsAmount(),
+			DurationSeconds:       req.DurationSeconds,
 			Namespaces:            req.Namespaces,
 		},
 	}
@@ -468,12 +521,11 @@ func (s *Server) giveBack(ctx context.Context, clusterID string, spec *brokerv1a
 // the response body has a deterministic shape from request #1 onwards.
 func (s *Server) initReservationStatus(ctx context.Context, resv *brokerv1alpha1.Reservation) error {
 	now := metav1.Now()
-	expires := metav1.NewTime(now.Add(s.reservationTimeout))
 	resv.Status = brokerv1alpha1.ReservationStatus{
 		ObservedGeneration: resv.Generation,
 		Phase:              brokerv1alpha1.ReservationPhasePending,
 		CreatedAt:          &now,
-		ExpiresAt:          &expires,
+		ExpiresAt:          brokerv1alpha1.ExpiryOf(now.Time, &resv.Spec, s.reservationTimeout),
 	}
 	return s.client.Status().Update(ctx, resv)
 }
@@ -559,7 +611,8 @@ func sameReservationRequest(
 		spec.ProviderLiqoClusterID != providerLiqoID ||
 		spec.ChunkCount != req.ChunkCount ||
 		spec.ChunkType != req.ChunkType ||
-		spec.Amount != req.IsAmount() {
+		spec.Amount != req.IsAmount() ||
+		spec.DurationSeconds != req.DurationSeconds {
 		return false
 	}
 	if spec.Amount && !sameResources(spec.Resources, req.Resources) {

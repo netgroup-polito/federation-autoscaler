@@ -86,6 +86,13 @@ type ReservationSpec struct {
 	// +optional
 	Site string `json:"site,omitempty"`
 
+	// DurationSeconds is how long the consumer asked to keep the booking.
+	// When > 0 the booking expires DurationSeconds after creation; 0 means the
+	// Broker's default (--reservation-timeout; 0 there means never).
+	// +optional
+	// +kubebuilder:validation:Minimum=0
+	DurationSeconds int64 `json:"durationSeconds,omitempty"`
+
 	// Namespaces is the set of namespaces the consumer wants to offload on the
 	// reserved virtual nodes. Used by the Consumer Agent to create or update
 	// the Liqo NamespaceOffloading CR during the Peer instruction.

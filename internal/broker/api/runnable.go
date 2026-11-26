@@ -84,6 +84,9 @@ type RunnableOptions struct {
 	// set (see ServerOptions). The zero value means the Server writes.
 	CatalogWriteDisabled bool
 
+	// NoDefaultExpiry: see ServerOptions.
+	NoDefaultExpiry bool
+
 	// Sites places every booking on one edge site (region orchestrator, see
 	// ServerOptions). Nil: off.
 	Sites *sites.Picker
@@ -134,6 +137,7 @@ func NewRunnable(opts RunnableOptions) (*Runnable, error) {
 		Catalog:              opts.Catalog,
 		CatalogWriteDisabled: opts.CatalogWriteDisabled,
 		Sites:                opts.Sites,
+		NoDefaultExpiry:      opts.NoDefaultExpiry,
 	})
 
 	httpSrv := &http.Server{

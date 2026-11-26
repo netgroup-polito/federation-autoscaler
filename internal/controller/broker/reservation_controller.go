@@ -90,6 +90,10 @@ type ReservationReconciler struct {
 	// missing ExpiresAt. Zero falls back to DefaultReservationTimeout.
 	ReservationTimeout time.Duration
 
+	// NoDefaultExpiry makes a Reservation without its own DurationSeconds
+	// permanent (--reservation-timeout=0, region orchestrator).
+	NoDefaultExpiry bool
+
 	// Sizer splits an advertisement into chunks; needed to recompute a
 	// provider's TotalChunks when an Amount reservation gives its amount back.
 	// Nil means chunk.DefaultSizer, the one the Broker API uses.
@@ -119,6 +123,9 @@ func (r *ReservationReconciler) terminalTTL() time.Duration {
 const DefaultReservationTimeout = 24 * time.Hour
 
 func (r *ReservationReconciler) reservationTimeout() time.Duration {
+	if r.NoDefaultExpiry {
+		return 0
+	}
 	if r.ReservationTimeout > 0 {
 		return r.ReservationTimeout
 	}
@@ -959,13 +966,18 @@ func (r *ReservationReconciler) ensureExpiry(
 		return nil
 	}
 	createdAt := resv.Status.CreatedAt
-	if createdAt == nil {
+	expires := brokerv1alpha1.ExpiryOf(resv.CreationTimestamp.Time, &resv.Spec, r.reservationTimeout())
+	if createdAt != nil {
+		expires = brokerv1alpha1.ExpiryOf(createdAt.Time, &resv.Spec, r.reservationTimeout())
+		if expires == nil {
+			return nil // a permanent booking, already stamped
+		}
+	} else {
 		ct := resv.CreationTimestamp
 		createdAt = &ct
 	}
-	expires := metav1.NewTime(createdAt.Add(r.reservationTimeout()))
 	resv.Status.CreatedAt = createdAt
-	resv.Status.ExpiresAt = &expires
+	resv.Status.ExpiresAt = expires
 	if resv.Status.ObservedGeneration == 0 {
 		resv.Status.ObservedGeneration = resv.Generation
 	}

@@ -25,19 +25,59 @@ limitations under the License.
 //	             - resources of the active Reservations already on that site
 //
 // The site with the most free CPU that still fits the request wins.
+//
+// With a latency limit, a site also needs coordinates (annotations
+// federation-autoscaler.io/latitude and /longitude on any of its nodes) and an
+// estimated round-trip latency to the consumer within the limit.
 package sites
 
 import (
 	"context"
 	"fmt"
 	"sort"
+	"strconv"
 
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	brokerv1alpha1 "github.com/netgroup-polito/federation-autoscaler/api/broker/v1alpha1"
+	"github.com/netgroup-polito/federation-autoscaler/internal/broker/geo"
 )
+
+// Node annotations giving an edge site's coordinates, in decimal degrees.
+const (
+	LatitudeAnnotation  = "federation-autoscaler.io/latitude"
+	LongitudeAnnotation = "federation-autoscaler.io/longitude"
+)
+
+// LatencyLimit is a booking's hard latency limit.
+type LatencyLimit struct {
+	// Latitude and Longitude are the consumer's coordinates.
+	Latitude, Longitude float64
+	// MaxMs is the highest estimated round-trip latency allowed.
+	MaxMs float64
+}
+
+// Reason says why Pick found no site.
+type Reason int
+
+const (
+	// Found: a site was picked.
+	Found Reason = iota
+	// NoRoom: no site has room for the booking.
+	NoRoom
+	// TooFar: some site has room, but none is within the latency limit.
+	TooFar
+)
+
+// Site is an edge site's free room and, when known, its coordinates.
+type Site struct {
+	Free           corev1.ResourceList
+	Latitude       float64
+	Longitude      float64
+	HasCoordinates bool
+}
 
 // counted are the resources a site is checked on.
 var counted = []corev1.ResourceName{corev1.ResourceCPU, corev1.ResourceMemory, "nvidia.com/gpu"}
@@ -53,52 +93,91 @@ type Picker struct {
 	Namespace string
 }
 
-// Pick returns the site with the most free CPU that can hold want, or "" when
-// no site can.
-func (p *Picker) Pick(ctx context.Context, want corev1.ResourceList) (string, error) {
-	free, err := p.Free(ctx)
+// Pick returns the site with the most free CPU that can hold want and, with a
+// limit, is within it. With no such site it returns "" and the reason.
+func (p *Picker) Pick(ctx context.Context, want corev1.ResourceList, limit *LatencyLimit) (string, Reason, error) {
+	all, err := p.Sites(ctx)
 	if err != nil {
-		return "", err
+		return "", NoRoom, err
 	}
-	names := make([]string, 0, len(free))
-	for name := range free {
+	names := make([]string, 0, len(all))
+	for name := range all {
 		names = append(names, name)
 	}
 	sort.Strings(names) // stable tie-break
-	best := ""
+	best, roomy := "", false
 	var bestCPU resource.Quantity
 	for _, name := range names {
-		if !fits(free[name], want) {
+		site := all[name]
+		if !fits(site.Free, want) {
 			continue
 		}
-		cpu := free[name][corev1.ResourceCPU]
+		roomy = true
+		if limit != nil && !site.within(limit) {
+			continue
+		}
+		cpu := site.Free[corev1.ResourceCPU]
 		if best == "" || cpu.Cmp(bestCPU) > 0 {
 			best, bestCPU = name, cpu
 		}
 	}
-	return best, nil
+	switch {
+	case best != "":
+		return best, Found, nil
+	case roomy:
+		return "", TooFar, nil
+	default:
+		return "", NoRoom, nil
+	}
+}
+
+// within reports whether the site is known to be within the latency limit.
+func (s *Site) within(limit *LatencyLimit) bool {
+	if !s.HasCoordinates {
+		return false // cannot be checked, so not accepted
+	}
+	km := geo.HaversineKm(limit.Latitude, limit.Longitude, s.Latitude, s.Longitude)
+	return geo.EstimateLatencyMs(km) <= limit.MaxMs
 }
 
 // Free returns, per site, what is left for new bookings.
 func (p *Picker) Free(ctx context.Context) (map[string]corev1.ResourceList, error) {
+	all, err := p.Sites(ctx)
+	if err != nil {
+		return nil, err
+	}
+	free := make(map[string]corev1.ResourceList, len(all))
+	for name, site := range all {
+		free[name] = site.Free
+	}
+	return free, nil
+}
+
+// Sites returns every edge site with its free room and coordinates.
+func (p *Picker) Sites(ctx context.Context) (map[string]*Site, error) {
 	var nodes corev1.NodeList
 	if err := p.Reader.List(ctx, &nodes, client.HasLabels{p.Label}); err != nil {
 		return nil, fmt.Errorf("list nodes with label %q: %w", p.Label, err)
 	}
-	free := map[string]corev1.ResourceList{}
+	all := map[string]*Site{}
 	for i := range nodes.Items {
 		n := &nodes.Items[i]
-		site := n.Labels[p.Label]
-		if site == "" || !usable(n) {
+		name := n.Labels[p.Label]
+		if name == "" || !usable(n) {
 			continue
 		}
-		if free[site] == nil {
-			free[site] = corev1.ResourceList{}
+		site := all[name]
+		if site == nil {
+			site = &Site{Free: corev1.ResourceList{}}
+			all[name] = site
 		}
-		for _, name := range counted {
-			if q, ok := n.Status.Allocatable[name]; ok {
-				add(free[site], name, q, 1)
+		for _, res := range counted {
+			if q, ok := n.Status.Allocatable[res]; ok {
+				add(site.Free, res, q, 1)
 			}
+		}
+		if !site.HasCoordinates {
+			site.Latitude, site.Longitude, site.HasCoordinates = coordinates(n)
 		}
 	}
 
@@ -108,17 +187,28 @@ func (p *Picker) Free(ctx context.Context) (map[string]corev1.ResourceList, erro
 	}
 	for i := range resvs.Items {
 		r := &resvs.Items[i]
-		if free[r.Spec.Site] == nil || !active(r.Status.Phase) {
+		site := all[r.Spec.Site]
+		if site == nil || !active(r.Status.Phase) {
 			continue
 		}
 		n := int64(max(r.Spec.ChunkCount, 1))
-		for _, name := range counted {
-			if q, ok := r.Spec.Resources[name]; ok {
-				add(free[r.Spec.Site], name, q, -n)
+		for _, res := range counted {
+			if q, ok := r.Spec.Resources[res]; ok {
+				add(site.Free, res, q, -n)
 			}
 		}
 	}
-	return free, nil
+	return all, nil
+}
+
+// coordinates reads a node's site coordinates from its annotations.
+func coordinates(n *corev1.Node) (lat, lon float64, ok bool) {
+	lat, err1 := strconv.ParseFloat(n.Annotations[LatitudeAnnotation], 64)
+	lon, err2 := strconv.ParseFloat(n.Annotations[LongitudeAnnotation], 64)
+	if err1 != nil || err2 != nil || lat < -90 || lat > 90 || lon < -180 || lon > 180 {
+		return 0, 0, false
+	}
+	return lat, lon, true
 }
 
 // usable reports whether a node is Ready and schedulable.
