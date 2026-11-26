@@ -41,6 +41,7 @@ import (
 	agentclient "github.com/netgroup-polito/federation-autoscaler/internal/agent/client"
 	"github.com/netgroup-polito/federation-autoscaler/internal/agent/console"
 	"github.com/netgroup-polito/federation-autoscaler/internal/agent/health"
+	"github.com/netgroup-polito/federation-autoscaler/internal/agent/ollama"
 	"github.com/netgroup-polito/federation-autoscaler/internal/agent/poller"
 	"github.com/netgroup-polito/federation-autoscaler/internal/agent/provider/advertise"
 	"github.com/netgroup-polito/federation-autoscaler/internal/agent/provider/instructions"
@@ -148,6 +149,10 @@ type Options struct {
 	// advertisement so a stalled heartbeat reddens /readyz alongside a
 	// stalled instruction poll.
 	Probe *health.Probe
+
+	// AI is the local AI client for the console's offer panel (an offer
+	// written in plain words becomes the settings). Nil: fixed patterns only.
+	AI *ollama.Client
 }
 
 // Run wires the provider-role instruction handlers onto opts.Registry
@@ -235,6 +240,7 @@ func Run(ctx context.Context, opts Options) error {
 			NodeName:      opts.NodeName,
 			AdvertisedIP:  opts.AdvertisedIP,
 			MockGeoURL:    opts.MockGeoURL,
+			Ollama:        opts.AI,
 			Logger:        logger.WithName("console"),
 		})
 		if err != nil {

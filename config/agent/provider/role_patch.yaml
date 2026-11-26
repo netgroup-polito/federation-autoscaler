@@ -103,3 +103,39 @@
 - op: add
   path: /spec/template/spec/containers/0/args/-
   value: --catalog-addr=$(CATALOG_ADDR)
+# Local AI for the console's offer panel (an offer written in plain words
+# becomes the settings), from agent-config. An empty ollamaUrl leaves
+# --ollama-url empty: the panel then reads the text with fixed patterns.
+- op: add
+  path: /spec/template/spec/containers/0/env/-
+  value:
+    name: OLLAMA_URL
+    valueFrom:
+      configMapKeyRef:
+        name: agent-config
+        key: ollamaUrl
+- op: add
+  path: /spec/template/spec/containers/0/env/-
+  value:
+    name: OLLAMA_MODEL
+    valueFrom:
+      configMapKeyRef:
+        name: agent-config
+        key: ollamaModel
+- op: add
+  path: /spec/template/spec/containers/0/env/-
+  value:
+    name: LLM_API
+    valueFrom:
+      configMapKeyRef:
+        name: agent-config
+        key: llmApi
+- op: add
+  path: /spec/template/spec/containers/0/args/-
+  value: --ollama-url=$(OLLAMA_URL)
+- op: add
+  path: /spec/template/spec/containers/0/args/-
+  value: --ollama-model=$(OLLAMA_MODEL)
+- op: add
+  path: /spec/template/spec/containers/0/args/-
+  value: --llm-api=$(LLM_API)

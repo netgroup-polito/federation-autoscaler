@@ -38,6 +38,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
 	autoscalingv1alpha1 "github.com/netgroup-polito/federation-autoscaler/api/autoscaling/v1alpha1"
+	"github.com/netgroup-polito/federation-autoscaler/internal/agent/brokers"
 	agentclient "github.com/netgroup-polito/federation-autoscaler/internal/agent/client"
 	"github.com/netgroup-polito/federation-autoscaler/internal/agent/console"
 	"github.com/netgroup-polito/federation-autoscaler/internal/agent/consumer/brain"
@@ -58,6 +59,10 @@ type Options struct {
 	// Client is the Broker HTTP client built in cmd/agent/main.go from
 	// the agent's mTLS keypair (step 7a/7b).
 	Client *agentclient.Client
+
+	// Brokers is every broker this consumer talks to (home + region
+	// orchestrators, M3). Nil: a pool of Client alone.
+	Brokers *brokers.Pool
 
 	// Registry is the shared poller registry created in main.go. The
 	// consumer populates it with the Peer / Unpeer / Cleanup /
@@ -239,6 +244,15 @@ func Run(ctx context.Context, opts Options) error {
 	// One measured-latency prober shared by the loopback API (which probes +
 	// re-masks the latency shortlist) and the heartbeat (which reports the last
 	// measurement for the dashboard).
+	pool := opts.Brokers
+	if pool == nil {
+		var err error
+		pool, err = brokers.New(ctx, brokers.Options{HomeURL: "home", Home: opts.Client, Logger: logger.WithName("brokers")})
+		if err != nil {
+			return fmt.Errorf("consumer: build the broker pool: %w", err)
+		}
+	}
+
 	prober := latency.New(latency.Options{Logger: logger.WithName("latency-prober")})
 
 	// Local mode: the placement decision is made here, from the catalog.
@@ -254,7 +268,7 @@ func Run(ctx context.Context, opts Options) error {
 	if opts.BrainMode == BrainLocal {
 		localBrain, err = brain.New(brain.Options{
 			Catalog:      opts.Catalog,
-			Reservations: opts.Client,
+			Reservations: pool,
 			LocalClient:  opts.LocalClient,
 			Namespace:    namespace,
 			Location: func() (float64, float64, bool) {
@@ -268,7 +282,7 @@ func Run(ctx context.Context, opts Options) error {
 			return fmt.Errorf("consumer: build local brain: %w", err)
 		}
 		localChoice = localBrain.LastChoice
-		logger.Info("placement decided locally (brain=local); booking still goes through the Broker")
+		logger.Info("placement decided locally (brain=local); booking goes to the provider's booking address when known, else to the home broker")
 	}
 
 	// Build the optional Ollama client for the ConsumerChoice strategy.
@@ -287,7 +301,7 @@ func Run(ctx context.Context, opts Options) error {
 		Brain:        localBrain,
 		Prober:       prober,
 		BindAddress:  opts.LocalAPIAddr,
-		Client:       opts.Client,
+		Client:       pool,
 		LocalClient:  opts.LocalClient,
 		Namespace:    namespace,
 		OllamaClient: ollamaClient,
@@ -309,7 +323,7 @@ func Run(ctx context.Context, opts Options) error {
 	}
 
 	beater, err = heartbeat.New(heartbeat.Options{
-		Client:        opts.Client,
+		Client:        pool,
 		ClusterID:     opts.ClusterID,
 		LiqoClusterID: opts.LiqoClusterID,
 		LocalClient:   opts.LocalClient,

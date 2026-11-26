@@ -32,7 +32,8 @@ data:
   # match their carbonRefreshInterval (see federation-tests/testlib/deploy.go) so
   # providers actually observe the harness's periodic re-randomization.
   ecoCacheTtl: "1h"
-  # ConsumerChoice LLM (consumer-only). ollamaUrl is the base URL of an Ollama
+  # Local AI: on a consumer the ConsumerChoice LLM, on a provider the console's
+  # offer panel (an offer in plain words becomes the settings). ollamaUrl is the base URL of an Ollama
   # server the agent can reach; empty ⇒ ConsumerChoice never asks an LLM and
   # uses its deterministic fallback. ollamaTimeout bounds one LLM call.
   # consumer-up.sh --ollama-url / the fa_consumer role set these.
@@ -55,3 +56,8 @@ data:
   # offer to (the fa_provider role sets it from fa_catalog_provider_write).
   brainMode: "central"
   catalogAddr: ""
+  # Consumer only (M3): where a provider takes bookings when it is not the
+  # broker at brokerUrl, as "provider=https://host:port,..." (e.g. a region
+  # orchestrator). Empty: every booking goes to brokerUrl. Offers will carry
+  # this address themselves (bookingEndpoint); this is the manual override.
+  bookingEndpoints: ""

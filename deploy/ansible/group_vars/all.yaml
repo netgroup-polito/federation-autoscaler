@@ -133,6 +133,13 @@ broker_address: "{{ hostvars[groups['central'][0]].ansible_host }}"
 #   consumer-2: { ..., fa_broker_url: "https://<region host IP>:30443" }
 fa_broker_url: "https://{{ broker_address }}:{{ broker_node_port }}"
 
+# Per consumer host (M3): where a provider takes bookings when it is not the
+# broker at fa_broker_url, as "provider=https://host:port,..." (e.g. a region
+# orchestrator). The agent then also heartbeats and polls that broker. Offers
+# will carry this address themselves; this is the manual override.
+#   fa_booking_endpoints: "provider-3=https://<provider-3 IP>:30443"
+fa_booking_endpoints: ""
+
 # -----------------------------------------------------------------------------
 # Region orchestrator (M3, optional)
 # -----------------------------------------------------------------------------
@@ -158,6 +165,12 @@ fa_edge_sites: {}
 # limit only goes to a site with coordinates within it, e.g.
 #   fa_edge_site_coordinates: { s1: "44.39,7.55" }
 fa_edge_site_coordinates: {}
+
+# Per provider host: the local AI behind the provider console's offer panel
+# (an offer written in plain words becomes the provider's settings), e.g. the
+# lab's host Ollama "http://192.168.122.1:11434" or a KubeAI URL. Empty: the
+# panel reads the text with fixed patterns. Uses fa_ollama_model and fa_llm_api.
+fa_provider_ollama_url: ""
 
 # Where to drop the fetched kubeconfigs on the control host. Each cluster
 # gets ~/.kube/<cluster_id>.yaml. These are what `kubectl --kubeconfig`

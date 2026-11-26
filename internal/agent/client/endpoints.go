@@ -140,6 +140,25 @@ func (c *Client) DeleteReservation(
 	return out, nil
 }
 
+// GetReservation returns one reservation's current state
+// (GET /api/v1/reservations/{id}). The consumer uses it to learn whether a
+// booking whose reply was lost actually succeeded.
+func (c *Client) GetReservation(
+	ctx context.Context, reservationID string,
+) (*brokerapi.ReservationResponse, error) {
+	if reservationID == "" {
+		return nil, errors.New("client: GetReservation: reservationID is required")
+	}
+	path := "/api/v1/reservations/" + url.PathEscape(reservationID)
+	out := &brokerapi.ReservationResponse{}
+	if err := c.do(ctx, http.MethodGet, path, nil, out, requestOptions{
+		idempotent: true,
+	}); err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 // ListReservations returns every reservation this cluster holds as the
 // consumer, in any phase (GET /api/v1/reservations, §7.3.10). The local brain
 // uses it to rebuild its in-flight and reserved chunk counts per provider,

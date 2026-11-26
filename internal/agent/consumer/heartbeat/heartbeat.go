@@ -39,7 +39,6 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
 	autoscalingv1alpha1 "github.com/netgroup-polito/federation-autoscaler/api/autoscaling/v1alpha1"
-	agentclient "github.com/netgroup-polito/federation-autoscaler/internal/agent/client"
 	"github.com/netgroup-polito/federation-autoscaler/internal/agent/consumer/latency"
 	"github.com/netgroup-polito/federation-autoscaler/internal/agent/geo"
 	"github.com/netgroup-polito/federation-autoscaler/internal/agent/nodeip"
@@ -59,9 +58,15 @@ type Prober interface {
 const DefaultInterval = 15 * time.Second
 
 // Options bundles the construction-time settings of a Heartbeater.
+// Poster sends a heartbeat to the broker(s): a single broker client, or the
+// consumer agent's broker pool (every broker it talks to).
+type Poster interface {
+	PostHeartbeat(ctx context.Context, req *brokerapi.HeartbeatRequest) (*brokerapi.HeartbeatResponse, error)
+}
+
 type Options struct {
 	// Client is the Broker HTTP client built in step 7a/7b. Required.
-	Client *agentclient.Client
+	Client Poster
 
 	// ClusterID and LiqoClusterID are stamped on every
 	// HeartbeatRequest. Both required.
@@ -130,7 +135,7 @@ type Options struct {
 // invariant of agent Deployments, Heartbeater is NOT safe for
 // concurrent invocation.
 type Heartbeater struct {
-	client        *agentclient.Client
+	client        Poster
 	clusterID     string
 	liqoClusterID string
 	localClient   ctrlclient.Client

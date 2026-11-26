@@ -966,3 +966,53 @@ func TestResourceRequestPendingMentionsTheLatencyLimit(t *testing.T) {
 		t.Errorf("message = %q, want it to mention the 1 ms limit", rr.Status.Message)
 	}
 }
+
+// A booking with a duration ends the request at that time: the request turns
+// Expired (no longer waiting for a node that will not come back) and its
+// bookings are released, which is a no-op for one the broker already ended.
+func TestResourceRequestExpiresAfterItsDuration(t *testing.T) {
+	ctx := context.Background()
+	rr := cpuRequest("short", "short1", "1")
+	rr.Spec.Duration = "4m"
+	agent := &fakeReservationClient{nodeGroups: sixCPUGroups()}
+	r, cl := newReconcileFixture(t, agent, rr)
+	key := types.NamespacedName{Namespace: "default", Name: "short"}
+
+	_, _ = r.Reconcile(ctx, ctrl.Request{NamespacedName: key}) // finalize
+	if _, err := r.Reconcile(ctx, ctrl.Request{NamespacedName: key}); err != nil {
+		t.Fatalf("reconcile: %v", err)
+	}
+	if err := cl.Get(ctx, key, rr); err != nil {
+		t.Fatal(err)
+	}
+	if e := rr.Status.ExpiresAt; e == nil || time.Until(e.Time) < 3*time.Minute || time.Until(e.Time) > 4*time.Minute {
+		t.Fatalf("expiresAt = %v; want about 4 minutes from now", rr.Status.ExpiresAt)
+	}
+	res, err := r.Reconcile(ctx, ctrl.Request{NamespacedName: key}) // holding, no node yet
+	if err != nil || res.RequeueAfter <= 0 || res.RequeueAfter > 4*time.Minute+time.Second {
+		t.Fatalf("hold = %+v, %v; want a wake-up by the end of the booking", res, err)
+	}
+
+	// The end passes.
+	if err := cl.Get(ctx, key, rr); err != nil {
+		t.Fatal(err)
+	}
+	past := metav1.NewTime(time.Now().Add(-time.Second))
+	rr.Status.ExpiresAt = &past
+	if err := cl.Status().Update(ctx, rr); err != nil {
+		t.Fatal(err)
+	}
+	agent.deleteErr = &agentclient.Error{Category: agentclient.CategoryNotFound}
+	if _, err := r.Reconcile(ctx, ctrl.Request{NamespacedName: key}); err != nil {
+		t.Fatalf("reconcile after the end: %v", err)
+	}
+	if err := cl.Get(ctx, key, rr); err != nil {
+		t.Fatal(err)
+	}
+	if rr.Status.Phase != autoscalingv1alpha1.ResourceRequestExpired || agent.lastDeleteID != "mr-short1" {
+		t.Fatalf("status = %+v, released %q; want Expired and mr-short1 released", rr.Status, agent.lastDeleteID)
+	}
+	if res, err := r.Reconcile(ctx, ctrl.Request{NamespacedName: key}); err != nil || res.RequeueAfter != 0 || agent.postCalls != 1 {
+		t.Fatalf("an Expired request must stay ended: %+v, %v, posts %d", res, err, agent.postCalls)
+	}
+}

@@ -94,6 +94,19 @@
   </header>
 
   <main>
+    <!-- Offer in plain words (AI) -->
+    <section>
+      <h2>Your offer in plain words</h2>
+      <p class="hint">Describe what you offer; the AI reads prices (per core, per GB, per GPU, per hour, in euro), renewable energy and how much of the cluster to lend, and fills the settings below. Only what you write changes; takes effect on the next advertisement (~30&nbsp;s).</p>
+      <textarea id="offerText" rows="3" style="width:100%"
+        placeholder="e.g. 0.02 euro per core and 0.003 per GB, solar powered, lend half of our memory"></textarea>
+      <div class="submit-row">
+        <button id="offerPreview">Understand</button>
+        <button id="offerApply">Apply offer</button>
+      </div>
+      <div id="offerResult" class="hint"></div>
+    </section>
+
     <!-- Prices -->
     <section>
       <h2>Unit prices</h2>
@@ -290,6 +303,21 @@
     };
 
     (async () => {
+      async function sendOffer(apply) {
+        const text = document.getElementById("offerText").value.trim();
+        if (!text) { toast("Write your offer first", true); return; }
+        const box = document.getElementById("offerResult");
+        box.textContent = "the AI is reading your offer\u2026";
+        try {
+          const r = await postJSON("/api/offer-text", { text: text, apply: apply });
+          const by = r.source === "ai" ? "AI" : "fixed patterns" + (r.aiError ? " (AI: " + r.aiError + ")" : "");
+          box.textContent = "Understood (" + by + "): " + r.understood + (r.applied ? ", applied" : "");
+          if (r.applied) { toast("Offer applied"); await loadState(); }
+        } catch (e) { box.textContent = ""; toast(e.message, true); }
+      }
+      document.getElementById("offerPreview").addEventListener("click", () => sendOffer(false));
+      document.getElementById("offerApply").addEventListener("click", () => sendOffer(true));
+
       try { await loadState(); }
       catch (e) { toast("Failed to load: " + e.message, true); }
     })();

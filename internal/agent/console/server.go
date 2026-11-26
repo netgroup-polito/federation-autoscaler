@@ -153,9 +153,10 @@ type Options struct {
 	AdvertisedIP string
 	MockGeoURL   string
 
-	// Ollama is the local AI client (consumer role only, optional). The
+	// Ollama is the local AI client (optional). On a consumer the
 	// plain-language request panel uses it to read the amount a request asks
-	// for; without it the amount is read from the text with fixed patterns.
+	// for; on a provider the offer panel uses it to read an offer written in
+	// plain words. Without it both are read with fixed patterns.
 	Ollama *ollama.Client
 
 	// Prober is the shared latency prober (consumer role only, optional). When
@@ -268,6 +269,7 @@ func (s *Server) handler() http.Handler {
 		mux.HandleFunc("POST /api/prices", s.handlePrices)
 		mux.HandleFunc("POST /api/capacity", s.handleCapacity)
 		mux.HandleFunc("POST /api/renewable", s.handleRenewable)
+		mux.HandleFunc("POST /api/offer-text", s.handleOfferText)
 	}
 	return mux
 }

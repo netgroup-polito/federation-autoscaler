@@ -108,3 +108,17 @@
 - op: add
   path: /spec/template/spec/containers/0/args/-
   value: --catalog-addr=$(CATALOG_ADDR)
+# Where a provider takes bookings when it is not the broker (M3), from
+# agent-config bookingEndpoints ("provider=https://host:port,...").
+- op: add
+  path: /spec/template/spec/containers/0/env/-
+  value:
+    name: BOOKING_ENDPOINTS
+    valueFrom:
+      configMapKeyRef:
+        name: agent-config
+        key: bookingEndpoints
+        optional: true
+- op: add
+  path: /spec/template/spec/containers/0/args/-
+  value: --booking-endpoints=$(BOOKING_ENDPOINTS)

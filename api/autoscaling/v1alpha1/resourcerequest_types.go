@@ -36,10 +36,11 @@ type ResourceRequestSpec struct {
 	// +required
 	Resources corev1.ResourceList `json:"resources"`
 
-	// Duration is an optional lifetime hint as a Go duration string (e.g. "2h").
-	// v1 records it but does not yet enforce a per-request TTL — the broker's
-	// global --reservation-timeout applies; delete the ResourceRequest to release
-	// early. A future revision will translate this into a per-reservation expiry.
+	// Duration is an optional lifetime as a Go duration string (e.g. "2h").
+	// Each booking carries it (durationSeconds) and expires that long after
+	// it is made. Empty or unparsable: the broker's default applies (24 h on
+	// the central broker, never on a region orchestrator). Delete the
+	// ResourceRequest to release early.
 	// +optional
 	Duration string `json:"duration,omitempty"`
 
@@ -51,7 +52,8 @@ type ResourceRequestSpec struct {
 
 	// LatencyBound overrides the ConsumerPolicy latency bound for this request
 	// only, e.g. "max 3 ms" to this consumer. Empty means the ConsumerPolicy bound (if
-	// any) applies. Used only when the brain runs on the consumer (local mode).
+	// any) applies. Used when the brain runs on the consumer (local mode), and
+	// sent with each booking so a region orchestrator checks it as a hard limit.
 	// +optional
 	LatencyBound *LatencyBound `json:"latencyBound,omitempty"`
 
@@ -101,6 +103,11 @@ const (
 	// ResourceRequestFailed means the reservation could not be created; Message
 	// carries the reason.
 	ResourceRequestFailed ResourceRequestPhase = "Failed"
+
+	// ResourceRequestExpired means the booking reached the end of its
+	// Spec.Duration: the broker released it and the node is gone. Delete the
+	// request to clean up; a new request books again.
+	ResourceRequestExpired ResourceRequestPhase = "Expired"
 )
 
 // ResourceRequestStatus is the controller's observed state for one request.
@@ -146,6 +153,12 @@ type ResourceRequestStatus struct {
 	// LastTransitionTime is when Phase last changed.
 	// +optional
 	LastTransitionTime *metav1.Time `json:"lastTransitionTime,omitempty"`
+
+	// ExpiresAt is when the booking ends: the time it was reserved plus
+	// Spec.Duration. Nil: no duration, the booking is held until the request
+	// is deleted.
+	// +optional
+	ExpiresAt *metav1.Time `json:"expiresAt,omitempty"`
 }
 
 // +kubebuilder:object:root=true

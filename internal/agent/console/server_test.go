@@ -452,3 +452,48 @@ func TestRenewableToggle(t *testing.T) {
 	_, tsC := newTestServer(t, RoleConsumer)
 	wantStatus(t, post(t, tsC, "/api/renewable", `{"renewable":true}`), http.StatusMethodNotAllowed)
 }
+
+// --- Offer in plain words (provider) ------------------------------------------
+
+func TestOfferTextAppliesWhatTheTextSays(t *testing.T) {
+	// An existing memory price and CPU share must survive: the text sets only
+	// the CPU price, renewable energy and the memory share.
+	existingPrices := &corev1.ConfigMap{
+		ObjectMeta: metav1.ObjectMeta{Name: pricesConfigMap, Namespace: testNS},
+		Data:       map[string]string{pricesKey: "memory: \"0.004\"\n"},
+	}
+	existingCapacity := &corev1.ConfigMap{
+		ObjectMeta: metav1.ObjectMeta{Name: capacityConfigMap, Namespace: testNS},
+		Data:       map[string]string{capacityKey: "cpu: 80\n"},
+	}
+	fc, ts := newTestServer(t, RoleProvider, existingPrices, existingCapacity)
+
+	text := `{"text":"0.02 euro per core, solar powered, lend half of our memory"}`
+	wantStatus(t, post(t, ts, "/api/offer-text", text), http.StatusOK) // preview only
+	var cm corev1.ConfigMap
+	if err := fc.Get(context.Background(), types.NamespacedName{Namespace: testNS, Name: renewableConfigMap}, &cm); err == nil {
+		t.Fatalf("a preview wrote %s", renewableConfigMap)
+	}
+
+	apply := `{"text":"0.02 euro per core, solar powered, lend half of our memory","apply":true}`
+	wantStatus(t, post(t, ts, "/api/offer-text", apply), http.StatusOK)
+
+	get := func(name, key string) string {
+		var cm corev1.ConfigMap
+		if err := fc.Get(context.Background(), types.NamespacedName{Namespace: testNS, Name: name}, &cm); err != nil {
+			t.Fatalf("get %s: %v", name, err)
+		}
+		return cm.Data[key]
+	}
+	if p := get(pricesConfigMap, pricesKey); !strings.Contains(p, `cpu: "0.02"`) || !strings.Contains(p, `memory: "0.004"`) {
+		t.Errorf("prices.yaml = %q; want the new CPU price and the old memory price", p)
+	}
+	if c := get(capacityConfigMap, capacityKey); !strings.Contains(c, "memory: 50") || !strings.Contains(c, "cpu: 80") {
+		t.Errorf("capacity.yaml = %q; want memory 50 and the old cpu 80", c)
+	}
+	if r := get(renewableConfigMap, renewableKey); !strings.Contains(r, "renewable: true") {
+		t.Errorf("renewable.yaml = %q; want true", r)
+	}
+
+	wantStatus(t, post(t, ts, "/api/offer-text", `{"text":"  "}`), http.StatusBadRequest)
+}

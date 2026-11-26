@@ -25,9 +25,11 @@ limitations under the License.
 package main
 
 import (
+	"context"
 	"flag"
 	"fmt"
 	"os"
+	"strings"
 	"time"
 
 	_ "k8s.io/client-go/plugin/pkg/client/auth"
@@ -41,6 +43,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/log/zap"
 
 	autoscalingv1alpha1 "github.com/netgroup-polito/federation-autoscaler/api/autoscaling/v1alpha1"
+	"github.com/netgroup-polito/federation-autoscaler/internal/agent/brokers"
 	agentclient "github.com/netgroup-polito/federation-autoscaler/internal/agent/client"
 	"github.com/netgroup-polito/federation-autoscaler/internal/agent/consumer"
 	"github.com/netgroup-polito/federation-autoscaler/internal/agent/consumer/heartbeat"
@@ -111,6 +114,7 @@ func main() {
 		aiJob                 string
 		brainMode             string
 		catalogAddr           string
+		bookingEndpoints      string
 	)
 
 	flag.StringVar(&role, "role", "",
@@ -196,19 +200,19 @@ func main() {
 			"latency probe endpoint. Must match the agent-probe Service's nodePort. "+
 			"0 ⇒ advertise no probe endpoint (latency falls back to distance).")
 	flag.StringVar(&ollamaURL, "ollama-url", "",
-		"(consumer role only) Base URL of a local Ollama instance, e.g. "+
-			"http://localhost:11434. When set alongside a ConsumerPolicy with placement "+
-			"type ConsumerChoice, provider selection is delegated to the LLM. "+
-			"Empty ⇒ ConsumerChoice falls back to a deterministic strategy.")
+		"Base URL of the local AI server, e.g. http://localhost:11434. Consumer: with a "+
+			"ConsumerChoice policy, provider selection is delegated to the LLM. Provider: the "+
+			"console's offer panel reads an offer written in plain words into the settings. "+
+			"Empty ⇒ fixed patterns and deterministic strategies only.")
 	flag.StringVar(&ollamaModel, "ollama-model", "phi4-mini:3.8b",
-		"(consumer role only) Ollama model name for ConsumerChoice selection. "+
+		"Model name of the local AI (consumer and provider). "+
 			"Ignored when --ollama-url is empty.")
 	flag.DurationVar(&ollamaTimeout, "ollama-timeout", 120*time.Second,
 		"(consumer role only) Upper bound on one ConsumerChoice LLM call. A call that "+
 			"exceeds it falls back to the deterministic strategy; a small model on CPU "+
 			"needs tens of seconds. Ignored when --ollama-url is empty.")
 	flag.StringVar(&llmAPI, "llm-api", ollama.APIOpenAI,
-		"(consumer role only) Which API the AI server speaks: \"openai\" (OpenAI-style "+
+		"Which API the AI server speaks: \"openai\" (OpenAI-style "+
 			"/v1/chat/completions, served by Ollama, vLLM and KubeAI, the default) or \"ollama\" "+
 			"(Ollama's own /api/generate). With \"openai\", --ollama-url may be a "+
 			"base ending in /v1. Ignored when --ollama-url is empty.")
@@ -221,6 +225,10 @@ func main() {
 		"(consumer role only) Who makes the placement decision: \"central\" asks the "+
 			"Broker (default); \"local\" decides on this consumer from the catalog. "+
 			"Booking goes through the Broker in both modes. \"local\" needs --catalog-addr.")
+	flag.StringVar(&bookingEndpoints, "booking-endpoints", "",
+		"Consumer only (M3): where a provider takes bookings when it is not the broker at "+
+			"--broker-url, as \"provider=https://host:port,...\" (e.g. a region orchestrator). The "+
+			"agent then also heartbeats and polls that broker. Empty: every booking goes to --broker-url.")
 	flag.StringVar(&catalogAddr, "catalog-addr", "",
 		"host:port of the Redis catalog. Consumer role: the local brain reads "+
 			"provider offers from it (read-only); required with --brain=local, "+
@@ -312,8 +320,48 @@ func main() {
 	// immediately.
 	registry := poller.NewRegistry()
 
+	// A consumer may talk to several brokers (M3: a region orchestrator per
+	// region it books at): the pool holds them, saved across restarts.
+	var (
+		pool    *brokers.Pool
+		sources func() []*agentclient.Client
+	)
+	if role == roleConsumer {
+		pool, err = brokers.New(context.Background(), brokers.Options{
+			HomeURL: brokerURL,
+			Home:    brokerClient,
+			NewClient: func(url string) (*agentclient.Client, error) {
+				return agentclient.New(agentclient.Options{
+					BrokerURL: url,
+					TLS: agentclient.TLSConfig{
+						CertFile:     clientCertPath,
+						KeyFile:      clientKeyPath,
+						BrokerCAFile: brokerCAPath,
+					},
+					Logger: ctrl.Log.WithName("broker-client"),
+				})
+			},
+			Store:  &brokers.ConfigMapStore{Client: localClient, Namespace: namespace},
+			Logger: ctrl.Log.WithName("brokers"),
+		})
+		if err != nil {
+			setupLog.Error(err, "unable to build the broker pool")
+			os.Exit(1)
+		}
+		endpoints, err := parseBookingEndpoints(bookingEndpoints)
+		if err != nil {
+			setupLog.Error(err, "invalid --booking-endpoints")
+			os.Exit(1)
+		}
+		for providerID, url := range endpoints {
+			pool.SetBookingEndpoint(providerID, url)
+		}
+		sources = pool.Clients
+	}
+
 	pollerInstance, err := poller.New(poller.Options{
 		Client:   brokerClient,
+		Sources:  sources,
 		Registry: registry,
 		Interval: pollInterval,
 		Logger:   ctrl.Log.WithName("poller"),
@@ -340,6 +388,7 @@ func main() {
 	case roleConsumer:
 		if err := consumer.Run(ctx, consumer.Options{
 			Client:            brokerClient,
+			Brokers:           pool,
 			Registry:          registry,
 			LocalClient:       localClient,
 			ClusterID:         clusterID,
@@ -385,6 +434,7 @@ func main() {
 			Logger:                ctrl.Log.WithName("provider"),
 			Probe:                 probe,
 			Catalog:               catalogWriter(catalogAddr),
+			AI:                    providerAI(ollamaURL, ollamaModel, llmAPI, ollamaTimeout),
 		}); err != nil {
 			setupLog.Error(err, "failed to bootstrap provider role")
 			os.Exit(1)
@@ -460,4 +510,31 @@ func catalogWriter(addr string) catalog.Writer {
 		ReadTimeout:  2 * time.Second,
 		WriteTimeout: 2 * time.Second,
 	}))
+}
+
+// parseBookingEndpoints reads "provider=https://host:port,..." into a map.
+func parseBookingEndpoints(raw string) (map[string]string, error) {
+	out := map[string]string{}
+	for _, item := range strings.Split(raw, ",") {
+		item = strings.TrimSpace(item)
+		if item == "" {
+			continue
+		}
+		providerID, url, ok := strings.Cut(item, "=")
+		providerID, url = strings.TrimSpace(providerID), strings.TrimSpace(url)
+		if !ok || providerID == "" || !strings.HasPrefix(url, "https://") {
+			return nil, fmt.Errorf("want provider=https://host:port, got %q", item)
+		}
+		out[providerID] = url
+	}
+	return out, nil
+}
+
+// providerAI builds the provider console's AI client (the offer written in
+// plain words), or nil without --ollama-url.
+func providerAI(url, model, api string, timeout time.Duration) *ollama.Client {
+	if url == "" {
+		return nil
+	}
+	return ollama.NewWithOptions(url, model, ollama.Options{API: api, Timeout: timeout})
 }

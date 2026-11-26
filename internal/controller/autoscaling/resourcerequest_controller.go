@@ -198,13 +198,31 @@ func (r *ResourceRequestReconciler) Reconcile(ctx context.Context, req ctrl.Requ
 	// else keep the borrowed node(s) protected from CA scale-down. Release is
 	// delete-driven; this branch never releases on its own except to migrate.
 	if rr.Status.ReservationID != "" {
+		if rr.Status.Phase == autoscalingv1alpha1.ResourceRequestExpired {
+			return ctrl.Result{}, nil
+		}
+		if e := rr.Status.ExpiresAt; e != nil && !time.Now().Before(e.Time) {
+			// The broker ends the booking at the same time (it got the same
+			// duration); stop holding it instead of waiting for a node that
+			// will not come back. The release is a no-op for a booking the
+			// broker already ended (NotFound) and ends one that outlived the
+			// request, e.g. after a migration.
+			for _, id := range heldReservationIDs(&rr) {
+				if _, err := r.Agent.DeleteReservation(ctx, id); err != nil && !agentclient.IsNotFound(err) {
+					return ctrl.Result{}, err
+				}
+			}
+			msg := fmt.Sprintf("booking ended after its duration (%s) on %s", rr.Spec.Duration, rr.Status.ProviderClusterID)
+			return ctrl.Result{}, r.writePhase(ctx, &rr, autoscalingv1alpha1.ResourceRequestExpired, msg, "", "", 0)
+		}
 		if rr.Status.Phase == autoscalingv1alpha1.ResourceRequestMigrating {
 			return r.completeMigration(ctx, &rr)
 		}
 		if res, migrated, err := r.maybeStartMigration(ctx, &rr); err != nil || migrated {
 			return res, err
 		}
-		return r.holdReservation(ctx, &rr)
+		res, err := r.holdReservation(ctx, &rr)
+		return untilExpiry(res, rr.Status.ExpiresAt), err
 	}
 
 	// Choose a provider (broker node groups are already policy-masked, same as CA
@@ -229,7 +247,7 @@ func (r *ResourceRequestReconciler) Reconcile(ctx context.Context, req ctrl.Requ
 	}
 
 	ids := blockReservationIDs(reservationID, count)
-	if err := r.reserveBlocks(ctx, ids, group); err != nil {
+	if err := r.reserveBlocks(ctx, ids, group, bookingTermsOf(&rr)); err != nil {
 		return r.setFailed(ctx, &rr, "reservation failed: "+err.Error())
 	}
 	log.V(1).Info("created manual reservation",
@@ -242,7 +260,7 @@ func (r *ResourceRequestReconciler) Reconcile(ctx context.Context, req ctrl.Requ
 // error is returned. The ids are deterministic, so a retry re-posts the same
 // ones and the broker deduplicates them.
 func (r *ResourceRequestReconciler) reserveBlocks(
-	ctx context.Context, ids []string, group *brokerapi.NodeGroupView,
+	ctx context.Context, ids []string, group *brokerapi.NodeGroupView, terms bookingTerms,
 ) error {
 	for i, id := range ids {
 		req := &brokerapi.ReservationRequest{
@@ -250,6 +268,8 @@ func (r *ResourceRequestReconciler) reserveBlocks(
 			NodeGroupID:       group.ID,
 			ChunkCount:        1, // one reservation = one block = one node
 			ChunkType:         group.Type,
+			DurationSeconds:   terms.durationSeconds,
+			MaxLatencyMs:      terms.maxLatencyMs,
 		}
 		if _, err := r.Agent.PostReservation(ctx, id, req); err != nil {
 			for _, done := range ids[:i] {
@@ -374,6 +394,11 @@ func (r *ResourceRequestReconciler) setReserved(ctx context.Context, rr *autosca
 		rr.Status.ReservationIDs = ids
 	} else {
 		rr.Status.ReservationIDs = nil
+	}
+	rr.Status.ExpiresAt = nil
+	if d := bookingTermsOf(rr).durationSeconds; d > 0 {
+		end := metav1.NewTime(time.Now().Add(time.Duration(d) * time.Second))
+		rr.Status.ExpiresAt = &end
 	}
 	if err := r.writePhase(ctx, rr, autoscalingv1alpha1.ResourceRequestReserved, msg, ids[0], provider, count); err != nil {
 		return ctrl.Result{}, err
@@ -537,11 +562,14 @@ func (r *ResourceRequestReconciler) completeMigration(ctx context.Context, rr *a
 		}
 		return ctrl.Result{RequeueAfter: pendingRequeue}, nil
 	}
+	terms := bookingTermsOf(rr)
 	resReq := &brokerapi.ReservationRequest{
 		ProviderClusterID: group.ProviderClusterID,
 		NodeGroupID:       group.ID,
 		ChunkCount:        count,
 		ChunkType:         group.Type,
+		DurationSeconds:   terms.durationSeconds,
+		MaxLatencyMs:      terms.maxLatencyMs,
 	}
 	if _, err := r.Agent.PostReservation(ctx, rr.Status.ReservationID, resReq); err != nil {
 		return r.setFailed(ctx, rr, "migration reservation failed: "+err.Error())
@@ -698,4 +726,40 @@ func (r *ResourceRequestReconciler) SetupWithManager(mgr ctrl.Manager) error {
 		For(&autoscalingv1alpha1.ResourceRequest{}).
 		Named("autoscaling-resourcerequest").
 		Complete(r)
+}
+
+// bookingTerms are the parts of a ResourceRequest a booking carries: how long
+// to keep it, and its hard latency limit (checked by a region orchestrator; the
+// consumer agent adds its own location).
+type bookingTerms struct {
+	durationSeconds int64
+	maxLatencyMs    float64
+}
+
+// bookingTermsOf reads a ResourceRequest's duration and latency bound. A
+// duration that does not parse is ignored (the broker's default applies).
+func bookingTermsOf(rr *autoscalingv1alpha1.ResourceRequest) bookingTerms {
+	var t bookingTerms
+	if d, err := time.ParseDuration(rr.Spec.Duration); err == nil && d > 0 {
+		t.durationSeconds = int64(d / time.Second)
+	}
+	if b := rr.Spec.LatencyBound; b != nil && b.MaxLatencyMs > 0 {
+		t.maxLatencyMs = float64(b.MaxLatencyMs)
+	}
+	return t
+}
+
+// untilExpiry wakes the request up no later than its booking's end.
+func untilExpiry(res ctrl.Result, expiresAt *metav1.Time) ctrl.Result {
+	if expiresAt == nil {
+		return res
+	}
+	left := time.Until(expiresAt.Time) + time.Second
+	if left < time.Second {
+		left = time.Second
+	}
+	if res.RequeueAfter == 0 || left < res.RequeueAfter {
+		res.RequeueAfter = left
+	}
+	return res
 }

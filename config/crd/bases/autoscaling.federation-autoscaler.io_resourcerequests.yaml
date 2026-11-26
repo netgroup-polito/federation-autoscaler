@@ -62,16 +62,18 @@ spec:
             properties:
               duration:
                 description: |-
-                  Duration is an optional lifetime hint as a Go duration string (e.g. "2h").
-                  v1 records it but does not yet enforce a per-request TTL — the broker's
-                  global --reservation-timeout applies; delete the ResourceRequest to release
-                  early. A future revision will translate this into a per-reservation expiry.
+                  Duration is an optional lifetime as a Go duration string (e.g. "2h").
+                  Each booking carries it (durationSeconds) and expires that long after
+                  it is made. Empty or unparsable: the broker's default applies (24 h on
+                  the central broker, never on a region orchestrator). Delete the
+                  ResourceRequest to release early.
                 type: string
               latencyBound:
                 description: |-
                   LatencyBound overrides the ConsumerPolicy latency bound for this request
                   only, e.g. "max 3 ms" to this consumer. Empty means the ConsumerPolicy bound (if
-                  any) applies. Used only when the brain runs on the consumer (local mode).
+                  any) applies. Used when the brain runs on the consumer (local mode), and
+                  sent with each booking so a region orchestrator checks it as a hard limit.
                 properties:
                   maxLatencyMs:
                     description: MaxLatencyMs is the bound, in milliseconds of round-trip
@@ -124,6 +126,13 @@ spec:
                 description: ChunkCount is the number of node-sized chunks reserved.
                 format: int32
                 type: integer
+              expiresAt:
+                description: |-
+                  ExpiresAt is when the booking ends: the time it was reserved plus
+                  Spec.Duration. Nil: no duration, the booking is held until the request
+                  is deleted.
+                format: date-time
+                type: string
               lastTransitionTime:
                 description: LastTransitionTime is when Phase last changed.
                 format: date-time

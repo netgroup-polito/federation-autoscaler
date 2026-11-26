@@ -659,3 +659,47 @@ func TestPoller_ReservedChunksHookNotCalledWhenAbsent(t *testing.T) {
 		t.Fatalf("the hook was called %d times, want 0 when the field is absent", n)
 	}
 }
+
+func TestPoller_SeveralBrokers_EachAnsweredOnItsOwn(t *testing.T) {
+	home, region := newFakeBroker(t), newFakeBroker(t)
+	home.queue([]brokerapi.InstructionView{
+		{ID: "i-home", Kind: string(autoscalingv1alpha1.ReservationInstructionPeer), ReservationID: "res-1"},
+	})
+	region.queue([]brokerapi.InstructionView{
+		{ID: "i-region", Kind: string(autoscalingv1alpha1.ReservationInstructionPeer), ReservationID: "res-2"},
+	})
+
+	var mu sync.Mutex
+	var seen []string
+	r := NewRegistry()
+	r.RegisterReservation(autoscalingv1alpha1.ReservationInstructionPeer, func(_ context.Context, in *brokerapi.InstructionView) (*brokerapi.InstructionResultRequest, error) {
+		mu.Lock()
+		seen = append(seen, in.ID)
+		mu.Unlock()
+		return nil, nil
+	})
+
+	homeClient, regionClient := home.buildClient(t), region.buildClient(t)
+	p, err := New(Options{
+		Client:   homeClient,
+		Sources:  func() []*client.Client { return []*client.Client{homeClient, regionClient} },
+		Registry: r,
+		Interval: time.Hour,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	runOnce(t, p)
+
+	mu.Lock()
+	defer mu.Unlock()
+	if len(seen) != 2 || seen[0] != "i-home" || seen[1] != "i-region" {
+		t.Fatalf("handled %v; want i-home then i-region", seen)
+	}
+	if res := home.snapshotResults(); len(res) != 1 || res[0].instructionID != "i-home" {
+		t.Errorf("home results = %+v; want only i-home", res)
+	}
+	if res := region.snapshotResults(); len(res) != 1 || res[0].instructionID != "i-region" {
+		t.Errorf("region results = %+v; want only i-region", res)
+	}
+}

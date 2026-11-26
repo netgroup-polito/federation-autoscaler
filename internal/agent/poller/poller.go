@@ -54,6 +54,13 @@ type Options struct {
 	// Client is the Broker HTTP client built in step 7a/7b. Required.
 	Client *client.Client
 
+	// Sources, when set, lists every broker to poll, polled one after the
+	// other on each tick (the consumer's home broker first, then the region
+	// orchestrators it has booked at). Each instruction's result goes back to
+	// the broker that sent it, and handlers still run one at a time. Nil:
+	// only Client.
+	Sources func() []*client.Client
+
 	// Registry holds the per-role handler set. Required, and must
 	// contain at least one entry — an empty registry would just spam the
 	// broker with "no handler" Failed results.
@@ -87,6 +94,7 @@ type Options struct {
 // concurrent invocation.
 type Poller struct {
 	client          *client.Client
+	sources         func() []*client.Client
 	registry        *Registry
 	interval        time.Duration
 	log             logr.Logger
@@ -122,6 +130,7 @@ func New(opts Options) (*Poller, error) {
 
 	return &Poller{
 		client:          opts.Client,
+		sources:         opts.Sources,
 		registry:        opts.Registry,
 		interval:        interval,
 		log:             logger,
@@ -157,21 +166,41 @@ func (p *Poller) Run(ctx context.Context) {
 // outages or per-instruction failures so a returning broker finds a
 // healthy agent waiting.
 func (p *Poller) tick(ctx context.Context) {
-	resp, err := p.client.GetInstructions(ctx)
+	sources := []*client.Client{p.client}
+	if p.sources != nil {
+		sources = p.sources()
+	}
+	for i, c := range sources {
+		if ctx.Err() != nil {
+			return
+		}
+		// The first broker (the home broker) drives the health probe and the
+		// provider's reserved-chunk count; the others are best effort.
+		p.pollOne(ctx, c, i == 0)
+	}
+}
+
+// pollOne fetches one broker's instructions and runs them, answering on the
+// same broker.
+func (p *Poller) pollOne(ctx context.Context, c *client.Client, home bool) {
+	resp, err := c.GetInstructions(ctx)
 	if err != nil {
-		p.notifyPollResult(false)
+		if home {
+			p.notifyPollResult(false)
+		}
 		// Cancellations are an expected stop signal, not a fault.
 		if ctx.Err() == nil {
-			p.log.V(1).Info("GetInstructions failed", "err", err.Error())
+			p.log.V(1).Info("GetInstructions failed", "home", home, "err", err.Error())
 		}
 		return
 	}
-	p.notifyPollResult(true)
-
-	// Tell the role about the reserved capacity before the handlers run: a
-	// handler can take a long time and the role should not wait for it.
-	if resp.ReservedChunks != nil {
-		p.registry.reservedChunks(*resp.ReservedChunks)
+	if home {
+		p.notifyPollResult(true)
+		// Tell the role about the reserved capacity before the handlers run: a
+		// handler can take a long time and the role should not wait for it.
+		if resp.ReservedChunks != nil {
+			p.registry.reservedChunks(*resp.ReservedChunks)
+		}
 	}
 
 	for i := range resp.Instructions {
@@ -180,7 +209,7 @@ func (p *Poller) tick(ctx context.Context) {
 		if ctx.Err() != nil {
 			return
 		}
-		p.dispatch(ctx, &resp.Instructions[i])
+		p.dispatch(ctx, c, &resp.Instructions[i])
 	}
 }
 
@@ -188,7 +217,7 @@ func (p *Poller) tick(ctx context.Context) {
 // panic guard, and posts the result back to the broker. A handler that
 // returns nil-result-and-nil-error gets a default Succeeded posted on
 // its behalf.
-func (p *Poller) dispatch(ctx context.Context, in *brokerapi.InstructionView) {
+func (p *Poller) dispatch(ctx context.Context, c *client.Client, in *brokerapi.InstructionView) {
 	// Bracket the WHOLE dispatch, not just the handler call, so every return
 	// path stays balanced — including the "no handler registered" early exit
 	// and the postResult round-trip below.
@@ -211,7 +240,7 @@ func (p *Poller) dispatch(ctx context.Context, in *brokerapi.InstructionView) {
 	handler, ok := p.registry.Lookup(in.Kind)
 	if !ok {
 		logger.Info("no handler registered for instruction kind")
-		p.postResult(ctx, in.ID, &brokerapi.InstructionResultRequest{
+		p.postResult(ctx, c, in.ID, &brokerapi.InstructionResultRequest{
 			Status: brokerapi.ResultStatusFailed,
 			Error: &brokerapi.ErrorEnvelope{
 				Code:    brokerapi.ErrCodeInvalidRequest,
@@ -244,15 +273,18 @@ func (p *Poller) dispatch(ctx context.Context, in *brokerapi.InstructionView) {
 		"status", string(result.Status),
 		"elapsedMs", time.Since(dispatchStart).Milliseconds())
 
-	p.postResult(ctx, in.ID, result, logger)
+	p.postResult(ctx, c, in.ID, result, logger)
 }
 
 // postResult sends the result envelope to the broker. Failures here are
 // logged but not retried at this layer — the broker keeps re-emitting
 // the instruction until Status.Enforced flips, so the next tick will
 // pick it up again.
-func (p *Poller) postResult(ctx context.Context, instructionID string, result *brokerapi.InstructionResultRequest, logger logr.Logger) {
-	if err := p.client.PostInstructionResult(ctx, instructionID, result); err != nil {
+func (p *Poller) postResult(
+	ctx context.Context, c *client.Client, instructionID string,
+	result *brokerapi.InstructionResultRequest, logger logr.Logger,
+) {
+	if err := c.PostInstructionResult(ctx, instructionID, result); err != nil {
 		logger.Info("post instruction result failed", "err", err.Error())
 	}
 }

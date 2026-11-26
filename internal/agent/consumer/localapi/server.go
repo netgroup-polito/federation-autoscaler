@@ -68,6 +68,15 @@ import (
 // Prober measures round-trip time to provider UDP echo endpoints for the
 // measured-latency strategy. Satisfied by *latency.Prober; an interface so tests
 // can inject a deterministic fake.
+// Broker is what the local API asks of the broker(s): a single broker client,
+// or the consumer agent's broker pool, which books at the provider's own
+// booking address when it has one.
+type Broker interface {
+	GetNodeGroups(ctx context.Context) (*brokerapi.NodeGroupListResponse, error)
+	PostReservation(ctx context.Context, reservationID string, req *brokerapi.ReservationRequest) (*brokerapi.ReservationResponse, error)
+	DeleteReservation(ctx context.Context, reservationID string) (*brokerapi.ReleaseResponse, error)
+}
+
 type Prober interface {
 	MeasureAndPick(ctx context.Context, cands []latency.Candidate) latency.Result
 }
@@ -94,7 +103,7 @@ type Options struct {
 
 	// Client is the Broker HTTP client. Every proxy route flows through
 	// it. Required.
-	Client *agentclient.Client
+	Client Broker
 
 	// LocalClient reads the consumer-cluster's VirtualNodeState CRs for
 	// /local/virtual-nodes. Required.
@@ -148,7 +157,7 @@ type Options struct {
 // Server is the local-API HTTP listener.
 type Server struct {
 	bind     string
-	client   *agentclient.Client
+	client   Broker
 	local    ctrlclient.Client
 	ns       string
 	prober   Prober
@@ -825,6 +834,13 @@ func (s *Server) handleReservationCreate(w http.ResponseWriter, r *http.Request)
 	reservationID := r.Header.Get(brokerapi.HeaderReservationID)
 	if reservationID == "" {
 		reservationID = "res-" + uuid.NewString()
+	}
+
+	// A latency limit is checked from where this consumer is: add it.
+	if req.MaxLatencyMs > 0 && req.ConsumerLocation == nil && s.location != nil {
+		if loc := s.location(); loc != nil {
+			req.ConsumerLocation = &brokerapi.Coordinates{Latitude: loc.Latitude, Longitude: loc.Longitude}
+		}
 	}
 
 	resp, err := s.client.PostReservation(r.Context(), reservationID, &req)

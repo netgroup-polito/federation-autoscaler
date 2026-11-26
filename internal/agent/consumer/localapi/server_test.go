@@ -827,3 +827,41 @@ func pickFreeAddr(t *testing.T) string {
 	srv.Close()
 	return addr
 }
+
+func TestReservationCreate_AddsTheConsumerLocationToALatencyLimit(t *testing.T) {
+	fb := newFakeBroker(t)
+	fb.setHandler(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", brokerapi.ContentTypeJSON)
+		w.WriteHeader(http.StatusCreated)
+		_ = json.NewEncoder(w).Encode(brokerapi.ReservationResponse{ReservationID: "res-1"})
+	})
+	s, err := New(Options{
+		BindAddress: "127.0.0.1:0",
+		Client:      fb.buildClient(t),
+		LocalClient: newFakeKubeClient(),
+		ConsumerLocation: func() *ollama.Location {
+			return &ollama.Location{Latitude: 45.07, Longitude: 7.69}
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ts := httptest.NewServer(s.Handler())
+	t.Cleanup(ts.Close)
+
+	buf, _ := json.Marshal(brokerapi.ReservationRequest{ProviderClusterID: "p1", ChunkCount: 1,
+		ChunkType: brokerv1alpha1.ChunkTypeStandard, MaxLatencyMs: 5})
+	r, _ := http.NewRequestWithContext(context.Background(), http.MethodPost, ts.URL+"/local/reservations", bytes.NewReader(buf))
+	resp, err := ts.Client().Do(r)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = resp.Body.Close()
+	var got brokerapi.ReservationRequest
+	if err := json.Unmarshal(fb.body, &got); err != nil {
+		t.Fatal(err)
+	}
+	if got.ConsumerLocation == nil || got.ConsumerLocation.Latitude != 45.07 {
+		t.Fatalf("booking sent %+v; want the consumer's location", got.ConsumerLocation)
+	}
+}
